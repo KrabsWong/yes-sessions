@@ -5,10 +5,18 @@
  * Only renders visible items + small buffer for smooth scrolling
  */
 
-import { useRef, useMemo, useContext, createContext, useCallback, useEffect } from 'react';
+import {
+  useRef,
+  useMemo,
+  useContext,
+  createContext,
+  useCallback,
+  useEffect,
+  useState,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Folder } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, ChevronsDown, ChevronsUp, Folder } from 'lucide-react';
 import { MarqueeText } from '@/components/MarqueeText';
 import type { Session } from '@/types';
 
@@ -61,10 +69,61 @@ export function getSessionDirectoryGroupKey(session: Session, noDirectoryLabel: 
   return dir || noDirectoryLabel;
 }
 
+type SessionListItem =
+  | { type: 'header'; groupKey: string; isFirst: boolean }
+  | {
+      type: 'session';
+      session: Session;
+      groupKey: string;
+      childCount: number;
+      isSubAgent: boolean;
+      depth: number;
+    };
+
+function appendSessionItems(
+  items: SessionListItem[],
+  session: Session,
+  groupKey: string,
+  childrenByParent: Map<string, Session[]>,
+  expandedParentIds: Set<string>,
+  depth = 0,
+  ancestors = new Set<string>()
+): void {
+  if (ancestors.has(session.id)) return;
+  const nextAncestors = new Set(ancestors);
+  nextAncestors.add(session.id);
+  const children = childrenByParent.get(session.id) || [];
+  items.push({
+    type: 'session',
+    session,
+    groupKey,
+    childCount: children.length,
+    isSubAgent: depth > 0,
+    depth,
+  });
+  if (!expandedParentIds.has(session.id)) return;
+  for (const child of children) {
+    appendSessionItems(
+      items,
+      child,
+      groupKey,
+      childrenByParent,
+      expandedParentIds,
+      depth + 1,
+      nextAncestors
+    );
+  }
+}
+
 /**
  * Group sessions by date and prepare virtual list items
  */
-function useDateGroupedSessions(sessions: Session[], collapsedGroups: Set<string>) {
+function useDateGroupedSessions(
+  sessions: Session[],
+  collapsedGroups: Set<string>,
+  childrenByParent: Map<string, Session[]>,
+  expandedParentIds: Set<string>
+) {
   return useMemo(() => {
     // Group sessions by date
     const groups = new Map<string, Session[]>();
@@ -87,10 +146,7 @@ function useDateGroupedSessions(sessions: Session[], collapsedGroups: Set<string
     const sortedDates = Array.from(groups.keys()).sort((a, b) => b.localeCompare(a));
 
     // Build virtual list items
-    const items: Array<
-      | { type: 'header'; groupKey: string; isFirst: boolean }
-      | { type: 'session'; session: Session; groupKey: string }
-    > = [];
+    const items: SessionListItem[] = [];
 
     sortedDates.forEach((dateKey, index) => {
       // Add header
@@ -103,18 +159,14 @@ function useDateGroupedSessions(sessions: Session[], collapsedGroups: Set<string
       // Add sessions if not collapsed
       if (!collapsedGroups.has(dateKey)) {
         const dateSessions = groups.get(dateKey)!;
-        dateSessions.forEach((session) => {
-          items.push({
-            type: 'session',
-            session,
-            groupKey: dateKey,
-          });
-        });
+        dateSessions.forEach((session) =>
+          appendSessionItems(items, session, dateKey, childrenByParent, expandedParentIds)
+        );
       }
     });
 
     return { items, groups, sortedGroupKeys: sortedDates };
-  }, [sessions, collapsedGroups]);
+  }, [sessions, collapsedGroups, childrenByParent, expandedParentIds]);
 }
 
 /**
@@ -124,7 +176,9 @@ function useDateGroupedSessions(sessions: Session[], collapsedGroups: Set<string
 function useDirectoryGroupedSessions(
   sessions: Session[],
   collapsedGroups: Set<string>,
-  noDirectoryLabel: string
+  noDirectoryLabel: string,
+  childrenByParent: Map<string, Session[]>,
+  expandedParentIds: Set<string>
 ) {
   return useMemo(() => {
     // Group sessions by directory
@@ -154,10 +208,7 @@ function useDirectoryGroupedSessions(
     });
 
     // Build virtual list items
-    const items: Array<
-      | { type: 'header'; groupKey: string; isFirst: boolean }
-      | { type: 'session'; session: Session; groupKey: string }
-    > = [];
+    const items: SessionListItem[] = [];
 
     sortedDirs.forEach((dirKey, index) => {
       // Add header
@@ -170,18 +221,14 @@ function useDirectoryGroupedSessions(
       // Add sessions if not collapsed
       if (!collapsedGroups.has(dirKey)) {
         const dirSessions = groups.get(dirKey)!;
-        dirSessions.forEach((session) => {
-          items.push({
-            type: 'session',
-            session,
-            groupKey: dirKey,
-          });
-        });
+        dirSessions.forEach((session) =>
+          appendSessionItems(items, session, dirKey, childrenByParent, expandedParentIds)
+        );
       }
     });
 
     return { items, groups, sortedGroupKeys: sortedDirs };
-  }, [sessions, collapsedGroups, noDirectoryLabel]);
+  }, [sessions, collapsedGroups, noDirectoryLabel, childrenByParent, expandedParentIds]);
 }
 
 /**
@@ -381,9 +428,24 @@ interface SessionCardProps {
   isSelected: boolean;
   onClick: () => void;
   viewMode: ViewMode;
+  childCount: number;
+  isSubAgent: boolean;
+  isChildrenExpanded: boolean;
+  onToggleChildren: () => void;
+  depth: number;
 }
 
-function SessionCard({ session, isSelected, onClick, viewMode }: SessionCardProps) {
+function SessionCard({
+  session,
+  isSelected,
+  onClick,
+  viewMode,
+  childCount,
+  isSubAgent,
+  isChildrenExpanded,
+  onToggleChildren,
+  depth,
+}: SessionCardProps) {
   const { t, i18n } = useTranslation();
   // Format date + time for directory view (MM/DD HH:MM)
   const formatDateTime = (timestamp: number) => {
@@ -397,28 +459,45 @@ function SessionCard({ session, isSelected, onClick, viewMode }: SessionCardProp
   };
 
   return (
-    <button
-      onClick={onClick}
+    <div
       data-testid="session-card"
       data-session-id={session.id}
-      className={`w-full text-left py-1.5 px-2 rounded transition-all duration-150 relative group min-w-0 app-chrome ${
+      data-session-kind={isSubAgent ? 'subagent' : 'main'}
+      style={
+        isSubAgent
+          ? {
+              marginLeft: `${Math.min(depth, 4) * 20}px`,
+              width: `calc(100% - ${Math.min(depth, 4) * 20}px)`,
+            }
+          : undefined
+      }
+      className={`w-full flex items-center rounded transition-all duration-150 relative group min-w-0 app-chrome ${
         isSelected
           ? 'bg-primary-light text-primary shadow-sm'
           : 'hover:bg-accent/30 text-foreground'
-      }`}
+      } ${isSubAgent ? 'border-l border-purple-300/60 dark:border-purple-700/60' : ''}`}
     >
       {/* Left indicator bar for selected state - full height */}
       {isSelected && (
         <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-primary rounded-r-full" />
       )}
 
-      {/* Title row: Message Preview + Time/Count */}
-      <div className="flex items-center justify-between gap-2 min-w-0">
+      <button
+        onClick={onClick}
+        className="flex flex-1 items-center gap-2 min-w-0 py-1.5 px-2 text-left"
+      >
+        {isSubAgent && <Bot className="h-3.5 w-3.5 shrink-0 text-purple-500" />}
         {/* Title: First Message Preview with Marquee */}
         <MarqueeText
           text={session.firstMessage || session.fileName || t('sessions.untitledSession')}
           className={`text-xs flex-1 min-w-0 ${isSelected ? 'text-primary' : 'text-muted-foreground'}`}
         />
+
+        {isSubAgent && session.agentType && (
+          <span className="shrink-0 rounded bg-purple-100 px-1.5 py-0.5 text-[10px] text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+            {session.agentType}
+          </span>
+        )}
 
         {/* Time - show only in directory mode */}
         {viewMode === 'directory' && (
@@ -432,8 +511,26 @@ function SessionCard({ session, isSelected, onClick, viewMode }: SessionCardProp
             </span>
           </div>
         )}
-      </div>
-    </button>
+      </button>
+
+      {childCount > 0 && (
+        <button
+          type="button"
+          data-testid="toggle-subagents"
+          onClick={onToggleChildren}
+          className="mr-1 flex shrink-0 items-center gap-0.5 rounded px-1.5 py-1 text-[10px] text-purple-600 hover:bg-purple-100 dark:text-purple-300 dark:hover:bg-purple-900/40"
+          title={t('sessions.subAgentCount', { count: childCount })}
+        >
+          {isChildrenExpanded ? (
+            <ChevronDown className="h-3.5 w-3.5" />
+          ) : (
+            <ChevronRight className="h-3.5 w-3.5" />
+          )}
+          <Bot className="h-3 w-3" />
+          <span>{childCount}</span>
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -458,10 +555,50 @@ export function VirtualSessionList({
   const { t } = useTranslation();
   const parentRef = useRef<HTMLDivElement>(null);
   const noDirectoryLabel = t('sessions.noDirectoryGroup', '— No Directory —');
+  const [expandedParentIds, setExpandedParentIds] = useState<Set<string>>(new Set());
+  const { mainSessions, childrenByParent } = useMemo(() => {
+    const main: Session[] = [];
+    const children = new Map<string, Session[]>();
+    for (const session of sessions) {
+      if (session.kind !== 'subagent') {
+        main.push(session);
+        continue;
+      }
+      if (!session.parentSessionId) continue;
+      const siblings = children.get(session.parentSessionId) || [];
+      siblings.push(session);
+      children.set(session.parentSessionId, siblings);
+    }
+    for (const siblings of children.values()) {
+      siblings.sort((a, b) => a.createdAt - b.createdAt);
+    }
+    return { mainSessions: main, childrenByParent: children };
+  }, [sessions]);
+
+  useEffect(() => {
+    if (selectedSession?.kind !== 'subagent' || !selectedSession.parentSessionId) return;
+    setExpandedParentIds((previous) => {
+      if (previous.has(selectedSession.parentSessionId!)) return previous;
+      const next = new Set(previous);
+      next.add(selectedSession.parentSessionId!);
+      return next;
+    });
+  }, [selectedSession]);
 
   // Use appropriate grouping based on view mode
-  const dateGrouped = useDateGroupedSessions(sessions, collapsedGroups);
-  const dirGrouped = useDirectoryGroupedSessions(sessions, collapsedGroups, noDirectoryLabel);
+  const dateGrouped = useDateGroupedSessions(
+    mainSessions,
+    collapsedGroups,
+    childrenByParent,
+    expandedParentIds
+  );
+  const dirGrouped = useDirectoryGroupedSessions(
+    mainSessions,
+    collapsedGroups,
+    noDirectoryLabel,
+    childrenByParent,
+    expandedParentIds
+  );
 
   const { items } = viewMode === 'date' ? dateGrouped : dirGrouped;
 
@@ -472,7 +609,7 @@ export function VirtualSessionList({
     estimateSize: useCallback(
       (index: number) => {
         const item = items[index];
-        return item.type === 'header' ? 40 : 36; // Header: 40px, Session: 36px
+        return item.type === 'header' ? 40 : item.isSubAgent ? 40 : 36;
       },
       [items]
     ),
@@ -501,11 +638,7 @@ export function VirtualSessionList({
     >
       <div className="h-full flex flex-col">
         {/* Virtual List */}
-        <div
-          ref={parentRef}
-          className="flex-1 overflow-auto"
-          style={{ contain: 'strict' }}
-        >
+        <div ref={parentRef} className="flex-1 overflow-auto" style={{ contain: 'strict' }}>
           <div
             style={{
               height: `${virtualizer.getTotalSize()}px`,
@@ -554,6 +687,18 @@ export function VirtualSessionList({
                       isSelected={selectedSession?.id === item.session.id}
                       onClick={() => onSelect(item.session)}
                       viewMode={viewMode}
+                      childCount={item.childCount}
+                      isSubAgent={item.isSubAgent}
+                      depth={item.depth}
+                      isChildrenExpanded={expandedParentIds.has(item.session.id)}
+                      onToggleChildren={() =>
+                        setExpandedParentIds((previous) => {
+                          const next = new Set(previous);
+                          if (next.has(item.session.id)) next.delete(item.session.id);
+                          else next.add(item.session.id);
+                          return next;
+                        })
+                      }
                     />
                   )}
                 </div>

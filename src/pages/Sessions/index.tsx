@@ -8,11 +8,14 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   AlertCircle,
+  ArrowLeft,
+  Bot,
   Play,
   AlertTriangle,
   ChevronUp,
   ExternalLink,
   Folder,
+  Info,
   RefreshCw,
 } from 'lucide-react';
 import { useSidebarResize } from '@/hooks/useSidebarResize';
@@ -55,9 +58,17 @@ function truncateText(text: string, maxLength: number): string {
   return text.substring(0, maxLength).trim() + '...';
 }
 
+function formatCount(value: number, language: string): string {
+  return new Intl.NumberFormat(language).format(value);
+}
+
 export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
   const { t, i18n } = useTranslation();
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
+  const [pendingSubAgentTarget, setPendingSubAgentTarget] = useState<{
+    sessionId: string;
+    appType: AppType;
+  } | null>(null);
 
   // Sidebar collapse state
   const { sidebarCollapsed } = useSettingsStore();
@@ -117,38 +128,101 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
   }, [selectedSession, showNewMessagesTip]); // Re-bind when session or tip visibility changes
 
   const { data: sessions, isLoading, error } = useSessions(selectedApp);
+  const mainSessions = useMemo(
+    () => sessions?.filter((session) => session.kind !== 'subagent') || [],
+    [sessions]
+  );
   const stats = useMemo(() => {
     if (!sessions) return null;
     return {
-      totalSessions: sessions.length,
+      totalSessions: mainSessions.length,
+      subAgentSessions: sessions.length - mainSessions.length,
       totalMessages: sessions.reduce((sum, session) => sum + session.messageCount, 0),
     };
-  }, [sessions]);
+  }, [sessions, mainSessions]);
   const { data: supportStatus } = useSessionSupportStatus(selectedApp);
-  const { data: sessionDetail, isLoading: isLoadingDetail } = useSessionDetail(
-    selectedSession?.id || '',
-    selectedApp,
-    selectedSession?.updatedAt
-  );
+  const {
+    data: sessionDetail,
+    isLoading: isLoadingDetail,
+    isError: isSessionDetailError,
+  } = useSessionDetail(selectedSession?.id || '', selectedApp, selectedSession?.updatedAt);
   const { data: terminalInfo } = useTerminalInfo();
   const resumeMutation = useResumeSession();
 
   // Auto-select first session when sessions are loaded
   useEffect(() => {
-    if (sessions && sessions.length > 0 && !selectedSession) {
-      setSelectedSession(sessions[0]);
+    if (mainSessions.length > 0 && !selectedSession) {
+      setSelectedSession(mainSessions[0]);
     }
-  }, [sessions, selectedSession]);
+  }, [mainSessions, selectedSession]);
 
   // Reset selected session when app changes
   useEffect(() => {
     setSelectedSession(null);
   }, [selectedApp]);
 
+  useEffect(() => {
+    if (!pendingSubAgentTarget || pendingSubAgentTarget.appType !== selectedApp || !sessions) {
+      return;
+    }
+    const matchingSession = sessions.find(
+      (session) =>
+        session.id === pendingSubAgentTarget.sessionId ||
+        session.uuid === pendingSubAgentTarget.sessionId
+    );
+    setSelectedSession(
+      matchingSession || {
+        id: pendingSubAgentTarget.sessionId,
+        appType: pendingSubAgentTarget.appType,
+        fileName: pendingSubAgentTarget.sessionId,
+        filePath: '',
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messageCount: 0,
+        kind: 'subagent',
+      }
+    );
+    setPendingSubAgentTarget(null);
+  }, [pendingSubAgentTarget, selectedApp, sessions]);
+
   const isSupported = supportStatus?.supported ?? false;
+  const parentSession =
+    selectedSession?.kind === 'subagent' && selectedSession.parentSessionId
+      ? sessions?.find(
+          (session) =>
+            session.id === selectedSession.parentSessionId ||
+            session.uuid === selectedSession.parentSessionId
+        )
+      : undefined;
 
   const handleSessionSelect = (session: Session) => {
     setSelectedSession(session);
+  };
+
+  const handleViewSubAgentSession = (sessionId: string, appType: string) => {
+    if (!APP_ORDER.includes(appType as AppType)) return;
+    const targetApp = appType as AppType;
+    if (targetApp !== selectedApp) {
+      setPendingSubAgentTarget({ sessionId, appType: targetApp });
+      onAppChange(targetApp);
+      return;
+    }
+    const matchingSession = sessions?.find(
+      (session) => session.id === sessionId || session.uuid === sessionId
+    );
+    setSelectedSession(
+      matchingSession || {
+        id: sessionId,
+        appType,
+        fileName: sessionId,
+        filePath: '',
+        directory: selectedSession?.directory,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+        messageCount: 0,
+        kind: 'subagent',
+      }
+    );
   };
 
   // Toggle collapse state for a group
@@ -167,9 +241,9 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
   // Expand/collapse all groups
   const expandAll = () => setCollapsedGroups(new Set());
   const collapseAll = () => {
-    if (!sessions) return;
+    if (mainSessions.length === 0) return;
     const allGroups = new Set<string>();
-    sessions.forEach((session) => {
+    mainSessions.forEach((session) => {
       const groupKey =
         viewMode === 'date'
           ? formatSessionDateGroupKey(session.updatedAt)
@@ -181,10 +255,10 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
 
   const allExpanded = collapsedGroups.size === 0;
   const allCollapsed =
-    sessions && sessions.length > 0
+    mainSessions.length > 0
       ? collapsedGroups.size ===
         new Set(
-          sessions.map((s) =>
+          mainSessions.map((s) =>
             viewMode === 'date'
               ? formatSessionDateGroupKey(s.updatedAt)
               : getSessionDirectoryGroupKey(s, t('sessions.noDirectoryGroup'))
@@ -205,9 +279,9 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
 
   // Check if an external terminal supports resume.
   const canResume =
-    (terminalInfo?.ghosttyInstalled ||
-      terminalInfo?.kittyInstalled ||
-      terminalInfo?.preferred === 'terminal');
+    terminalInfo?.ghosttyInstalled ||
+    terminalInfo?.kittyInstalled ||
+    terminalInfo?.preferred === 'terminal';
 
   const handleOpenFilePreview = async () => {
     if (!selectedSession?.directory) return;
@@ -275,22 +349,49 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
             </div>
 
             {/* List Header */}
-            <div className="flex items-center justify-between px-3 py-1.5 border-b border-border/40 bg-card">
+            <div className="flex items-center justify-between gap-3 px-3 py-1.5 border-b border-border/40 bg-card">
               {/* Stats */}
               {isSupported && stats && (
-                <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                  <span>
-                    {stats.totalSessions} {t('sessions.sessionsLabel')}
-                  </span>
-                  <span className="text-border">·</span>
-                  <span>
-                    {stats.totalMessages} {t('sessions.messagesLabel')}
-                  </span>
-                </div>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        data-testid="session-stats-trigger"
+                        aria-label={t('sessions.sessionStatistics')}
+                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <Info className="h-4 w-4" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      data-testid="session-stats-tooltip"
+                      side="bottom"
+                      align="start"
+                      className="w-44 border border-border bg-popover p-3 text-popover-foreground shadow-md"
+                    >
+                      <p className="mb-2 font-medium">{t('sessions.sessionStatistics')}</p>
+                      <dl className="space-y-1.5 tabular-nums">
+                        <div className="flex items-center justify-between gap-4">
+                          <dt className="text-muted-foreground">{t('sessions.totalSessions')}</dt>
+                          <dd>{formatCount(stats.totalSessions, i18n.language)}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <dt className="text-muted-foreground">{t('sessions.subAgent')}</dt>
+                          <dd>{formatCount(stats.subAgentSessions, i18n.language)}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <dt className="text-muted-foreground">{t('sessions.totalMessages')}</dt>
+                          <dd>{formatCount(stats.totalMessages, i18n.language)}</dd>
+                        </div>
+                      </dl>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               )}
 
               {/* View Mode Toggle - Icon buttons */}
-              <div className="flex items-center bg-primary-muted rounded-md p-0.5">
+              <div className="ml-auto flex shrink-0 items-center rounded-md bg-primary-muted p-0.5">
                 <button
                   onClick={() => setViewMode('date')}
                   className={`px-2 py-1 text-[10px] font-medium rounded-sm transition-all ${
@@ -400,6 +501,13 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
                 <div className="flex-1 min-w-0">
                   {/* Title row */}
                   <div className="flex items-center gap-2">
+                    {selectedSession.kind === 'subagent' && (
+                      <span className="inline-flex shrink-0 items-center gap-1 rounded bg-purple-100 px-2 py-1 text-xs font-medium text-purple-700 dark:bg-purple-900/40 dark:text-purple-300">
+                        <Bot className="h-3.5 w-3.5" />
+                        {t('sessions.subAgent')}
+                        {selectedSession.agentType && ` · ${selectedSession.agentType}`}
+                      </span>
+                    )}
                     <h3 className="font-semibold truncate">
                       {selectedSession.firstMessage
                         ? truncateText(selectedSession.firstMessage, 100)
@@ -409,6 +517,16 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
 
                   {/* Metadata row - Session ID, Work */}
                   <div className="flex flex-col gap-1 mt-2">
+                    {selectedSession.kind === 'subagent' && parentSession && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedSession(parentSession)}
+                        className="flex w-fit items-center gap-1.5 text-xs text-purple-600 hover:text-purple-700 dark:text-purple-300 dark:hover:text-purple-200"
+                      >
+                        <ArrowLeft className="h-3.5 w-3.5" />
+                        {t('sessions.backToParentSession')}
+                      </button>
+                    )}
                     {/* Session ID with Resume Button */}
                     {selectedSession.id && (
                       <div className="flex items-center gap-2">
@@ -425,45 +543,47 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
                           {selectedSession.id}
                         </button>
                         {/* Resume Button - small, right after Session ID */}
-                        <TooltipProvider delayDuration={200}>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Button
-                                variant="default"
-                                size="sm"
-                                className="h-6 px-2 py-0 text-[10px] flex items-center gap-1 shrink-0 bg-foreground text-background hover:bg-foreground/90 ml-1"
-                                onClick={handleResumeSession}
-                                disabled={!canResume || resumeMutation.isPending}
-                              >
-                                {resumeMutation.isPending ? (
-                                  <>
-                                    <RefreshCw className="h-3 w-3 animate-spin" />
-                                    <span>{t('sessions.resuming')}</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Play className="h-3 w-3" />
-                                    <span>{t('sessions.resume')}</span>
-                                  </>
-                                )}
-                              </Button>
-                            </TooltipTrigger>
-                            <TooltipContent side="bottom">
-                              <p>
-                                {!canResume
-                                  ? t('sessions.installTerminalTip')
-                                  : t('sessions.resumeInTerminal', {
-                                      terminal:
-                                        terminalInfo?.preferred === 'ghostty'
-                                          ? 'Ghostty'
-                                          : terminalInfo?.preferred === 'kitty'
-                                            ? 'Kitty'
-                                            : 'Terminal',
-                                    })}
-                              </p>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
+                        {selectedSession.kind !== 'subagent' && (
+                          <TooltipProvider delayDuration={200}>
+                            <Tooltip>
+                              <TooltipTrigger asChild>
+                                <Button
+                                  variant="default"
+                                  size="sm"
+                                  className="h-6 px-2 py-0 text-[10px] flex items-center gap-1 shrink-0 bg-foreground text-background hover:bg-foreground/90 ml-1"
+                                  onClick={handleResumeSession}
+                                  disabled={!canResume || resumeMutation.isPending}
+                                >
+                                  {resumeMutation.isPending ? (
+                                    <>
+                                      <RefreshCw className="h-3 w-3 animate-spin" />
+                                      <span>{t('sessions.resuming')}</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Play className="h-3 w-3" />
+                                      <span>{t('sessions.resume')}</span>
+                                    </>
+                                  )}
+                                </Button>
+                              </TooltipTrigger>
+                              <TooltipContent side="bottom">
+                                <p>
+                                  {!canResume
+                                    ? t('sessions.installTerminalTip')
+                                    : t('sessions.resumeInTerminal', {
+                                        terminal:
+                                          terminalInfo?.preferred === 'ghostty'
+                                            ? 'Ghostty'
+                                            : terminalInfo?.preferred === 'kitty'
+                                              ? 'Kitty'
+                                              : 'Terminal',
+                                      })}
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </TooltipProvider>
+                        )}
                       </div>
                     )}
 
@@ -533,11 +653,19 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
                       {t('sessions.loadingConversation')}
                     </div>
                   </div>
+                ) : isSessionDetailError ? (
+                  <div className="flex items-center justify-center h-full text-destructive">
+                    <div className="flex flex-col items-center gap-2">
+                      <AlertCircle className="h-8 w-8 opacity-70" />
+                      <p>{t('sessions.error')}</p>
+                    </div>
+                  </div>
                 ) : sessionDetail?.messages && sessionDetail.messages.length > 0 ? (
                   <>
                     <ConversationView
                       messages={sessionDetail.messages}
                       appType={selectedApp}
+                      onViewSubAgentSession={handleViewSubAgentSession}
                       onNewMessages={(count, isAtBottom) => {
                         if (!isAtBottom) {
                           // User is not at bottom, show tip

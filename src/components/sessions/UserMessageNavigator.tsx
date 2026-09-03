@@ -25,10 +25,14 @@ const MAX_VISIBLE_ITEMS = 8;
 function extractUserMessages(messages: SessionMessage[]): UserMessageItem[] {
   return messages
     .map((msg, originalIndex) => ({ msg, originalIndex }))
-    .filter(({ msg }) => msg.type === 'user' && msg.content && msg.content.trim().length > 0)
+    .filter(
+      ({ msg }) =>
+        msg.type === 'user' &&
+        Boolean((msg.content || msg.redacted_content || '').trim().length > 0)
+    )
     .map(({ msg, originalIndex }) => ({
       originalIndex,
-      content: msg.content || '',
+      content: msg.content || msg.redacted_content || '',
       timestamp: msg.timestamp,
     }));
 }

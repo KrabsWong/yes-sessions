@@ -56,12 +56,14 @@ async function createCodebuddyFixture(options: { withGitChanges?: boolean } = {}
   projectDir: string;
   packagePath: string;
   sessionId: string;
+  childSessionId: string;
 }> {
   const homeDir = await mkdtemp(path.join(os.tmpdir(), 'yes-sessions-e2e-home-'));
   const projectDir = path.join(homeDir, 'fixture-project');
   const packagePath = path.join(projectDir, 'package.json');
   const codebuddyProjectDir = path.join(homeDir, '.codebuddy', 'projects', 'fixture-project');
   const sessionId = 'fixture-session';
+  const childSessionId = 'agent-fixture-child';
   const start = Date.UTC(2026, 4, 25, 9, 0, 0);
 
   await mkdir(projectDir, { recursive: true });
@@ -80,13 +82,57 @@ async function createCodebuddyFixture(options: { withGitChanges?: boolean } = {}
 
   const lines = [
     {
+      id: 'command-caveat',
+      timestamp: start - 3,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [
+        {
+          type: 'input_text',
+          text: '<system-reminder data-role="command-caveat">Ignore local command messages.</system-reminder>',
+        },
+      ],
+    },
+    {
+      id: 'command-name',
+      timestamp: start - 2,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [{ type: 'input_text', text: '<command-name>/clear</command-name>' }],
+    },
+    {
+      id: 'command-output',
+      timestamp: start - 1,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [{ type: 'input_text', text: '<local-command-stdout></local-command-stdout>' }],
+    },
+    {
+      id: 'command-error',
+      timestamp: start - 1,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [
+        { type: 'input_text', text: '<local-command-stderr>hidden error</local-command-stderr>' },
+      ],
+    },
+    {
       id: 'm1',
       timestamp: start,
       type: 'message',
       role: 'user',
       cwd: projectDir,
       providerData: { model: 'fixture-model' },
-      content: [{ type: 'input_text', text: 'Summarize fixture project' }],
+      content: [
+        {
+          type: 'input_text',
+          text: '<system-reminder data-role="command-caveat">Ignore this.</system-reminder>\nSummarize fixture project',
+        },
+      ],
     },
     {
       id: 'call-1',
@@ -111,11 +157,60 @@ async function createCodebuddyFixture(options: { withGitChanges?: boolean } = {}
       role: 'assistant',
       content: [{ type: 'output_text', text: 'Fixture package is yes-sessions.' }],
     },
+    {
+      id: 'agent-call',
+      timestamp: start + 4000,
+      type: 'function_call',
+      name: 'Agent',
+      callId: 'agent-call',
+      arguments: JSON.stringify({
+        description: 'Inspect fixture rendering',
+        subagent_type: 'Explore',
+      }),
+    },
+    {
+      id: 'agent-result',
+      timestamp: start + 5000,
+      type: 'function_call_result',
+      name: 'Agent',
+      callId: 'agent-call',
+      status: 'completed',
+      output: { type: 'text', text: 'Fixture sub-agent completed.' },
+      providerData: { toolResult: { subAgent: { sessionId: childSessionId } } },
+    },
   ];
 
   await writeFile(
     path.join(codebuddyProjectDir, `${sessionId}.jsonl`),
     lines.map((line) => JSON.stringify(line)).join('\n')
+  );
+  const childDir = path.join(codebuddyProjectDir, sessionId, 'subagents');
+  await mkdir(childDir, { recursive: true });
+  await writeFile(
+    path.join(childDir, `${childSessionId}.jsonl`),
+    [
+      {
+        id: 'child-user',
+        sessionId: 'fixture-child-internal-session',
+        timestamp: start + 4100,
+        type: 'message',
+        role: 'user',
+        cwd: projectDir,
+        content: [{ type: 'input_text', text: 'Inspect fixture rendering deeply' }],
+        providerData: { isSubAgent: true, agent: 'Explore', model: 'fixture-model' },
+      },
+      {
+        id: 'child-assistant',
+        sessionId: 'fixture-child-internal-session',
+        timestamp: start + 4900,
+        type: 'message',
+        role: 'assistant',
+        content: [{ type: 'output_text', text: 'Nested fixture investigation result.' }],
+        providerData: { isSubAgent: true, agent: 'Explore', model: 'fixture-model' },
+      },
+    ]
+      .map((line) => JSON.stringify(line))
+      .join('\n')
   );
 
   return {
@@ -123,6 +218,7 @@ async function createCodebuddyFixture(options: { withGitChanges?: boolean } = {}
     projectDir: await realpath(projectDir),
     packagePath: await realpath(packagePath),
     sessionId,
+    childSessionId,
   };
 }
 
@@ -472,20 +568,62 @@ test('renders a fixture Codebuddy session from list to conversation detail', asy
   try {
     const mainWindow = await waitForMainWindow(electronApp);
     await selectCodebuddyApp(mainWindow);
+    const statsTrigger = mainWindow.getByTestId('session-stats-trigger');
+    const statsTooltip = mainWindow.getByTestId('session-stats-tooltip');
+    await statsTrigger.focus();
+    await expect(statsTooltip).toBeVisible();
+    await statsTrigger.evaluate((element) => (element as HTMLElement).blur());
+    await expect(statsTooltip).toBeHidden();
+    await statsTrigger.hover();
+    await expect(statsTooltip).toBeVisible();
+    await expect(statsTooltip).toContainText(/Session statistics|会话统计/);
+    await expect(statsTooltip).toContainText(/Total Sessions|会话总数/);
+    await expect(statsTooltip).toContainText(/Sub Agent|子 Agent/);
+    await expect(statsTooltip).toContainText(/Total Messages|消息总数/);
     const sessionCard = mainWindow.locator(
       `[data-testid="session-card"][data-session-id="${fixture.sessionId}"]`
     );
 
     await expect(sessionCard).toBeVisible();
     await expect(sessionCard).toContainText('Summarize fixture project');
+    await expect(sessionCard).not.toContainText('command-caveat');
+    await expect(
+      mainWindow.locator(
+        `[data-testid="session-card"][data-session-id="${fixture.childSessionId}"]`
+      )
+    ).toHaveCount(0);
 
-    await sessionCard.click();
+    await sessionCard.getByTestId('toggle-subagents').click();
+    const childSessionCard = mainWindow.locator(
+      `[data-testid="session-card"][data-session-id="${fixture.childSessionId}"]`
+    );
+    await expect(childSessionCard).toBeVisible();
+    await expect(childSessionCard).toContainText('Explore');
+
+    await sessionCard.locator('button').first().click();
 
     const conversation = mainWindow.getByTestId('conversation-detail');
     await expect(conversation).toContainText('Summarize fixture project');
+    await expect(conversation).not.toContainText('command-caveat');
     await expect(conversation).toContainText('Read');
     await expect(conversation).toContainText('package.json');
     await expect(conversation).toContainText('Fixture package is yes-sessions.');
+    await expect(conversation).toContainText(/Sub Agent|子 Agent/);
+    await expect(conversation).toContainText('Explore');
+
+    await conversation
+      .getByRole('button', { name: /Expand sub-agent conversation|展开子 Agent 对话/ })
+      .click();
+    await expect(conversation).toContainText('Nested fixture investigation result.');
+
+    await conversation
+      .getByRole('button', { name: /View Sub-Agent Session|查看子 Agent 会话/ })
+      .click();
+    await expect(mainWindow.getByText(/Back to parent session|返回主会话/)).toBeVisible();
+    await expect(conversation).toContainText('Nested fixture investigation result.');
+
+    await mainWindow.getByRole('button', { name: /Back to parent session|返回主会话/ }).click();
+    await expect(conversation).toContainText('Summarize fixture project');
   } finally {
     await electronApp.close();
     await rm(fixture.homeDir, { recursive: true, force: true });

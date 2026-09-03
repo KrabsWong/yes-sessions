@@ -43,6 +43,9 @@ export interface Session {
   lastMessage?: string;
   directory?: string;
   uuid?: string;
+  kind?: 'main' | 'subagent';
+  parentSessionId?: string;
+  agentType?: string;
 }
 
 export interface SessionDetail extends Session {

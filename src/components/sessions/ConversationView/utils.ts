@@ -114,7 +114,6 @@ export function groupMessagesIntoTurns(
   const turns: MessageTurn[] = [];
   let currentTurn: MessageTurn | null = null;
   let pendingToolCalls: SessionMessage[] = [];
-  const isClaudeCode = appType === 'claude';
   type ToolCallPair = MessageTurn['toolCalls'][number];
   const pendingPairs: ToolCallPair[] = [];
   const pendingByCallId = new Map<string, ToolCallPair>();
@@ -236,10 +235,16 @@ export function groupMessagesIntoTurns(
             (tc) => tc.tool_name === message.tool_name
           );
           if (pendingIndex >= 0) {
-            currentTurn.toolCalls[pendingIndex].toolResult = message;
-            forgetPendingPair(currentTurn.toolCalls[pendingIndex]);
+            const pendingMessage = pendingToolCalls[pendingIndex];
+            const pendingPair = currentTurn.toolCalls.find(
+              (pair) => pair.toolUse === pendingMessage && !pair.toolResult
+            );
+            if (pendingPair) {
+              pendingPair.toolResult = message;
+              forgetPendingPair(pendingPair);
+              matched = true;
+            }
             pendingToolCalls.splice(pendingIndex, 1);
-            matched = true;
           } else {
             const firstPending = currentTurn.toolCalls.find((tc) => !tc.toolResult);
             if (firstPending) {
@@ -300,19 +305,39 @@ export function groupMessagesIntoTurns(
         if (currentTurn) {
           const nextMessage = messages[i + 1];
           const isMultiMessageTurn =
-            isClaudeCode &&
+            appType === 'claude' &&
             nextMessage &&
             (nextMessage.type === 'assistant' || nextMessage.type === 'tool_use');
 
           if (currentTurn.assistantMessage) {
             if (message.reasoning_content) {
-              currentTurn.assistantMessage.reasoning_content = message.reasoning_content;
+              currentTurn.assistantMessage.reasoning_content = [
+                currentTurn.assistantMessage.reasoning_content,
+                message.reasoning_content,
+              ]
+                .filter(Boolean)
+                .join('\n\n');
             }
             if (message.content) {
-              currentTurn.assistantMessage.content = message.content;
+              currentTurn.assistantMessage.content = [
+                currentTurn.assistantMessage.content,
+                message.content,
+              ]
+                .filter(Boolean)
+                .join('\n\n');
             }
+            if (message.redacted_content) {
+              currentTurn.assistantMessage.redacted_content = [
+                currentTurn.assistantMessage.redacted_content,
+                message.redacted_content,
+              ]
+                .filter(Boolean)
+                .join('\n\n');
+            }
+            currentTurn.assistantMessageCount = (currentTurn.assistantMessageCount || 1) + 1;
           } else {
-            currentTurn.assistantMessage = message;
+            currentTurn.assistantMessage = { ...message };
+            currentTurn.assistantMessageCount = 1;
           }
 
           if (!isMultiMessageTurn) {
@@ -324,6 +349,7 @@ export function groupMessagesIntoTurns(
             userMessage: null,
             toolCalls: [],
             assistantMessage: message,
+            assistantMessageCount: 1,
             systemMessages: [],
           });
         }
@@ -353,7 +379,7 @@ export function groupMessagesIntoTurnsWithCount(
       if (tc.toolUse) messageCount++;
       if (tc.toolResult) messageCount++;
     }
-    if (turn.assistantMessage) messageCount++;
+    if (turn.assistantMessage) messageCount += turn.assistantMessageCount || 1;
     messageCount += turn.systemMessages.length;
     return { ...turn, messageCount };
   });

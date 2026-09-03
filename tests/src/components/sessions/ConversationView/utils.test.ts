@@ -86,6 +86,36 @@ describe('ConversationView utils', () => {
     expect(turns[0].toolCalls[0].toolResult?.callId).toBe('call-2');
   });
 
+  it('matches multiple tool results without call IDs to distinct pending calls', () => {
+    const messages: SessionMessage[] = [
+      message({ type: 'user', content: 'run tools' }),
+      message({ type: 'tool_use', tool_name: 'read', tool_input: { path: 'a' } }),
+      message({ type: 'tool_use', tool_name: 'read', tool_input: { path: 'b' } }),
+      message({ type: 'tool_result', tool_name: 'read', tool_output: { output: 'a' } }),
+      message({ type: 'tool_result', tool_name: 'read', tool_output: { output: 'b' } }),
+    ];
+
+    const turns = groupMessagesIntoTurns(messages);
+
+    expect(turns[0].toolCalls[0].toolResult?.tool_output?.output).toBe('a');
+    expect(turns[0].toolCalls[1].toolResult?.tool_output?.output).toBe('b');
+  });
+
+  it('preserves consecutive Claude assistant content when grouping', () => {
+    const messages: SessionMessage[] = [
+      message({ type: 'user', content: 'work' }),
+      message({ type: 'assistant', content: 'Before tool' }),
+      message({ type: 'tool_use', tool_name: 'read', tool_input: {} }),
+      message({ type: 'assistant', content: 'After tool' }),
+    ];
+
+    const turns = groupMessagesIntoTurnsWithCount(messages, 'claude');
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0].assistantMessage?.content).toBe('Before tool\n\nAfter tool');
+    expect(turns[0].messageCount).toBe(4);
+  });
+
   it('counts grouped messages consistently for normal turns', () => {
     const messages: SessionMessage[] = [
       message({ type: 'user', content: 'hello' }),

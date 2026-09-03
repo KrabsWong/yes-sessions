@@ -31,7 +31,7 @@ vi.mock('@/components/MarqueeText', () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const sessions: Session[] = [
+const baseSessions: Session[] = [
   {
     id: 'newer',
     appType: 'codebuddy',
@@ -59,17 +59,24 @@ const sessions: Session[] = [
 interface HarnessProps {
   viewMode?: ViewMode;
   onSelect?: (session: Session) => void;
+  sessions?: Session[];
 }
 
-function Harness({ viewMode = 'date', onSelect = () => undefined }: HarnessProps) {
+function Harness({
+  viewMode = 'date',
+  onSelect = () => undefined,
+  sessions = baseSessions,
+}: HarnessProps) {
   const [collapsedGroups, setCollapsedGroups] = useState<Set<string>>(new Set());
 
   const groupKeys = new Set(
-    sessions.map((session) =>
-      viewMode === 'date'
-        ? formatSessionDateGroupKey(session.updatedAt)
-        : getSessionDirectoryGroupKey(session, '— No Directory —')
-    )
+    sessions
+      .filter((session) => session.kind !== 'subagent')
+      .map((session) =>
+        viewMode === 'date'
+          ? formatSessionDateGroupKey(session.updatedAt)
+          : getSessionDirectoryGroupKey(session, '— No Directory —')
+      )
   );
 
   return (
@@ -168,6 +175,68 @@ describe('VirtualSessionList', () => {
     expect(container.textContent).toContain('lib');
     expect(container.textContent).toContain('Newest request');
     expect(container.textContent).toContain('Older request');
+    unmount(root);
+  });
+
+  it('nests sub-agent sessions under their parent and exposes their type', () => {
+    const onSelect = vi.fn();
+    const child: Session = {
+      id: 'agent-child',
+      appType: 'codebuddy',
+      fileName: 'agent-child.jsonl',
+      filePath: '/repo/app/newer/subagents/agent-child.jsonl',
+      createdAt: Date.UTC(2024, 0, 2, 8, 30),
+      updatedAt: Date.UTC(2024, 0, 2, 9, 30),
+      messageCount: 3,
+      firstMessage: 'Inspect the renderer',
+      directory: '/repo/app',
+      kind: 'subagent',
+      parentSessionId: 'newer',
+      agentType: 'Explore',
+    };
+    const { container, root } = render(
+      <Harness
+        sessions={[
+          ...baseSessions,
+          child,
+          {
+            ...child,
+            id: 'agent-grandchild',
+            fileName: 'agent-grandchild.jsonl',
+            firstMessage: 'Plan nested work',
+            parentSessionId: 'agent-child',
+            agentType: 'Plan',
+          },
+        ]}
+        onSelect={onSelect}
+      />
+    );
+
+    expect(container.textContent).not.toContain('Inspect the renderer');
+    const parentCard = container.querySelector('[data-session-id="newer"]');
+    const toggle = parentCard?.querySelector('[data-testid="toggle-subagents"]');
+    expect(toggle).toBeTruthy();
+    expect(toggle?.textContent).toContain('1');
+
+    click(toggle!);
+    expect(container.textContent).toContain('Inspect the renderer');
+    expect(container.textContent).toContain('Explore');
+    expect(container.textContent).not.toContain('Plan nested work');
+
+    const childToggle = container
+      .querySelector('[data-session-id="agent-child"]')
+      ?.querySelector('[data-testid="toggle-subagents"]');
+    expect(childToggle).toBeTruthy();
+    click(childToggle!);
+    expect(container.textContent).toContain('Plan nested work');
+    expect(container.textContent).toContain('Plan');
+
+    const childCard = container.querySelector('[data-session-id="agent-child"]');
+    expect(childCard?.getAttribute('data-session-kind')).toBe('subagent');
+    const childButton = childCard?.querySelector('button');
+    expect(childButton).toBeTruthy();
+    click(childButton!);
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'agent-child' }));
     unmount(root);
   });
 });

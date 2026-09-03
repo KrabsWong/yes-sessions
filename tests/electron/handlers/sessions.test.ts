@@ -105,4 +105,20 @@ describe('sessions handler registration', () => {
       isAvailable: true,
     });
   });
+
+  it('does not fall through to a different provider for session detail', async () => {
+    const { registerSessionsHandlers } = await import('@electron/handlers/sessions');
+    registerSessionsHandlers();
+
+    const detailRegistration = mocks.register.mock.calls.find(
+      ([channel]) => channel === 'sessions:getDetail'
+    );
+    const detailHandler = detailRegistration?.[1] as
+      | ((event: unknown, sessionId: string, appType: AppType) => unknown)
+      | undefined;
+
+    await expect(detailHandler?.({}, 'shared-id', 'codebuddy')).resolves.toBeNull();
+    expect(mocks.sessionRegistry.get).toHaveBeenCalledTimes(1);
+    expect(mocks.sessionRegistry.get).toHaveBeenCalledWith('codebuddy');
+  });
 });

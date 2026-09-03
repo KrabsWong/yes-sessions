@@ -47,14 +47,27 @@ describe('message content parsers', () => {
 
   it('removes Codebuddy system wrapper content', () => {
     const content = [
-      '<system-reminder>Ignore this</system-reminder>',
+      '<system-reminder data-role="command-caveat">Ignore this</system-reminder>',
+      '<command-name>/clear</command-name>',
       '<local-command-stdout>hidden</local-command-stdout>',
+      '<system-reminder data-role="tool-hint">Keep this hint</system-reminder>',
+      '<system-reminder data-role="error-recovery">Keep recovery guidance</system-reminder>',
+      '<system-reminder data-role=command-caveat-extra>Keep similar role</system-reminder>',
       'Visible request',
     ].join('\n');
 
     expect(parseMessageContent(content, 'codebuddy')).toEqual([
-      { type: 'text', content: 'Visible request' },
+      {
+        type: 'text',
+        content:
+          '<system-reminder data-role="tool-hint">Keep this hint</system-reminder>\n<system-reminder data-role="error-recovery">Keep recovery guidance</system-reminder>\n<system-reminder data-role=command-caveat-extra>Keep similar role</system-reminder>\nVisible request',
+      },
     ]);
+  });
+
+  it('keeps short Codebuddy prompts', () => {
+    expect(parseMessageContent('好', 'codebuddy')).toEqual([{ type: 'text', content: '好' }]);
+    expect(parseMessageContent('ok', 'codebuddy')).toEqual([{ type: 'text', content: 'ok' }]);
   });
 
   it('falls back to plain text for apps without a special parser', () => {

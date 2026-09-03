@@ -98,30 +98,15 @@ export function registerSessionsHandlers(): void {
     }
   );
 
-  // Get session detail - 保持原有逻辑（有特殊 fallthrough 语义）
+  // Get session detail from the explicitly selected provider.
   ipcRegistry.register(
     'sessions:getDetail',
     async (_event, ...args: unknown[]) => {
       const [sessionId, appType] = args as [string, AppType];
 
       try {
-        // 如果指定了 appType，优先使用对应服务
         const service = sessionServiceRegistry.get(appType);
-        if (service && appType !== 'claude') {
-          const detail = await service.getSessionDetail(sessionId);
-          if (detail) return detail;
-        }
-
-        // 对于 claude 或未找到的情况，按顺序尝试各服务（fallthrough 语义）
-        const claudeSession = claudeSessionService.getSessionDetail(sessionId);
-        if (claudeSession) {
-          return claudeSession;
-        }
-        const opencodeSession = await opencodeSessionService.getSessionDetail(sessionId);
-        if (opencodeSession) {
-          return opencodeSession;
-        }
-        return codexSessionService.getSessionDetail(sessionId);
+        return service ? await service.getSessionDetail(sessionId) : null;
       } catch (error) {
         log.error('Failed to get session detail:', error);
         throw error;
