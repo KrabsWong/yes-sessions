@@ -156,7 +156,10 @@ function isSession(value: unknown): boolean {
     (value.firstMessage === undefined || isString(value.firstMessage)) &&
     (value.lastMessage === undefined || isString(value.lastMessage)) &&
     (value.directory === undefined || isString(value.directory)) &&
-    (value.uuid === undefined || isString(value.uuid))
+    (value.uuid === undefined || isString(value.uuid)) &&
+    (value.kind === undefined || value.kind === 'main' || value.kind === 'subagent') &&
+    (value.parentSessionId === undefined || isString(value.parentSessionId)) &&
+    (value.agentType === undefined || isString(value.agentType))
   );
 }
 

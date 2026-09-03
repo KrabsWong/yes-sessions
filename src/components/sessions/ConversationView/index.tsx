@@ -46,7 +46,7 @@ const ConversationTurn = memo(function ConversationTurn({
           {turn.systemMessages.map((sysMsg, index) => (
             <SystemMessage
               key={index}
-              content={sysMsg.content || ''}
+              content={sysMsg.content || sysMsg.redacted_content || ''}
               timestamp={sysMsg.timestamp}
               metadata={sysMsg.metadata}
               model={sysMsg.model}
@@ -56,10 +56,10 @@ const ConversationTurn = memo(function ConversationTurn({
       )}
 
       {/* User Message */}
-      {turn.userMessage?.content && (
+      {(turn.userMessage?.content || turn.userMessage?.redacted_content) && (
         <div id={userMessageIndex !== undefined ? `user-message-${userMessageIndex}` : undefined}>
           <UserMessage
-            content={turn.userMessage.content}
+            content={turn.userMessage.content || turn.userMessage.redacted_content || ''}
             timestamp={turn.userMessage.timestamp}
             appType={appType}
             model={turn.userMessage.model}
@@ -98,11 +98,15 @@ const ConversationTurn = memo(function ConversationTurn({
                 />
               ))}
             </div>
-            {(turn.assistantMessage?.content || turn.assistantMessage?.reasoning_content) && (
+            {(turn.assistantMessage?.content ||
+              turn.assistantMessage?.reasoning_content ||
+              turn.assistantMessage?.redacted_content) && (
               <div className="mt-3">
                 <AssistantMessage
                   hideAvatar
-                  content={turn.assistantMessage.content || ''}
+                  content={
+                    turn.assistantMessage.content || turn.assistantMessage.redacted_content || ''
+                  }
                   reasoningContent={turn.assistantMessage.reasoning_content}
                   timestamp={turn.assistantMessage.timestamp}
                   appType={appType}
@@ -112,9 +116,11 @@ const ConversationTurn = memo(function ConversationTurn({
             )}
           </div>
         </div>
-      ) : turn.assistantMessage?.content || turn.assistantMessage?.reasoning_content ? (
+      ) : turn.assistantMessage?.content ||
+        turn.assistantMessage?.reasoning_content ||
+        turn.assistantMessage?.redacted_content ? (
         <AssistantMessage
-          content={turn.assistantMessage.content || ''}
+          content={turn.assistantMessage.content || turn.assistantMessage.redacted_content || ''}
           reasoningContent={turn.assistantMessage.reasoning_content}
           timestamp={turn.assistantMessage.timestamp}
           appType={appType}
@@ -143,21 +149,21 @@ export function ConversationView({
   const prevLastMessageHashRef = useRef<string>('');
   const isAtBottomRef = useRef(true);
   const prevLastTurnHashRef = useRef<string>('');
+  const prevTurnCountRef = useRef(turnsWithCount.length);
 
   const getTurnHash = (turn: MessageTurnWithCount | undefined): string => {
     if (!turn) return '';
-    const userContent = turn.userMessage?.content || '';
+    const userContent = turn.userMessage?.content || turn.userMessage?.redacted_content || '';
     const assistantContent = turn.assistantMessage?.content || '';
     const reasoningContent = turn.assistantMessage?.reasoning_content || '';
+    const redactedContent = turn.assistantMessage?.redacted_content || '';
     const toolCount = turn.toolCalls.length;
-    return `${userContent.length}:${assistantContent.length}:${reasoningContent.length}:${toolCount}`;
+    return `${userContent.length}:${assistantContent.length}:${reasoningContent.length}:${redactedContent.length}:${toolCount}`;
   };
 
   const getMessageHash = (msg: SessionMessage | undefined): string => {
     if (!msg) return '';
-    return `${msg.type}:${msg.content || ''}:${msg.reasoning_content || ''}:${JSON.stringify(
-      msg.tool_output || {}
-    )}`;
+    return `${msg.type}:${msg.content || ''}:${msg.reasoning_content || ''}:${msg.redacted_content || ''}:${JSON.stringify(msg.tool_output || {})}`;
   };
 
   const getScrollContainer = useCallback(() => {
@@ -262,10 +268,7 @@ export function ConversationView({
     const currentLastTurnHash = getTurnHash(lastTurn);
     const prevLastTurnHash = prevLastTurnHashRef.current;
 
-    const hasNewTurn =
-      currentTurnCount > 0 &&
-      prevLastTurnHash !== '' &&
-      currentTurnCount > prevLastTurnHash.split(':').length;
+    const hasNewTurn = currentTurnCount > prevTurnCountRef.current;
     const hasContentUpdate = currentLastTurnHash !== prevLastTurnHash && prevLastTurnHash !== '';
 
     if (isAtBottomRef.current && (hasNewTurn || hasContentUpdate)) {
@@ -275,6 +278,7 @@ export function ConversationView({
     }
 
     prevLastTurnHashRef.current = currentLastTurnHash;
+    prevTurnCountRef.current = currentTurnCount;
   }, [turnsWithCount, autoScrollToBottom]);
 
   useEffect(() => {

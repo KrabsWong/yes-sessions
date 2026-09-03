@@ -57,6 +57,11 @@ describe('message content parsers', () => {
     ]);
   });
 
+  it('keeps short Codebuddy prompts', () => {
+    expect(parseMessageContent('好', 'codebuddy')).toEqual([{ type: 'text', content: '好' }]);
+    expect(parseMessageContent('ok', 'codebuddy')).toEqual([{ type: 'text', content: 'ok' }]);
+  });
+
   it('falls back to plain text for apps without a special parser', () => {
     expect(hasSpecialParser('unknown-app')).toBe(false);
     expect(parseMessageContent('raw text', 'unknown-app')).toEqual([

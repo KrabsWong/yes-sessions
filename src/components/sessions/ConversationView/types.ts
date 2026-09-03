@@ -12,6 +12,7 @@ export interface MessageTurn {
   userMessageOriginalIndex?: number; // Original index in messages array
   toolCalls: { toolUse: SessionMessage | null; toolResult: SessionMessage | null }[];
   assistantMessage: SessionMessage | null;
+  assistantMessageCount?: number;
   systemMessages: SessionMessage[];
 }
 

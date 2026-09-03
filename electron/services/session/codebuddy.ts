@@ -1,774 +1,782 @@
 /**
- * Codebuddy Session Service
+ * CodeBuddy session service.
  *
- * Reads and parses Codebuddy conversation sessions from projects directory
- * Each project can have multiple session .jsonl files with full message history
+ * CodeBuddy stores primary transcripts at projects/<project>/<session>.jsonl and
+ * sub-agent transcripts below projects/<project>/<session>/subagents/*.jsonl.
+ * The JSONL schema is append-only and has changed over time, so normalization in
+ * this file deliberately accepts unknown fields and validates values at runtime.
  */
 
-import path from 'path';
-import os from 'os';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import log from 'electron-log';
 import type { Session, SessionDetail, SessionMessage } from '@/types/session';
 
 const CODEBUDDY_DIR = path.join(os.homedir(), '.codebuddy');
 const PROJECTS_DIR = path.join(CODEBUDDY_DIR, 'projects');
 const SESSIONS_DIR = path.join(CODEBUDDY_DIR, 'sessions');
+const MAX_EMBEDDED_IMAGE_BYTES = 10 * 1024 * 1024;
+const SUMMARY_READ_CONCURRENCY = 4;
 
 interface CodebuddySessionFile {
-  pid: number;
-  lastHeartbeat: number;
-  sessionId: string;
-  cwd: string;
-  startedAt: number;
-  kind: string;
-  url: string;
-  endpoint: string;
-  mode: string;
-  version: string;
-  os: string;
-  arch: string;
-  hostname: string;
-  updatedAt: number;
-  meta?: {
-    currentTopic?: string;
-  };
+  sessionId?: string;
+  lastHeartbeat?: number;
+  updatedAt?: number;
+  meta?: { currentTopic?: string };
+}
+
+interface CodebuddyContentItem {
+  type?: string;
+  text?: unknown;
+  blob_path?: unknown;
+  mime?: unknown;
 }
 
 interface CodebuddyMessageEntry {
-  id: string;
-  timestamp: number;
-  type:
-    | 'message'
-    | 'function_call'
-    | 'function_call_result'
-    | 'assistant'
-    | 'file-history-snapshot'
-    | 'topic';
-  role?: 'user' | 'assistant' | 'system';
-  content?: Array<{
-    type: string;
-    text: string;
-  }>;
-  message?: {
-    content: string;
-  };
-  name?: string;
-  arguments?: string; // JSON string for function_call
-  callId?: string;
-  output?: {
-    type: string;
-    text: string;
-  };
-  status?: string;
+  id?: string;
+  timestamp?: unknown;
+  type?: string;
+  role?: string;
+  cwd?: unknown;
+  sessionId?: unknown;
+  content?: unknown;
+  rawContent?: unknown;
+  message?: { content?: unknown };
+  name?: unknown;
+  arguments?: unknown;
+  callId?: unknown;
+  output?: unknown;
+  status?: unknown;
   providerData?: {
-    model?: string;
-    agent?: string;
-    messageId?: string;
-  }; // Provider-specific metadata including model info
+    model?: unknown;
+    agent?: unknown;
+    isSubAgent?: unknown;
+    toolResult?: unknown;
+  };
+}
+
+interface SessionFileRef {
+  path: string;
+  projectCwd: string;
+  id: string;
+  internalSessionId?: string;
+  parentSessionId?: string;
+  agentType?: string;
+  kind: 'main' | 'subagent';
+  size: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface SessionSummary {
+  count: number;
+  firstMessage: string;
+  lastMessage: string;
+  createdAt?: number;
+  updatedAt?: number;
+  hasRecord: boolean;
+}
+
+interface SummaryState extends SessionSummary {
+  pendingReasoning: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseEntry(line: string): CodebuddyMessageEntry | null {
+  try {
+    const value = JSON.parse(line) as unknown;
+    return isRecord(value) ? (value as CodebuddyMessageEntry) : null;
+  } catch {
+    return null;
+  }
+}
+
+function toTime(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string') {
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : undefined;
+  }
+  return undefined;
+}
+
+function toIsoTime(value: unknown, fallback: number): string {
+  return new Date(toTime(value) ?? fallback).toISOString();
+}
+
+function getContentItems(value: unknown): CodebuddyContentItem[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter(isRecord) as CodebuddyContentItem[];
+}
+
+function extractText(value: unknown, acceptedTypes?: Set<string>): string {
+  if (typeof value === 'string') return value;
+  return getContentItems(value)
+    .filter((item) => !acceptedTypes || (item.type ? acceptedTypes.has(item.type) : true))
+    .map((item) => (typeof item.text === 'string' ? item.text : ''))
+    .filter(Boolean)
+    .join('\n');
+}
+
+function extractReasoningText(entry: CodebuddyMessageEntry): string {
+  return (
+    extractText(entry.rawContent, new Set(['reasoning_text', 'text', 'input_text'])) ||
+    extractText(entry.content, new Set(['reasoning_text', 'text', 'input_text']))
+  );
+}
+
+function extractMessageText(entry: CodebuddyMessageEntry): string {
+  const acceptedTypes =
+    entry.role === 'assistant'
+      ? new Set(['output_text', 'text'])
+      : new Set(['input_text', 'text', 'output_text']);
+  return extractText(entry.content, acceptedTypes) || extractText(entry.message?.content);
+}
+
+function parseToolInput(value: unknown): Record<string, unknown> {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value) as unknown;
+    } catch {
+      return { arguments: value };
+    }
+  }
+  if (isRecord(parsed)) return parsed;
+  if (parsed === undefined || parsed === null || parsed === '') return {};
+  return { value: parsed };
+}
+
+function stringifyOutput(value: unknown): string {
+  if (typeof value === 'string') return value;
+  if (isRecord(value) && typeof value.text === 'string') return value.text;
+  if (isRecord(value) && Array.isArray(value.content)) {
+    const content = extractText(value.content);
+    if (content) return content;
+  }
+  if (value === undefined) return '';
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function getString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function extractChildSessionId(value: unknown): string | undefined {
+  if (isRecord(value)) {
+    for (const key of ['childSessionId', 'subAgentSessionId', 'sessionId', 'agentId']) {
+      const candidate = getString(value[key]);
+      if (candidate) return candidate;
+    }
+  }
+  const text = stringifyOutput(value);
+  if (!text) return undefined;
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const nested = extractChildSessionId(parsed);
+    if (nested) return nested;
+  } catch {
+    // Plain-text Agent results are the common CodeBuddy representation.
+  }
+  const agentIds = text.match(/\bagent-[a-z0-9_-]+\b/gi);
+  if (agentIds?.length) return agentIds[agentIds.length - 1];
+  return text.match(
+    /(?:childSessionId|subAgentSessionId|sessionId|session)["']?\s*[:=]\s*["']?([a-f0-9-]{36})/i
+  )?.[1];
+}
+
+function extractStructuredChildSessionId(entry: CodebuddyMessageEntry): string | undefined {
+  const toolResult = entry.providerData?.toolResult;
+  if (!isRecord(toolResult)) return undefined;
+  const subAgent = toolResult.subAgent;
+  if (!isRecord(subAgent)) return undefined;
+  return getString(subAgent.sessionId);
+}
+
+function createSummaryState(): SummaryState {
+  return {
+    count: 0,
+    firstMessage: '',
+    lastMessage: '',
+    hasRecord: false,
+    pendingReasoning: false,
+  };
+}
+
+function flushSummaryReasoning(state: SummaryState): void {
+  if (state.pendingReasoning) {
+    state.count++;
+    state.pendingReasoning = false;
+  }
+}
+
+function updateSummary(state: SummaryState, entry: CodebuddyMessageEntry): void {
+  state.hasRecord = true;
+  const timestamp = toTime(entry.timestamp);
+  if (timestamp !== undefined) {
+    state.createdAt ??= timestamp;
+    state.updatedAt = timestamp;
+  }
+  if (entry.type === 'reasoning') {
+    if (extractReasoningText(entry)) state.pendingReasoning = true;
+    return;
+  }
+  if (entry.type === 'message' && entry.role === 'user') {
+    flushSummaryReasoning(state);
+    const text = extractMessageText(entry);
+    if (text || getContentItems(entry.content).some((item) => item.type === 'image_blob_ref')) {
+      state.count++;
+    }
+    if (text) {
+      state.firstMessage ||= text.slice(0, 100);
+      state.lastMessage = text.slice(0, 100);
+    }
+    return;
+  }
+  if (
+    (entry.type === 'message' && (entry.role === 'assistant' || entry.role === 'system')) ||
+    entry.type === 'assistant'
+  ) {
+    if (extractMessageText(entry) || state.pendingReasoning) state.count++;
+    state.pendingReasoning = false;
+    return;
+  }
+  if (entry.type === 'function_call') {
+    state.count++;
+    state.pendingReasoning = false;
+    return;
+  }
+  if (entry.type === 'function_call_result') {
+    flushSummaryReasoning(state);
+    state.count++;
+  }
+}
+
+export function normalizeCodebuddyEntries(
+  entries: CodebuddyMessageEntry[],
+  fallbackTimestamp: number,
+  resolveImage: (item: CodebuddyContentItem) => string | null = () => null
+): SessionMessage[] {
+  const messages: SessionMessage[] = [];
+  const pendingAgentCalls = new Map<string, Record<string, unknown>>();
+  let currentModel: string | undefined;
+  let pendingReasoning = '';
+
+  const pushPendingReasoning = (timestamp: unknown): void => {
+    if (!pendingReasoning) return;
+    messages.push({
+      type: 'assistant',
+      timestamp: toIsoTime(timestamp, fallbackTimestamp),
+      reasoning_content: pendingReasoning,
+      model: currentModel,
+    });
+    pendingReasoning = '';
+  };
+
+  for (const entry of entries) {
+    currentModel = getString(entry.providerData?.model) || currentModel;
+    const timestamp = toIsoTime(entry.timestamp, fallbackTimestamp);
+
+    if (entry.type === 'reasoning') {
+      const reasoning = extractReasoningText(entry);
+      if (reasoning) pendingReasoning = [pendingReasoning, reasoning].filter(Boolean).join('\n\n');
+      continue;
+    }
+
+    if (entry.type === 'message' && (entry.role === 'user' || entry.role === 'system')) {
+      pushPendingReasoning(entry.timestamp);
+      let text = extractMessageText(entry);
+      if (entry.role === 'user') {
+        const images = getContentItems(entry.content)
+          .filter((item) => item.type === 'image_blob_ref')
+          .map((item) => {
+            const dataUrl = resolveImage(item);
+            const imagePath = getString(item.blob_path);
+            const fileName = imagePath ? path.basename(imagePath) : '';
+            if (!fileName) return '';
+            return dataUrl ? `![${fileName}](${dataUrl})` : `📎 ${fileName}`;
+          });
+        text = [text, ...images].filter(Boolean).join('\n\n');
+      }
+      if (text) {
+        const status = getString(entry.status);
+        messages.push({
+          type: entry.role === 'system' ? 'system' : 'user',
+          timestamp,
+          content: text,
+          metadata: status ? { subtype: status } : undefined,
+          model: currentModel,
+        });
+      }
+      continue;
+    }
+
+    if ((entry.type === 'message' && entry.role === 'assistant') || entry.type === 'assistant') {
+      const text = extractMessageText(entry);
+      if (text || pendingReasoning) {
+        const status = getString(entry.status);
+        messages.push({
+          type: 'assistant',
+          timestamp,
+          content: text || undefined,
+          reasoning_content: pendingReasoning || undefined,
+          metadata: status ? { subtype: status } : undefined,
+          model: currentModel,
+        });
+      }
+      pendingReasoning = '';
+      continue;
+    }
+
+    if (entry.type === 'function_call') {
+      const toolName = getString(entry.name) || 'tool';
+      const callId = getString(entry.callId) || getString(entry.id) || `call_${messages.length}`;
+      const toolInput = parseToolInput(entry.arguments);
+      messages.push({
+        type: 'tool_use',
+        timestamp,
+        tool_name: toolName,
+        tool_input: toolInput,
+        callId,
+        reasoning_content: pendingReasoning || undefined,
+        model: currentModel,
+      });
+      pendingReasoning = '';
+      if (toolName.toLowerCase().includes('agent')) pendingAgentCalls.set(callId, toolInput);
+      continue;
+    }
+
+    if (entry.type === 'function_call_result') {
+      pushPendingReasoning(entry.timestamp);
+      const toolName = getString(entry.name) || 'tool';
+      const callId = getString(entry.callId);
+      const outputText = stringifyOutput(entry.output);
+      const pendingInput = callId ? pendingAgentCalls.get(callId) : undefined;
+      const isAgentResult = toolName.toLowerCase().includes('agent') || Boolean(pendingInput);
+      const childSessionId = isAgentResult
+        ? extractStructuredChildSessionId(entry) ||
+          extractChildSessionId(entry.output) ||
+          extractChildSessionId(pendingInput)
+        : undefined;
+      if (callId) pendingAgentCalls.delete(callId);
+      const status = getString(entry.status);
+      messages.push({
+        type: 'tool_result',
+        timestamp,
+        tool_name: toolName,
+        content: outputText.slice(0, 300) + (outputText.length > 300 ? '...' : ''),
+        tool_output: { output: outputText },
+        callId,
+        metadata: {
+          ...(status ? { subtype: status } : {}),
+          ...(childSessionId
+            ? { childSessionId, childSessionAppType: 'codebuddy', model: currentModel }
+            : {}),
+        },
+        model: currentModel,
+      });
+    }
+  }
+
+  pushPendingReasoning(fallbackTimestamp);
+  return messages;
 }
 
 class CodebuddySessionService {
-  private sessionFileById = new Map<string, { path: string; projectCwd: string; size: number }>();
+  private sessionFileById = new Map<string, SessionFileRef>();
+  private identityCache = new Map<
+    string,
+    {
+      size: number;
+      mtimeMs: number;
+      identity: { cwd?: string; sessionId?: string; agentType?: string };
+    }
+  >();
+  private summaryCache = new Map<
+    string,
+    { size: number; mtimeMs: number; summary: SessionSummary }
+  >();
+  private detailCache:
+    | { path: string; size: number; mtimeMs: number; detail: SessionDetail }
+    | undefined;
 
-  /**
-   * Check if Codebuddy data exists
-   */
   isAvailable(): boolean {
     try {
-      return fs.existsSync(CODEBUDDY_DIR) && fs.existsSync(PROJECTS_DIR);
+      return fs.existsSync(PROJECTS_DIR);
     } catch {
       return false;
     }
   }
 
-  /**
-   * Read cwd from session file (first line should have it)
-   */
-  private readCwdFromSession(filePath: string): string | null {
-    try {
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const firstLine = content.split('\n')[0];
-      if (firstLine) {
-        const entry = JSON.parse(firstLine) as CodebuddyMessageEntry;
-        return (entry as unknown as { cwd?: string }).cwd || null;
-      }
-    } catch {
-      // Fall through to null
-    }
-    return null;
-  }
-
-  /**
-   * Decode project directory name to actual path
-   * Example: "Users-krabswang-Personal-project" -> "/Users/krabswang/Personal/project"
-   * NOTE: This is fallback only, prefer reading cwd from session file
-   */
-  private decodeProjectDir(dirName: string): string {
-    // Handle special cases
-    if (dirName.startsWith('Users-')) {
-      const parts = dirName.split('-');
-      // Convert Users-username-path to /Users/username/path
-      if (parts.length >= 2) {
-        const userPart = parts[1];
-        const remainingPath = parts.slice(2).join('/');
-        return `/Users/${userPart}/${remainingPath}`;
-      }
-    }
-    // Fallback: just replace dashes with slashes
-    return '/' + dirName.replace(/-/g, '/');
-  }
-
-  /**
-   * Stream read session file to get message count and first/last user messages
-   * Uses 8KB buffer for memory efficiency with large files
-   */
-  private streamReadSessionInfo(filePath: string): Promise<{
-    count: number;
-    firstMessage: string;
-    lastMessage: string;
-    createdAt: number;
-    updatedAt: number;
-  }> {
-    return new Promise((resolve) => {
-      const stream = fs.createReadStream(filePath, { encoding: 'utf-8', highWaterMark: 8192 });
-      let leftover = '';
-      let count = 0;
-      let firstMessage = '';
-      let lastMessage = '';
-      let createdAt = 0;
-      let firstTimestamp = 0;
-      let lastTimestamp = 0;
-
-      stream.on('data', (chunk: string | Buffer) => {
-        const data = leftover + chunk.toString();
-        const lines = data.split('\n');
-
-        // Keep the last incomplete line for next chunk
-        leftover = lines.pop() || '';
-
-        // Process complete lines
-        for (const line of lines) {
-          if (!line.trim()) continue;
-
-          try {
-            const entry = JSON.parse(line) as CodebuddyMessageEntry;
-
-            // Track timestamps
-            if (entry.timestamp) {
-              if (!firstTimestamp) {
-                firstTimestamp = entry.timestamp;
-              }
-              lastTimestamp = entry.timestamp;
-            }
-
-            // Count displayable message types
-            if (
-              (entry.type === 'message' && (entry.role === 'user' || entry.role === 'assistant')) ||
-              entry.type === 'function_call' ||
-              entry.type === 'function_call_result'
-            ) {
-              count++;
-            }
-
-            // Extract first user message
-            if (!firstMessage && entry.type === 'message' && entry.role === 'user') {
-              firstMessage = entry.content?.[0]?.text?.substring(0, 100) || '';
-              createdAt = entry.timestamp || Date.now();
-            }
-
-            // Track last user message (will be updated as we read)
-            if (entry.type === 'message' && entry.role === 'user') {
-              lastMessage = entry.content?.[0]?.text?.substring(0, 100) || '';
-            }
-          } catch {
-            // Skip invalid lines
-          }
-        }
-      });
-
-      stream.on('end', () => {
-        // Process leftover
-        if (leftover.trim()) {
-          try {
-            const entry = JSON.parse(leftover) as CodebuddyMessageEntry;
-
-            if (entry.timestamp) {
-              lastTimestamp = entry.timestamp;
-            }
-
-            if (
-              (entry.type === 'message' && (entry.role === 'user' || entry.role === 'assistant')) ||
-              entry.type === 'function_call' ||
-              entry.type === 'function_call_result'
-            ) {
-              count++;
-            }
-
-            if (!firstMessage && entry.type === 'message' && entry.role === 'user') {
-              firstMessage = entry.content?.[0]?.text?.substring(0, 100) || '';
-              createdAt = entry.timestamp || Date.now();
-            }
-
-            if (entry.type === 'message' && entry.role === 'user') {
-              lastMessage = entry.content?.[0]?.text?.substring(0, 100) || '';
-            }
-          } catch {
-            // Invalid JSON in leftover
-          }
-        }
-
-        resolve({
-          count,
-          firstMessage,
-          lastMessage: lastMessage || firstMessage,
-          createdAt: createdAt || firstTimestamp,
-          updatedAt: lastTimestamp || createdAt || Date.now(),
-        });
-      });
-
-      stream.on('error', () => {
-        resolve({ count: 0, firstMessage: '', lastMessage: '', createdAt: 0, updatedAt: 0 });
-      });
-    });
-  }
-
-  /**
-   * Read session .jsonl file and get message count and last message
-   * Only counts displayable message types (user, assistant, function_call, function_call_result)
-   */
-  private readSessionJsonl(filePath: string): {
-    count: number;
-    lastMessage: string;
-    firstMessage: string;
-    createdAt: number;
-    updatedAt: number;
-  } {
-    try {
-      if (!fs.existsSync(filePath)) {
-        return { count: 0, lastMessage: '', firstMessage: '', createdAt: 0, updatedAt: 0 };
-      }
-
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const lines = content.split('\n').filter((line) => line.trim());
-
-      if (lines.length === 0) {
-        return { count: 0, lastMessage: '', firstMessage: '', createdAt: 0, updatedAt: 0 };
-      }
-
-      const firstEntry = JSON.parse(lines[0]) as CodebuddyMessageEntry;
-      const lastEntry = JSON.parse(lines[lines.length - 1]) as CodebuddyMessageEntry;
-
-      // Extract text from first user message
-      let firstMessage = '';
-      const firstUserEntry = lines.find((line) => {
-        try {
-          const entry = JSON.parse(line) as CodebuddyMessageEntry;
-          return entry.type === 'message' && entry.role === 'user';
-        } catch {
-          return false;
-        }
-      });
-      if (firstUserEntry) {
-        const entry = JSON.parse(firstUserEntry) as CodebuddyMessageEntry;
-        firstMessage = entry.content?.[0]?.text?.substring(0, 100) || '';
-      }
-
-      // Extract text from last user message
-      let lastMessage = '';
-      const lastUserEntry = [...lines].reverse().find((line) => {
-        try {
-          const entry = JSON.parse(line) as CodebuddyMessageEntry;
-          return entry.type === 'message' && entry.role === 'user';
-        } catch {
-          return false;
-        }
-      });
-      if (lastUserEntry) {
-        const entry = JSON.parse(lastUserEntry) as CodebuddyMessageEntry;
-        lastMessage = entry.content?.[0]?.text?.substring(0, 100) || '';
-      }
-
-      // Count only displayable message types (matching getSessionDetail logic)
-      let displayableCount = 0;
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line) as CodebuddyMessageEntry;
-          // Only count types that are displayed in the UI
-          if (
-            (entry.type === 'message' && (entry.role === 'user' || entry.role === 'assistant')) ||
-            entry.type === 'function_call' ||
-            entry.type === 'function_call_result'
-          ) {
-            displayableCount++;
-          }
-        } catch {
-          // Skip invalid lines
-        }
-      }
-
-      return {
-        count: displayableCount,
-        lastMessage,
-        firstMessage,
-        createdAt: firstEntry.timestamp || Date.now(),
-        updatedAt: lastEntry.timestamp || Date.now(),
-      };
-    } catch (error) {
-      log.warn(`Failed to read session jsonl ${filePath}:`, error);
-      return { count: 0, lastMessage: '', firstMessage: '', createdAt: 0, updatedAt: 0 };
-    }
-  }
-
-  /**
-   * Get all sessions from projects directory
-   * Each .jsonl file in a project is a separate session
-   * Optimized: uses stream reading for large files (>100KB) to get first message efficiently
-   */
   async getAllSessions(): Promise<Session[]> {
     try {
-      if (!fs.existsSync(PROJECTS_DIR)) {
-        return [];
-      }
-
-      // Read active session info if available
-      let activeSession: CodebuddySessionFile | null = null;
-      if (fs.existsSync(SESSIONS_DIR)) {
-        const files = fs.readdirSync(SESSIONS_DIR).filter((f) => f.endsWith('.json'));
-        for (const file of files) {
-          try {
-            const filePath = path.join(SESSIONS_DIR, file);
-            const content = fs.readFileSync(filePath, 'utf-8');
-            activeSession = JSON.parse(content) as CodebuddySessionFile;
-            break;
-          } catch (error) {
-            log.warn(`Failed to parse Codebuddy session file ${file}:`, error);
-          }
-        }
-      }
-
-      // Use a Map to deduplicate sessions by ID, keeping the one with most content
+      if (!fs.existsSync(PROJECTS_DIR)) return [];
+      const activeSessions = this.readActiveSessions();
+      const refs = this.discoverSessionFiles();
+      this.indexSessionFiles(refs);
       const sessionMap = new Map<string, Session & { contentSize: number }>();
-      const projectDirs = fs.readdirSync(PROJECTS_DIR);
-
-      for (const projectDirName of projectDirs) {
-        const projectPath = path.join(PROJECTS_DIR, projectDirName);
-
-        // Skip if not a directory
-        if (!fs.statSync(projectPath).isDirectory()) {
-          continue;
-        }
-
-        // Decode project path (fallback only)
-        const decodedCwd = this.decodeProjectDir(projectDirName);
-
-        // Find all .jsonl files in this project (these are sessions)
-        const entries = fs.readdirSync(projectPath);
-
-        for (const entry of entries) {
-          const entryPath = path.join(projectPath, entry);
-
-          // Check if it's a .jsonl file (session transcript)
-          if (entry.endsWith('.jsonl') && fs.statSync(entryPath).isFile()) {
-            const sessionId = entry.replace('.jsonl', '');
-            const stats = fs.statSync(entryPath);
-
-            // Check if this is the active session
-            const isActiveSession = activeSession && activeSession.sessionId === sessionId;
-
-            // Skip if we already have this session with more content
-            const existingSession = sessionMap.get(sessionId);
-            if (existingSession && existingSession.contentSize >= stats.size) {
-              continue;
-            }
-
-            // Read cwd from session file first line (more accurate than directory name)
-            const sessionCwd = this.readCwdFromSession(entryPath) || decodedCwd;
-
-            // For large files (>100KB), use stream reading to efficiently get session info
-            // This avoids loading entire large files into memory just for listing
-            let jsonlData: ReturnType<typeof this.readSessionJsonl>;
-            if (stats.size > 100 * 1024) {
-              jsonlData = await this.streamReadSessionInfo(entryPath);
-            } else {
-              jsonlData = this.readSessionJsonl(entryPath);
-            }
-
-            sessionMap.set(sessionId, {
-              id: sessionId,
-              appType: 'codebuddy',
-              fileName:
-                isActiveSession && activeSession!.meta?.currentTopic
-                  ? activeSession!.meta.currentTopic
-                  : jsonlData.firstMessage || `Session ${sessionId.substring(0, 8)}`,
-              filePath: entryPath,
-              directory: sessionCwd,
-              createdAt: jsonlData.createdAt,
-              updatedAt: isActiveSession
-                ? activeSession!.updatedAt || activeSession!.lastHeartbeat
-                : jsonlData.updatedAt,
-              messageCount: jsonlData.count,
-              firstMessage: jsonlData.firstMessage,
-              lastMessage:
-                isActiveSession && activeSession!.meta?.currentTopic
-                  ? activeSession!.meta.currentTopic
-                  : jsonlData.lastMessage,
-              uuid: sessionId,
-              contentSize: stats.size,
-            });
-          }
-
-          // Also check subdirectories for nested .jsonl files (subagents)
-          if (fs.statSync(entryPath).isDirectory()) {
-            const subEntries = fs.readdirSync(entryPath);
-            for (const subEntry of subEntries) {
-              if (subEntry.endsWith('.jsonl')) {
-                const subEntryPath = path.join(entryPath, subEntry);
-                const sessionId = subEntry.replace('.jsonl', '');
-                const stats = fs.statSync(subEntryPath);
-                const jsonlData = this.readSessionJsonl(subEntryPath);
-
-                // Skip if we already have this session with more content
-                const existingSession = sessionMap.get(sessionId);
-                if (existingSession && existingSession.contentSize >= stats.size) {
-                  continue;
-                }
-
-                // Read cwd from session file for subagent too
-                const subagentCwd = this.readCwdFromSession(subEntryPath) || decodedCwd;
-
-                sessionMap.set(sessionId, {
-                  id: sessionId,
-                  appType: 'codebuddy',
-                  fileName:
-                    jsonlData.firstMessage || `Subagent Session ${sessionId.substring(0, 8)}`,
-                  filePath: subEntryPath,
-                  directory: subagentCwd,
-                  createdAt: jsonlData.createdAt,
-                  updatedAt: jsonlData.updatedAt,
-                  messageCount: jsonlData.count,
-                  firstMessage: jsonlData.firstMessage,
-                  lastMessage: jsonlData.lastMessage,
-                  uuid: sessionId,
-                  contentSize: stats.size,
-                });
-              }
+      const refsToSummarize = refs.filter((ref) => ref.size > 0);
+      const summarized = new Array<{ ref: SessionFileRef; summary: SessionSummary }>(
+        refsToSummarize.length
+      );
+      let nextRefIndex = 0;
+      await Promise.all(
+        Array.from(
+          { length: Math.min(SUMMARY_READ_CONCURRENCY, refsToSummarize.length) },
+          async () => {
+            while (nextRefIndex < refsToSummarize.length) {
+              const index = nextRefIndex++;
+              const ref = refsToSummarize[index];
+              summarized[index] = { ref, summary: await this.streamSessionSummary(ref) };
             }
           }
-        }
+        )
+      );
+
+      for (const { ref, summary } of summarized) {
+        if (!summary.hasRecord || summary.count === 0) continue;
+        const active =
+          activeSessions.get(ref.id) ||
+          (ref.internalSessionId ? activeSessions.get(ref.internalSessionId) : undefined);
+        const session: Session & { contentSize: number } = {
+          id: ref.id,
+          appType: 'codebuddy',
+          fileName: active?.meta?.currentTopic || summary.firstMessage || ref.id,
+          filePath: ref.path,
+          directory: ref.projectCwd,
+          createdAt: summary.createdAt ?? ref.createdAt,
+          updatedAt:
+            toTime(active?.updatedAt) ??
+            toTime(active?.lastHeartbeat) ??
+            summary.updatedAt ??
+            ref.updatedAt,
+          messageCount: summary.count,
+          firstMessage: summary.firstMessage,
+          lastMessage: active?.meta?.currentTopic || summary.lastMessage,
+          uuid: ref.internalSessionId || ref.id,
+          kind: ref.kind,
+          parentSessionId: ref.parentSessionId,
+          agentType: ref.agentType,
+          contentSize: ref.size,
+        };
+        const existing = sessionMap.get(session.id);
+        if (!existing || existing.contentSize < session.contentSize)
+          sessionMap.set(session.id, session);
       }
 
-      // Convert map to array and sort by updatedAt desc
-      const sessions = Array.from(sessionMap.values());
-      sessions.sort((a, b) => b.updatedAt - a.updatedAt);
-      this.sessionFileById.clear();
-      for (const session of sessions) {
-        this.sessionFileById.set(session.id, {
-          path: session.filePath,
-          projectCwd: session.directory || '',
-          size: session.contentSize,
-        });
-      }
-
-      // Remove the contentSize field before returning
-      return sessions.map(({ contentSize: _, ...session }) => session);
+      return Array.from(sessionMap.values())
+        .sort((a, b) => b.updatedAt - a.updatedAt)
+        .map(({ contentSize: _contentSize, ...session }) => session);
     } catch (error) {
-      log.error('Failed to get Codebuddy sessions:', error);
+      log.error('Failed to get CodeBuddy sessions:', error);
       return [];
     }
   }
 
-  /**
-   * Get detailed session with messages
-   */
   async getSessionDetail(sessionId: string): Promise<SessionDetail | null> {
     try {
-      // Try to find the session file by sessionId
-      if (!fs.existsSync(PROJECTS_DIR)) {
-        return null;
+      if (!fs.existsSync(PROJECTS_DIR)) return null;
+      let ref = this.sessionFileById.get(sessionId);
+      if (!ref || !fs.existsSync(ref.path)) {
+        const refs = this.discoverSessionFiles();
+        this.indexSessionFiles(refs);
+        ref = this.sessionFileById.get(sessionId);
+      }
+      if (!ref) return null;
+
+      const stats = await fs.promises.stat(ref.path);
+      if (stats.size === 0) return null;
+      if (
+        this.detailCache?.path === ref.path &&
+        this.detailCache.size === stats.size &&
+        this.detailCache.mtimeMs === stats.mtimeMs
+      ) {
+        return this.detailCache.detail;
       }
 
-      const cachedSession = this.sessionFileById.get(sessionId);
-      const foundSessions: { path: string; projectCwd: string; size: number }[] =
-        cachedSession && fs.existsSync(cachedSession.path) ? [cachedSession] : [];
-
-      if (foundSessions.length === 0) {
-        const projectDirs = fs.readdirSync(PROJECTS_DIR);
-
-        for (const projectDirName of projectDirs) {
-          const projectPath = path.join(PROJECTS_DIR, projectDirName);
-
-          if (!fs.statSync(projectPath).isDirectory()) {
-            continue;
-          }
-
-          // Check main directory
-          const entries = fs.readdirSync(projectPath);
-          for (const entry of entries) {
-            if (entry === `${sessionId}.jsonl`) {
-              const filePath = path.join(projectPath, entry);
-              const stats = fs.statSync(filePath);
-              foundSessions.push({
-                path: filePath,
-                projectCwd: this.decodeProjectDir(projectDirName),
-                size: stats.size,
-              });
-            }
-
-            // Check subdirectories
-            const entryPath = path.join(projectPath, entry);
-            if (fs.statSync(entryPath).isDirectory()) {
-              const subEntries = fs.readdirSync(entryPath);
-              if (subEntries.includes(`${sessionId}.jsonl`)) {
-                const filePath = path.join(entryPath, `${sessionId}.jsonl`);
-                const stats = fs.statSync(filePath);
-                foundSessions.push({
-                  path: filePath,
-                  projectCwd: this.decodeProjectDir(projectDirName),
-                  size: stats.size,
-                });
-              }
-            }
-          }
-        }
-      }
-
-      if (foundSessions.length === 0) {
-        return null;
-      }
-
-      // Sort by size desc and pick the largest one (to avoid empty files)
-      foundSessions.sort((a, b) => b.size - a.size);
-      const foundSession = foundSessions[0];
-
-      // Read and parse the session file
-      const content = fs.readFileSync(foundSession.path, 'utf-8');
+      const content = await fs.promises.readFile(ref.path, 'utf-8');
       const lines = content.split('\n').filter((line) => line.trim());
+      const entries = lines
+        .map(parseEntry)
+        .filter((entry): entry is CodebuddyMessageEntry => !!entry);
+      if (entries.length === 0) return null;
+      const messages = normalizeCodebuddyEntries(entries, ref.updatedAt, (item) =>
+        this.readImageDataUrl(item)
+      );
+      if (messages.length === 0) return null;
 
-      const messages: SessionMessage[] = [];
-      let firstMessage = '';
-      let lastMessage = '';
-      let currentModel: string | undefined;
-
-      // Track pending tool calls to match with results
-      const pendingToolCalls = new Map<
-        string,
-        { sessionId?: string; appType?: string; toolInput?: Record<string, unknown> }
-      >();
-
-      for (const line of lines) {
-        try {
-          const entry = JSON.parse(line) as CodebuddyMessageEntry;
-
-          // Track model changes from providerData.model
-          if (entry.providerData?.model) {
-            currentModel = entry.providerData.model;
-          }
-
-          if (entry.type === 'message' && entry.role === 'user') {
-            const text = entry.content?.[0]?.text || '';
-            if (!firstMessage) firstMessage = text.substring(0, 100);
-            lastMessage = text.substring(0, 100);
-
-            messages.push({
-              type: 'user',
-              timestamp: new Date(entry.timestamp).toISOString(),
-              content: text,
-              model: currentModel,
-            });
-          } else if (entry.type === 'message' && entry.role === 'assistant') {
-            // Assistant response - content is an array with output_text items
-            let text = '';
-            if (entry.content && Array.isArray(entry.content)) {
-              // Concatenate all output_text items
-              text = entry.content
-                .filter((c) => c.type === 'output_text')
-                .map((c) => c.text)
-                .join('');
-            }
-            // Fallback to message.content if available
-            if (!text && entry.message?.content) {
-              text = entry.message.content;
-            }
-            messages.push({
-              type: 'assistant',
-              timestamp: new Date(entry.timestamp).toISOString(),
-              content: text,
-              model: currentModel,
-            });
-          } else if (entry.type === 'function_call') {
-            // Parse tool arguments from the arguments JSON string
-            let toolInput: Record<string, unknown> = {};
-            let toolContent = `Tool: ${entry.name}`;
-            let childSessionId: string | undefined;
-
-            if (entry.arguments) {
-              try {
-                toolInput = JSON.parse(entry.arguments) as Record<string, unknown>;
-                // Build content based on tool type
-                if (entry.name === 'WebFetch' && toolInput.url) {
-                  toolContent = `🌐 WebFetch: ${toolInput.url}`;
-                } else if (entry.name === 'Read' && toolInput.file_path) {
-                  toolContent = `📄 Read: ${toolInput.file_path}`;
-                } else if (entry.name === 'Write' && toolInput.file_path) {
-                  toolContent = `📝 Write: ${toolInput.file_path}`;
-                } else if (entry.name === 'Bash' && toolInput.command) {
-                  toolContent = `⚡ Bash: ${toolInput.command}`;
-                } else if (entry.name === 'Agent' && toolInput.description) {
-                  toolContent = `🤖 Agent: ${toolInput.description}`;
-                  // For Agent calls, try to extract child session ID from parameters
-                  childSessionId =
-                    (toolInput.sessionId as string) ||
-                    (toolInput.subAgentSessionId as string) ||
-                    (toolInput.childSessionId as string);
-                } else if (entry.name === 'EnterPlanMode') {
-                  toolContent =
-                    '📋 Entering Plan Mode - AI will create a step-by-step plan before execution';
-                } else if (entry.name === 'ExitPlanMode') {
-                  toolContent = '✅ Exiting Plan Mode - AI will proceed with execution';
-                } else if (entry.name) {
-                  toolContent = `🔧 ${entry.name}`;
-                }
-              } catch {
-                // If parsing fails, use raw arguments
-                toolContent = `🔧 ${entry.name}: ${entry.arguments?.substring(0, 100)}`;
-              }
-            }
-
-            // Track this tool call with its session ID
-            const callId = entry.callId || entry.id || `call_${messages.length}`;
-            if (entry.name?.toLowerCase().includes('agent')) {
-              pendingToolCalls.set(callId, {
-                sessionId: childSessionId,
-                appType: 'codebuddy',
-                toolInput,
-              });
-            }
-
-            messages.push({
-              type: 'tool_use',
-              timestamp: new Date(entry.timestamp).toISOString(),
-              tool_name: entry.name || 'tool',
-              tool_input: toolInput,
-              content: toolContent,
-              model: currentModel,
-              callId: callId,
-            });
-          } else if (entry.type === 'function_call_result') {
-            // Tool execution result
-            const outputText = entry.output?.text || '';
-            const truncatedOutput =
-              outputText.length > 300 ? outputText.substring(0, 300) + '...' : outputText;
-
-            // Try to find matching tool call and get session ID
-            let childSessionId: string | undefined;
-            let childSessionAppType: string | undefined;
-
-            // Match by callId if available
-            const callId = entry.callId;
-            if (callId && pendingToolCalls.has(callId)) {
-              const pending = pendingToolCalls.get(callId)!;
-              childSessionId = pending.sessionId;
-              childSessionAppType = pending.appType;
-              pendingToolCalls.delete(callId);
-            }
-
-            // If no session ID from tool call, try to extract from output
-            if (!childSessionId && entry.name?.toLowerCase().includes('agent')) {
-              try {
-                const outputJson = JSON.parse(outputText);
-                childSessionId =
-                  outputJson.sessionId || outputJson.subAgentSessionId || outputJson.childSessionId;
-                childSessionAppType = outputJson.appType || 'codebuddy';
-              } catch {
-                // Not JSON, check if output contains session ID pattern
-                const sessionIdMatch = outputText.match(
-                  /session["']?\s*[:=]\s*["']?([a-f0-9-]{36})/i
-                );
-                if (sessionIdMatch) {
-                  childSessionId = sessionIdMatch[1];
-                  childSessionAppType = 'codebuddy';
-                }
-              }
-            }
-
-            messages.push({
-              type: 'tool_result',
-              timestamp: new Date(entry.timestamp).toISOString(),
-              tool_name: entry.name || 'tool',
-              content: truncatedOutput,
-              tool_output: {
-                output: outputText,
-              },
-              callId: entry.callId,
-              metadata: childSessionId
-                ? {
-                    childSessionId,
-                    childSessionAppType,
-                  }
-                : undefined,
-              model: currentModel,
-            });
-          }
-          // Skip: file-history-snapshot, topic - these are metadata not for display
-        } catch {
-          // Skip invalid lines
-        }
-      }
-
-      const firstEntry = JSON.parse(lines[0]) as CodebuddyMessageEntry;
-      const lastEntry = JSON.parse(lines[lines.length - 1]) as CodebuddyMessageEntry;
-
-      return {
-        id: sessionId,
+      const firstMessage = this.findUserPreview(messages, false);
+      const lastMessage = this.findUserPreview(messages, true) || firstMessage;
+      const detail: SessionDetail = {
+        id: ref.id,
         appType: 'codebuddy',
-        fileName: firstMessage || `Session ${sessionId.substring(0, 8)}`,
-        filePath: foundSession.path,
-        directory: foundSession.projectCwd,
-        createdAt: firstEntry.timestamp,
-        updatedAt: lastEntry.timestamp,
+        fileName: firstMessage || ref.id,
+        filePath: ref.path,
+        directory: ref.projectCwd,
+        createdAt: toTime(entries[0]?.timestamp) ?? ref.createdAt,
+        updatedAt: toTime(entries[entries.length - 1]?.timestamp) ?? ref.updatedAt,
         messageCount: messages.length,
         firstMessage,
         lastMessage,
-        uuid: sessionId,
+        uuid: ref.internalSessionId || ref.id,
+        kind: ref.kind,
+        parentSessionId: ref.parentSessionId,
+        agentType: ref.agentType,
         messages,
       };
+      this.detailCache = { path: ref.path, size: stats.size, mtimeMs: stats.mtimeMs, detail };
+      return detail;
     } catch (error) {
-      log.error(`Failed to get Codebuddy session detail ${sessionId}:`, error);
-      return null;
+      log.error(`Failed to get CodeBuddy session detail ${sessionId}:`, error);
+      throw error;
     }
   }
 
-  /**
-   * Get session statistics
-   */
   async getStats(): Promise<{
     totalSessions: number;
     totalMessages: number;
     firstSessionDate?: number;
     lastSessionDate?: number;
   }> {
-    try {
-      const sessions = await this.getAllSessions();
+    const sessions = await this.getAllSessions();
+    if (sessions.length === 0) return { totalSessions: 0, totalMessages: 0 };
+    return {
+      totalSessions: sessions.length,
+      totalMessages: sessions.reduce((sum, session) => sum + session.messageCount, 0),
+      firstSessionDate: Math.min(...sessions.map((session) => session.createdAt)),
+      lastSessionDate: Math.max(...sessions.map((session) => session.updatedAt)),
+    };
+  }
 
-      if (sessions.length === 0) {
-        return { totalSessions: 0, totalMessages: 0 };
-      }
-
-      const totalMessages = sessions.reduce((sum, s) => sum + s.messageCount, 0);
-      const dates = sessions.map((s) => s.createdAt);
-      const updatedDates = sessions.map((s) => s.updatedAt);
-
-      return {
-        totalSessions: sessions.length,
-        totalMessages: totalMessages,
-        firstSessionDate: Math.min(...dates),
-        lastSessionDate: Math.max(...updatedDates),
-      };
-    } catch (error) {
-      log.error('Failed to get Codebuddy session stats:', error);
-      return { totalSessions: 0, totalMessages: 0 };
+  private discoverSessionFiles(): SessionFileRef[] {
+    const refs: SessionFileRef[] = [];
+    for (const projectEntry of fs.readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
+      if (!projectEntry.isDirectory()) continue;
+      const projectPath = path.join(PROJECTS_DIR, projectEntry.name);
+      const decodedCwd = this.decodeProjectDir(projectEntry.name);
+      this.walkJsonl(projectPath, (filePath) => {
+        try {
+          const stats = fs.statSync(filePath);
+          const identity = this.readFileIdentity(filePath, stats.size, stats.mtimeMs);
+          const relativeParts = path.relative(projectPath, filePath).split(path.sep);
+          const subagentsIndex = relativeParts.lastIndexOf('subagents');
+          const kind = subagentsIndex >= 0 ? 'subagent' : 'main';
+          const fileId = path.basename(filePath, '.jsonl');
+          refs.push({
+            path: filePath,
+            projectCwd: identity.cwd || decodedCwd,
+            id: fileId,
+            internalSessionId: identity.sessionId,
+            parentSessionId:
+              kind === 'subagent' && subagentsIndex > 0
+                ? relativeParts[subagentsIndex - 1]
+                : undefined,
+            agentType: identity.agentType,
+            kind,
+            size: stats.size,
+            createdAt: stats.birthtimeMs || stats.mtimeMs,
+            updatedAt: stats.mtimeMs,
+          });
+        } catch (error) {
+          log.warn(`Failed to inspect CodeBuddy session file ${filePath}:`, error);
+        }
+      });
     }
+    const canonicalIdByAlias = new Map<string, string>();
+    for (const ref of refs) canonicalIdByAlias.set(ref.id, ref.id);
+    for (const ref of refs) {
+      if (ref.internalSessionId && !canonicalIdByAlias.has(ref.internalSessionId)) {
+        canonicalIdByAlias.set(ref.internalSessionId, ref.id);
+      }
+    }
+    for (const ref of refs) {
+      if (ref.parentSessionId) {
+        ref.parentSessionId = canonicalIdByAlias.get(ref.parentSessionId) || ref.parentSessionId;
+      }
+    }
+    return refs;
+  }
+
+  private walkJsonl(dirPath: string, visit: (filePath: string) => void): void {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    } catch (error) {
+      log.warn(`Failed to read CodeBuddy directory ${dirPath}:`, error);
+      return;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) this.walkJsonl(entryPath, visit);
+      else if (entry.isFile() && entry.name.endsWith('.jsonl')) visit(entryPath);
+    }
+  }
+
+  private readFileIdentity(
+    filePath: string,
+    size: number,
+    mtimeMs: number
+  ): { cwd?: string; sessionId?: string; agentType?: string } {
+    const cached = this.identityCache.get(filePath);
+    if (cached?.size === size && cached.mtimeMs === mtimeMs) return cached.identity;
+
+    const fd = fs.openSync(filePath, 'r');
+    const identity: { cwd?: string; sessionId?: string; agentType?: string } = {};
+    try {
+      const buffer = Buffer.alloc(64 * 1024);
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      for (const line of buffer.toString('utf-8', 0, bytesRead).split('\n')) {
+        if (!line.trim()) continue;
+        const entry = parseEntry(line);
+        if (!entry) continue;
+        identity.cwd ||= getString(entry.cwd);
+        identity.sessionId ||= getString(entry.sessionId);
+        if (entry.providerData?.isSubAgent === true) {
+          identity.agentType ||= getString(entry.providerData.agent);
+        }
+        if (identity.cwd && identity.sessionId && identity.agentType) break;
+      }
+    } finally {
+      fs.closeSync(fd);
+    }
+    this.identityCache.set(filePath, { size, mtimeMs, identity });
+    return identity;
+  }
+
+  private indexSessionFiles(refs: SessionFileRef[]): void {
+    this.sessionFileById.clear();
+    const currentPaths = new Set(refs.map((ref) => ref.path));
+    for (const filePath of this.identityCache.keys()) {
+      if (!currentPaths.has(filePath)) this.identityCache.delete(filePath);
+    }
+    for (const filePath of this.summaryCache.keys()) {
+      if (!currentPaths.has(filePath)) this.summaryCache.delete(filePath);
+    }
+    for (const ref of refs.sort((a, b) => b.size - a.size)) {
+      if (!this.sessionFileById.has(ref.id)) this.sessionFileById.set(ref.id, ref);
+      if (ref.internalSessionId && !this.sessionFileById.has(ref.internalSessionId)) {
+        this.sessionFileById.set(ref.internalSessionId, ref);
+      }
+    }
+  }
+
+  private streamSessionSummary(ref: SessionFileRef): Promise<SessionSummary> {
+    const cached = this.summaryCache.get(ref.path);
+    if (cached?.size === ref.size && cached.mtimeMs === ref.updatedAt) {
+      return Promise.resolve(cached.summary);
+    }
+
+    return new Promise((resolve) => {
+      const state = createSummaryState();
+      const stream = fs.createReadStream(ref.path, {
+        encoding: 'utf-8',
+        highWaterMark: 64 * 1024,
+      });
+      let leftover = '';
+      const processLine = (line: string): void => {
+        if (!line.trim()) return;
+        const entry = parseEntry(line);
+        if (entry) updateSummary(state, entry);
+      };
+      stream.on('data', (chunk: string | Buffer) => {
+        const lines = (leftover + chunk.toString()).split('\n');
+        leftover = lines.pop() || '';
+        lines.forEach(processLine);
+      });
+      stream.on('end', () => {
+        processLine(leftover);
+        flushSummaryReasoning(state);
+        const { pendingReasoning: _pendingReasoning, ...summary } = state;
+        this.summaryCache.set(ref.path, {
+          size: ref.size,
+          mtimeMs: ref.updatedAt,
+          summary,
+        });
+        resolve(summary);
+      });
+      stream.on('error', () =>
+        resolve({ count: 0, firstMessage: '', lastMessage: '', hasRecord: false })
+      );
+    });
+  }
+
+  private readActiveSessions(): Map<string, CodebuddySessionFile> {
+    const sessions = new Map<string, CodebuddySessionFile>();
+    if (!fs.existsSync(SESSIONS_DIR)) return sessions;
+    for (const entry of fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue;
+      try {
+        const value = JSON.parse(
+          fs.readFileSync(path.join(SESSIONS_DIR, entry.name), 'utf-8')
+        ) as unknown;
+        if (!isRecord(value)) continue;
+        const session = value as CodebuddySessionFile;
+        if (session.sessionId) sessions.set(session.sessionId, session);
+      } catch (error) {
+        log.warn(`Failed to parse CodeBuddy active session ${entry.name}:`, error);
+      }
+    }
+    return sessions;
+  }
+
+  private readImageDataUrl(item: CodebuddyContentItem): string | null {
+    const imagePath = getString(item.blob_path);
+    if (!imagePath) return null;
+    const mimeType = getString(item.mime) || this.getImageMimeType(path.extname(imagePath));
+    if (!mimeType || !mimeType.startsWith('image/')) return null;
+    try {
+      const resolvedPath = fs.realpathSync(imagePath);
+      const resolvedRoot = fs.realpathSync(CODEBUDDY_DIR);
+      if (resolvedPath !== resolvedRoot && !resolvedPath.startsWith(resolvedRoot + path.sep)) {
+        return null;
+      }
+      const stats = fs.statSync(resolvedPath);
+      if (!stats.isFile() || stats.size > MAX_EMBEDDED_IMAGE_BYTES) return null;
+      return `data:${mimeType};base64,${fs.readFileSync(resolvedPath).toString('base64')}`;
+    } catch {
+      return null;
+    }
+  }
+
+  private getImageMimeType(extension: string): string | null {
+    const mimeTypes: Record<string, string> = {
+      '.png': 'image/png',
+      '.jpg': 'image/jpeg',
+      '.jpeg': 'image/jpeg',
+      '.gif': 'image/gif',
+      '.webp': 'image/webp',
+      '.svg': 'image/svg+xml',
+      '.bmp': 'image/bmp',
+      '.ico': 'image/x-icon',
+      '.avif': 'image/avif',
+    };
+    return mimeTypes[extension.toLowerCase()] || null;
+  }
+
+  private findUserPreview(messages: SessionMessage[], reverse: boolean): string {
+    const source = reverse ? [...messages].reverse() : messages;
+    const content =
+      source.find((message) => message.type === 'user' && message.content)?.content || '';
+    return content
+      .replace(/!\[[^\]]*]\(data:image\/[^)]+\)/g, '')
+      .trim()
+      .slice(0, 100);
+  }
+
+  private decodeProjectDir(dirName: string): string {
+    if (dirName.startsWith('Users-')) {
+      const parts = dirName.split('-');
+      if (parts.length >= 2) return `/Users/${parts[1]}/${parts.slice(2).join('/')}`;
+    }
+    return '/' + dirName.replace(/-/g, '/');
   }
 }
 

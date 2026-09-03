@@ -135,8 +135,8 @@ const codebuddyParser: ContentParser = (content: string) => {
   }
   cleanedContent = cleanedContent.replace(/\n{3,}/g, '\n\n').trim();
 
-  // 如果没有实质内容，返回空文本标记
-  if (!cleanedContent || cleanedContent.length < 3) {
+  // Keep short prompts such as "ok", "1", or Chinese single-character replies.
+  if (!cleanedContent) {
     return [
       {
         type: 'text',
