@@ -56,6 +56,49 @@ describe('CodeBuddy session service', () => {
     fs.writeFileSync(imagePath, Buffer.from('image-bytes'));
     writeJsonl(mainFile, [
       {
+        id: 'command-caveat',
+        sessionId: mainSessionId,
+        cwd,
+        timestamp: start - 3,
+        type: 'message',
+        role: 'user',
+        content: [
+          {
+            type: 'input_text',
+            text: '<system-reminder data-role="command-caveat">Ignore local command messages.</system-reminder>',
+          },
+        ],
+      },
+      {
+        id: 'command-name',
+        sessionId: mainSessionId,
+        cwd,
+        timestamp: start - 2,
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '<command-name>/clear</command-name>' }],
+      },
+      {
+        id: 'command-output',
+        sessionId: mainSessionId,
+        cwd,
+        timestamp: start - 1,
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: '<local-command-stdout></local-command-stdout>' }],
+      },
+      {
+        id: 'command-error',
+        sessionId: mainSessionId,
+        cwd,
+        timestamp: start - 1,
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: '<local-command-stderr>hidden error</local-command-stderr>' },
+        ],
+      },
+      {
         id: 'user-1',
         sessionId: mainSessionId,
         cwd,
@@ -63,7 +106,10 @@ describe('CodeBuddy session service', () => {
         type: 'message',
         role: 'user',
         content: [
-          { type: 'input_text', text: 'first block' },
+          {
+            type: 'input_text',
+            text: '<system-reminder data-role="command-caveat">Ignore this.</system-reminder>\nfirst block',
+          },
           { type: 'input_text', text: 'second block' },
           { type: 'image_blob_ref', blob_path: imagePath, mime: 'image/png' },
         ],
@@ -172,7 +218,8 @@ describe('CodeBuddy session service', () => {
       JSON.stringify({ sessionId: childInternalId, updatedAt: start + 101 })
     );
 
-    const { codebuddySessionService } = await importServiceWithHome(homePath);
+    const { codebuddySessionService, normalizeCodebuddyEntries } =
+      await importServiceWithHome(homePath);
     const sessions = await codebuddySessionService.getAllSessions();
 
     expect(new Set(sessions.map((session) => session.id))).toEqual(
@@ -180,6 +227,7 @@ describe('CodeBuddy session service', () => {
     );
     expect(sessions.find((session) => session.id === mainSessionId)).toMatchObject({
       fileName: 'Active topic',
+      firstMessage: 'first block\nsecond block',
       directory: cwd,
       kind: 'main',
       updatedAt: start + 100,
@@ -209,6 +257,7 @@ describe('CodeBuddy session service', () => {
     const detail = await codebuddySessionService.getSessionDetail(mainSessionId);
     expect(detail).not.toBeNull();
     expect(() => sessionDetailResult()(detail)).not.toThrow();
+    expect(detail?.messages).toHaveLength(5);
     expect(detail?.messages[0].content).toContain('first block\nsecond block');
     expect(detail?.messages[0].content).toMatch(/!\[attached\.png]\(data:image\/png;base64,/);
     expect(detail?.messages[1]).toMatchObject({
@@ -229,5 +278,25 @@ describe('CodeBuddy session service', () => {
       'child task',
       'child result',
     ]);
+
+    const preservedReminderContent = normalizeCodebuddyEntries(
+      [
+        {
+          timestamp: start,
+          type: 'message',
+          role: 'user',
+          content: [
+            {
+              type: 'input_text',
+              text: '<system-reminder data-role="tool-hint">Keep this hint.</system-reminder>\n<system-reminder data-role="error-recovery">Keep recovery guidance.</system-reminder>\n<system-reminder data-role=command-caveat-extra>Keep similar role.</system-reminder>',
+            },
+          ],
+        },
+      ],
+      start
+    )[0]?.content;
+    expect(preservedReminderContent).toContain('tool-hint');
+    expect(preservedReminderContent).toContain('error-recovery');
+    expect(preservedReminderContent).toContain('command-caveat-extra');
   });
 });

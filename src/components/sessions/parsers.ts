@@ -119,12 +119,13 @@ const codebuddyParser: ContentParser = (content: string) => {
   const patterns = [
     // 粘贴提示
     /\[Pasted ~\d+ lines?\]/g,
-    // system-reminder 标签及其内容
-    /<<?system-reminder>?>.*?<<?\/system-reminder>?>/gis,
+    // command caveat 及旧版无属性 system-reminder
+    /<system-reminder\b(?=[^>]*\bdata-role\s*=\s*(?:"command-caveat"|'command-caveat'|command-caveat(?=\s|\/?>)))[^>]*>[\s\S]*?<\/system-reminder\s*>/gi,
+    /<system-reminder>[\s\S]*?<\/system-reminder\s*>/gi,
     // local-command 相关标签
-    /<local-command-stdout>.*?<\/local-command-stdout>/gis,
-    /<local-command-stderr>.*?<\/local-command-stderr>/gis,
-    /<command-name>.*?<\/command-name>/gis,
+    /<local-command-stdout\b[^>]*>[\s\S]*?<\/local-command-stdout\s*>/gi,
+    /<local-command-stderr\b[^>]*>[\s\S]*?<\/local-command-stderr\s*>/gi,
+    /<command-name\b[^>]*>[\s\S]*?<\/command-name\s*>/gi,
     // 清理空标签
     /<\w+><\/\w+>/g,
   ];

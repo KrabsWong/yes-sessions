@@ -82,13 +82,57 @@ async function createCodebuddyFixture(options: { withGitChanges?: boolean } = {}
 
   const lines = [
     {
+      id: 'command-caveat',
+      timestamp: start - 3,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [
+        {
+          type: 'input_text',
+          text: '<system-reminder data-role="command-caveat">Ignore local command messages.</system-reminder>',
+        },
+      ],
+    },
+    {
+      id: 'command-name',
+      timestamp: start - 2,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [{ type: 'input_text', text: '<command-name>/clear</command-name>' }],
+    },
+    {
+      id: 'command-output',
+      timestamp: start - 1,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [{ type: 'input_text', text: '<local-command-stdout></local-command-stdout>' }],
+    },
+    {
+      id: 'command-error',
+      timestamp: start - 1,
+      type: 'message',
+      role: 'user',
+      cwd: projectDir,
+      content: [
+        { type: 'input_text', text: '<local-command-stderr>hidden error</local-command-stderr>' },
+      ],
+    },
+    {
       id: 'm1',
       timestamp: start,
       type: 'message',
       role: 'user',
       cwd: projectDir,
       providerData: { model: 'fixture-model' },
-      content: [{ type: 'input_text', text: 'Summarize fixture project' }],
+      content: [
+        {
+          type: 'input_text',
+          text: '<system-reminder data-role="command-caveat">Ignore this.</system-reminder>\nSummarize fixture project',
+        },
+      ],
     },
     {
       id: 'call-1',
@@ -524,13 +568,25 @@ test('renders a fixture Codebuddy session from list to conversation detail', asy
   try {
     const mainWindow = await waitForMainWindow(electronApp);
     await selectCodebuddyApp(mainWindow);
-    await expect(mainWindow.getByTestId('session-stats')).toHaveCSS('white-space', 'nowrap');
+    const statsTrigger = mainWindow.getByTestId('session-stats-trigger');
+    const statsTooltip = mainWindow.getByTestId('session-stats-tooltip');
+    await statsTrigger.focus();
+    await expect(statsTooltip).toBeVisible();
+    await statsTrigger.evaluate((element) => (element as HTMLElement).blur());
+    await expect(statsTooltip).toBeHidden();
+    await statsTrigger.hover();
+    await expect(statsTooltip).toBeVisible();
+    await expect(statsTooltip).toContainText(/Session statistics|会话统计/);
+    await expect(statsTooltip).toContainText(/Total Sessions|会话总数/);
+    await expect(statsTooltip).toContainText(/Sub Agent|子 Agent/);
+    await expect(statsTooltip).toContainText(/Total Messages|消息总数/);
     const sessionCard = mainWindow.locator(
       `[data-testid="session-card"][data-session-id="${fixture.sessionId}"]`
     );
 
     await expect(sessionCard).toBeVisible();
     await expect(sessionCard).toContainText('Summarize fixture project');
+    await expect(sessionCard).not.toContainText('command-caveat');
     await expect(
       mainWindow.locator(
         `[data-testid="session-card"][data-session-id="${fixture.childSessionId}"]`
@@ -548,6 +604,7 @@ test('renders a fixture Codebuddy session from list to conversation detail', asy
 
     const conversation = mainWindow.getByTestId('conversation-detail');
     await expect(conversation).toContainText('Summarize fixture project');
+    await expect(conversation).not.toContainText('command-caveat');
     await expect(conversation).toContainText('Read');
     await expect(conversation).toContainText('package.json');
     await expect(conversation).toContainText('Fixture package is yes-sessions.');

@@ -137,6 +137,22 @@ function extractMessageText(entry: CodebuddyMessageEntry): string {
   return extractText(entry.content, acceptedTypes) || extractText(entry.message?.content);
 }
 
+const CODEBUDDY_CONTROL_BLOCKS = [
+  /<system-reminder\b(?=[^>]*\bdata-role\s*=\s*(?:"command-caveat"|'command-caveat'|command-caveat(?=\s|\/?>)))[^>]*>[\s\S]*?<\/system-reminder\s*>/gi,
+  /<system-reminder>[\s\S]*?<\/system-reminder\s*>/gi,
+  /<local-command-stdout\b[^>]*>[\s\S]*?<\/local-command-stdout\s*>/gi,
+  /<local-command-stderr\b[^>]*>[\s\S]*?<\/local-command-stderr\s*>/gi,
+  /<command-name\b[^>]*>[\s\S]*?<\/command-name\s*>/gi,
+];
+
+function cleanCodebuddyUserText(text: string): string {
+  let cleaned = text;
+  for (const pattern of CODEBUDDY_CONTROL_BLOCKS) {
+    cleaned = cleaned.replace(pattern, '');
+  }
+  return cleaned.replace(/\n{3,}/g, '\n\n').trim();
+}
+
 function parseToolInput(value: unknown): Record<string, unknown> {
   let parsed = value;
   if (typeof value === 'string') {
@@ -230,11 +246,11 @@ function updateSummary(state: SummaryState, entry: CodebuddyMessageEntry): void 
     return;
   }
   if (entry.type === 'message' && entry.role === 'user') {
+    const text = cleanCodebuddyUserText(extractMessageText(entry));
+    const hasImage = getContentItems(entry.content).some((item) => item.type === 'image_blob_ref');
+    if (!text && !hasImage) return;
     flushSummaryReasoning(state);
-    const text = extractMessageText(entry);
-    if (text || getContentItems(entry.content).some((item) => item.type === 'image_blob_ref')) {
-      state.count++;
-    }
+    state.count++;
     if (text) {
       state.firstMessage ||= text.slice(0, 100);
       state.lastMessage = text.slice(0, 100);
@@ -292,10 +308,11 @@ export function normalizeCodebuddyEntries(
     }
 
     if (entry.type === 'message' && (entry.role === 'user' || entry.role === 'system')) {
-      pushPendingReasoning(entry.timestamp);
       let text = extractMessageText(entry);
+      let images: string[] = [];
       if (entry.role === 'user') {
-        const images = getContentItems(entry.content)
+        text = cleanCodebuddyUserText(text);
+        images = getContentItems(entry.content)
           .filter((item) => item.type === 'image_blob_ref')
           .map((item) => {
             const dataUrl = resolveImage(item);
@@ -304,8 +321,10 @@ export function normalizeCodebuddyEntries(
             if (!fileName) return '';
             return dataUrl ? `![${fileName}](${dataUrl})` : `📎 ${fileName}`;
           });
-        text = [text, ...images].filter(Boolean).join('\n\n');
+        if (!text && images.every((image) => !image)) continue;
       }
+      pushPendingReasoning(entry.timestamp);
+      text = [text, ...images].filter(Boolean).join('\n\n');
       if (text) {
         const status = getString(entry.status);
         messages.push({

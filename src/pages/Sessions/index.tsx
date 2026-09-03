@@ -15,6 +15,7 @@ import {
   ChevronUp,
   ExternalLink,
   Folder,
+  Info,
   RefreshCw,
 } from 'lucide-react';
 import { useSidebarResize } from '@/hooks/useSidebarResize';
@@ -57,11 +58,8 @@ function truncateText(text: string, maxLength: number): string {
   return text.substring(0, maxLength).trim() + '...';
 }
 
-function formatCompactCount(value: number, language: string): string {
-  return new Intl.NumberFormat(language, {
-    notation: 'compact',
-    maximumFractionDigits: 1,
-  }).format(value);
+function formatCount(value: number, language: string): string {
+  return new Intl.NumberFormat(language).format(value);
 }
 
 export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
@@ -354,33 +352,46 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
             <div className="flex items-center justify-between gap-3 px-3 py-1.5 border-b border-border/40 bg-card">
               {/* Stats */}
               {isSupported && stats && (
-                <div
-                  data-testid="session-stats"
-                  className="flex min-w-0 flex-1 flex-nowrap items-center gap-2 overflow-hidden whitespace-nowrap text-[11px] tabular-nums text-muted-foreground"
-                >
-                  <span className="shrink-0">
-                    {formatCompactCount(stats.totalSessions, i18n.language)}{' '}
-                    {t('sessions.sessionsLabel')}
-                  </span>
-                  {stats.subAgentSessions > 0 && (
-                    <>
-                      <span className="text-border">·</span>
-                      <span className="shrink-0">
-                        {formatCompactCount(stats.subAgentSessions, i18n.language)}{' '}
-                        {t('sessions.subAgentsLabel')}
-                      </span>
-                    </>
-                  )}
-                  <span className="text-border">·</span>
-                  <span className="shrink-0">
-                    {formatCompactCount(stats.totalMessages, i18n.language)}{' '}
-                    {t('sessions.messagesLabel')}
-                  </span>
-                </div>
+                <TooltipProvider delayDuration={200}>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        data-testid="session-stats-trigger"
+                        aria-label={t('sessions.sessionStatistics')}
+                        className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      >
+                        <Info className="h-4 w-4" />
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent
+                      data-testid="session-stats-tooltip"
+                      side="bottom"
+                      align="start"
+                      className="w-44 border border-border bg-popover p-3 text-popover-foreground shadow-md"
+                    >
+                      <p className="mb-2 font-medium">{t('sessions.sessionStatistics')}</p>
+                      <dl className="space-y-1.5 tabular-nums">
+                        <div className="flex items-center justify-between gap-4">
+                          <dt className="text-muted-foreground">{t('sessions.totalSessions')}</dt>
+                          <dd>{formatCount(stats.totalSessions, i18n.language)}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <dt className="text-muted-foreground">{t('sessions.subAgent')}</dt>
+                          <dd>{formatCount(stats.subAgentSessions, i18n.language)}</dd>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <dt className="text-muted-foreground">{t('sessions.totalMessages')}</dt>
+                          <dd>{formatCount(stats.totalMessages, i18n.language)}</dd>
+                        </div>
+                      </dl>
+                    </TooltipContent>
+                  </Tooltip>
+                </TooltipProvider>
               )}
 
               {/* View Mode Toggle - Icon buttons */}
-              <div className="flex shrink-0 items-center bg-primary-muted rounded-md p-0.5">
+              <div className="ml-auto flex shrink-0 items-center rounded-md bg-primary-muted p-0.5">
                 <button
                   onClick={() => setViewMode('date')}
                   className={`px-2 py-1 text-[10px] font-medium rounded-sm transition-all ${
