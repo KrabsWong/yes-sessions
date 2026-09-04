@@ -1,202 +1,96 @@
 # Yes Sessions
 
-AI CLI 工具会话管理器 - 浏览、管理和恢复 AI 应用的对话历史。
+Yes Sessions 是一款只面向 macOS 的 AI CLI 会话浏览与恢复工具。当前主线实现为纯 Rust 桌面应用：界面使用 GPUI Kit，只有 Mermaid 图表通过 `gpui-wry` 嵌入系统 WKWebView；应用不再携带 Electron、Chromium 或 Node.js 运行时。
 
-![Logo](./public/logo.png)
+![Logo](./build/icons/256x256.png)
+
+## 功能
+
+- 浏览 CodeBuddy、Claude Code、OpenCode 与 Codex CLI 的本地会话
+- 按日期和项目目录分组、折叠与快速定位用户消息
+- 展示 Markdown、代码、推理过程、工具调用和子 Agent 会话
+- 通过系统 WKWebView 渲染 Mermaid，并支持缩放、平移和重置
+- 在 Ghostty、Kitty 或 Terminal.app 中恢复会话
+- 中文/英文、浅色/深色/跟随系统、强调色和阅读布局设置
+- 原生 macOS 窗口，无启动页，无前后端 IPC
+
+文件预览与 Git Diff 视图暂不包含在本次原生迁移中；会话中的普通文本、代码和图片引用仍可正常展示。
+
+## 系统要求
+
+- macOS 13.0 或更高版本
+- 当前发布目标：Apple Silicon
+- 开发环境：Rust stable、Xcode Command Line Tools
+
+## 开发
+
+```bash
+# 运行
+cargo run -p yes-sessions
+
+# 静态检查与测试
+cargo check --workspace
+cargo test --workspace
+
+# 生成 .app 与 DMG
+./scripts/package-macos.sh
+```
+
+产物位于：
+
+- `target/macos/Yes Sessions.app`
+- `release/Yes-Sessions-<version>-arm64.dmg`
+
+默认使用 ad-hoc 签名，适合本地验证。正式分发使用 GitHub Release 工作流；它会进行 Developer ID 签名、Apple 公证和 stapling。仓库需要配置以下 Actions Secrets：
+
+- `MACOS_CERTIFICATE`：Developer ID Application 证书的 Base64 编码 `.p12`
+- `MACOS_CERTIFICATE_PASSWORD`：导出 `.p12` 时使用的密码
+- `CODESIGN_IDENTITY`：证书身份，例如 `Developer ID Application: ...`
+- `APPLE_ID`、`APPLE_TEAM_ID`、`APPLE_APP_PASSWORD`：Apple 公证账号、团队 ID 与 app-specific password
+- `HOMEBREW_TAP_TOKEN`：更新 Homebrew tap 与发布附件
+- `WORKFLOW_PAT`：自动版本工作流推送 release tag，并触发后续 Release 工作流
+
+缺少任意分发凭据时，Release 工作流会立即失败，不会发布未经公证的安装包。本地也可同时设置 `CODESIGN_IDENTITY` 和三项 Apple 公证凭据，让 `./scripts/package-macos.sh` 生成已签名、公证并 stapled 的 `.app` 与 DMG。
+
+## 架构
+
+```text
+crates/
+  yes-core/             会话模型、四类数据源解析、设置、终端与 Git 服务
+  yes-app/              GPUI Kit 界面、会话交互、Markdown 与 Mermaid 宿主
+    assets/             本地 Mermaid 运行资源
+packaging/              macOS Info.plist
+scripts/package-macos.sh
+```
+
+应用是单进程 Rust 架构。耗时的会话读取通过 GPUI 后台任务执行并回到 UI 更新状态，不再经过 Electron IPC。Mermaid 是唯一的 WebView 使用场景，且使用 macOS 自带的 WebKit，不内置浏览器内核。
+
+## 数据路径
+
+| 工具 | 路径 |
+| --- | --- |
+| CodeBuddy | `~/.codebuddy/projects/<project>/*.jsonl` |
+| Claude Code | `~/.claude/projects/<project>/*.jsonl` |
+| OpenCode | `~/.local/share/opencode/opencode.db`（兼容文件存储） |
+| Codex CLI | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/session_index.jsonl` |
+
+大型 JSONL 会话采用轻量摘要扫描；只有打开具体会话时才解析完整内容，避免启动时读取数 GB 历史记录。
 
 ## 安装
 
-### 方式一：一键安装脚本（推荐）
-
-自动下载并安装最新版本：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash
-```
-
-安装指定版本：
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash -s -- -v 9.0.0
-```
-
-### 方式二：Homebrew
+发布后可通过 Homebrew 安装：
 
 ```bash
 brew tap krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
 
-### 方式三：手动安装
-
-1. 从 [Releases](https://github.com/KrabsWong/agent-manager/releases) 下载对应架构的 DMG
-2. 移除安全隔离属性：
-   ```bash
-   xattr -c ~/Downloads/Yes-Sessions-*.dmg
-   ```
-3. 双击挂载 DMG 并拖动应用到 Applications 文件夹
-
-### 系统要求
-
-- macOS 11.0+ (Big Sur)
-- Apple Silicon 或 Intel 处理器
-
----
-
-## 功能特性
-
-### 会话管理
-
-- **多应用支持**：Codebuddy、Claude Code、OpenCode、Codex CLI
-- **会话列表**：按时间分组展示历史会话
-- **详情查看**：完整的对话历史，包括用户消息、AI 回复、工具调用
-- **模型追踪**：显示每条消息使用的 AI 模型
-- **子 Agent 支持**：识别并展示子 Agent 调用及其使用的模型
-- **会话恢复**：一键恢复会话到外部终端继续对话
-
-### 终端恢复
-
-- **终端选择**：支持 Ghostty、Kitty 或 Terminal.app
-- **自动检测**：优先使用已安装的现代终端，必要时回退到系统 Terminal.app
-- **工作目录恢复**：打开终端时会尽量切换到会话记录的工作目录
-
-### 智能解析
-
-- **文件引用解析**：自动解析 OpenCode/Claude Code 格式的文件引用
-- **代码高亮**：支持多种编程语言的语法高亮
-- **Markdown 渲染**：AI 回复内容支持 Markdown 格式
-- **思考过程展示**：可选择显示 AI 的思考/推理过程
-
-### 界面特性
-
-- **主题切换**：支持深色/浅色主题，可跟随系统
-- **虚拟滚动**：大量会话列表流畅滚动
-- **日期折叠**：按日期分组，支持展开/折叠
-- **国际化**：支持中文/英文界面切换
-- **工具区块折叠**：支持折叠 Bash/Read/Write/Edit/Glob 等工具调用区块
-
----
-
-## 支持的 AI 工具
-
-| 工具                    | 状态     | 说明             |
-| ----------------------- | -------- | ---------------- |
-| Codebuddy               | 完全支持 | JSONL 文件解析   |
-| Claude Code             | 完全支持 | 新旧格式都支持   |
-| OpenCode                | 完全支持 | SQLite 数据库    |
-| Codex CLI               | 完全支持 | JSONL 文件解析   |
-
----
-
-## 开发
-
-### 技术栈
-
-- **框架**: Electron + React 18 + TypeScript
-- **构建**: Vite
-- **样式**: Tailwind CSS + shadcn/ui
-- **状态管理**: Zustand + TanStack Query
-- **国际化**: i18next
-- **外部会话读取**: JSONL + OpenCode SQLite
-
-### 快速开始
+也可从 GitHub Releases 下载已经签名、公证并 stapled 的 DMG，无需绕过 Gatekeeper。本地生成的 ad-hoc 调试包如果被 macOS 标记为 quarantine，可在首次打开前手工执行：
 
 ```bash
-# 安装依赖
-npm install
-
-# 开发模式
-npm run dev
-
-# 构建应用
-npm run build
-
-# 类型检查
-npm run typecheck
-
-# 单元测试
-npm test
-
-# Electron 端到端烟测（会先执行 tsc && vite build）
-npm run test:e2e
-
-# 代码格式化
-npm run format
+xattr -c ~/Downloads/Yes-Sessions-*.dmg
 ```
-
-### 项目结构
-
-```
-src/
-  components/      # React 组件
-    sessions/      # 会话相关组件
-  pages/           # 页面组件
-  lib/api/         # 渲染进程 IPC API，按领域拆分为 app/files/git/sessions/settings
-  lib/i18n/        # 实际加载的内联多语言配置
-  lib/terminal/    # 终端恢复命令构建
-  locales/         # 多语言备份/参考文件，不会在运行时加载
-  stores/          # Zustand 状态管理
-  lib/             # 工具函数
-  types/           # TypeScript 类型定义
-  hooks/           # 自定义 hooks
-
-electron/
-  handlers/        # IPC 处理程序（app/session/tree/git 等）
-  services/        # 主进程服务
-    session/       # 各 AI 工具的会话读取服务
-    terminal/      # 外部终端启动服务
-    performance/   # 启动性能监控
-  ipc/             # IPC 通信
-
-tests/
-  src/             # renderer/shared 单元和组件测试，按 src 镜像组织
-  electron/        # Electron 主进程单元和集成测试，按 electron 镜像组织
-  setup.ts         # Vitest 全局测试初始化
-
-e2e/               # Playwright Electron 端到端烟测
-```
-
-> 注意：新增或修改界面文案时，应更新 `src/lib/i18n/index.ts` 中的 `enTranslations` 和 `zhTranslations`。`src/locales/*.json` 目前只是备份/参考。
-
----
-
-## 数据存储路径
-
-### Claude Code
-
-- 新格式：`~/.claude/projects/<project>/<sessionId>.jsonl`
-- 旧格式：`~/.claude/transcripts/ses_*.jsonl`
-
-### OpenCode
-
-- 数据库：`~/.local/share/opencode/opencode.db`
-
-### Codebuddy
-
-- 会话文件：`~/.codebuddy/projects/<project>/*.jsonl`
-
----
-
-## 版本管理
-
-本项目使用自动化版本管理工作流：
-
-1. 从 `main` 分支创建功能分支
-2. 开发完成后提交并推送到远程
-3. 创建 PR 到 `main` 分支，并添加标签：
-   - `major` - 破坏性变更 (x.0.0)
-   - `minor` - 新功能 (x.y.0)
-   - `patch` - Bug 修复 (x.y.z)
-4. 合并 PR 后自动升级版本并触发 Release 构建
-
-发布流程由 `.github/workflows/auto-version-bump.yml` 和 `.github/workflows/release.yml` 执行。
-
----
 
 ## 许可证
 
-MIT
-
----
-
-Made for AI CLI users
+MIT。Mermaid 的第三方许可证随应用资源一起分发。

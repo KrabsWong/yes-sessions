@@ -41,7 +41,7 @@
 
 ## 系统要求
 
-- **macOS**: macOS 11.0 (Big Sur) 或更高版本
+- **macOS**: macOS 13.0 (Ventura) 或更高版本
 
 ---
 
@@ -76,6 +76,6 @@
 
 ## 相关链接
 
-- 完整文档: https://github.com/KrabsWong/agent-manager#readme
-- 问题反馈: https://github.com/KrabsWong/agent-manager/issues
-- 功能建议: https://github.com/KrabsWong/agent-manager/discussions
+- 完整文档: https://github.com/KrabsWong/yes-sessions#readme
+- 问题反馈: https://github.com/KrabsWong/yes-sessions/issues
+- 功能建议: https://github.com/KrabsWong/yes-sessions/discussions

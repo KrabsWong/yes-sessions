@@ -9,26 +9,26 @@
 **安装最新版本（自动检测）：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh | bash
 ```
 
 **安装指定版本：**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash -s -- -v 9.0.0
+curl -fsSL https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh | bash -s -- -v 10.0.0
 ```
 
 **通过环境变量指定版本：**
 
 ```bash
-YS_VERSION=9.0.0 curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash
+YS_VERSION=10.0.0 curl -fsSL https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh | bash
 ```
 
 ### 方式二：先下载再运行
 
 ```bash
 # 下载脚本
-curl -fsSL -o install.sh https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh
 
 # 查看脚本内容（可选）
 cat install.sh
@@ -37,7 +37,7 @@ cat install.sh
 bash install.sh
 
 # 或安装指定版本
-bash install.sh -v 9.0.0
+bash install.sh -v 10.0.0
 ```
 
 ---
@@ -90,7 +90,7 @@ bash install.sh -v 9.0.0
 | ------------------- | ----------------- | ------------------- |
 | 一键安装            | ✅                | ✅                  |
 | 自动获取最新版本    | ✅                | ✅                  |
-| 安装指定版本        | ✅ `-v 9.0.0`     | ❌                  |
+| 安装指定版本        | ✅ `-v 10.0.0`    | ❌                  |
 | 自动移除 quarantine | ✅                | ✅                  |
 | 自动更新            | ❌                | ✅ `brew upgrade`   |
 | 卸载管理            | ❌                | ✅ `brew uninstall` |
@@ -111,18 +111,18 @@ bash install.sh -v 9.0.0
 
 ### 1. 自动获取最新版本（默认）
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh | bash
 ```
 脚本会自动调用 GitHub API 获取最新 release 版本号。
 
 ### 2. 命令行参数指定版本
 ```bash
-curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash -s -- -v 9.0.0
+curl -fsSL https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh | bash -s -- -v 10.0.0
 ```
 
 ### 3. 环境变量指定版本
 ```bash
-YS_VERSION=9.0.0 curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh | bash
+YS_VERSION=10.0.0 curl -fsSL https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh | bash
 ```
 
 ### 优先级
@@ -138,7 +138,7 @@ YS_VERSION=9.0.0 curl -fsSL https://raw.githubusercontent.com/KrabsWong/agent-ma
 
 ```bash
 # 下载并查看
-curl -fsSL -o install.sh https://raw.githubusercontent.com/KrabsWong/agent-manager/main/scripts/install.sh
+curl -fsSL -o install.sh https://raw.githubusercontent.com/KrabsWong/yes-sessions/main/scripts/install.sh
 cat install.sh
 
 # 确认安全后再运行
@@ -178,10 +178,10 @@ sudo bash install.sh
 
 **解决**：脚本使用 GitHub 官方链接，如果慢可以：
 
-1. 手动从 [Releases](https://github.com/KrabsWong/agent-manager/releases) 下载 DMG
+1. 手动从 [Releases](https://github.com/KrabsWong/yes-sessions/releases) 下载 DMG
 2. 双击挂载 DMG
 3. 拖动应用到 Applications 文件夹
-4. 运行 `xattr -cr /Applications/Yes-Sessions.app`
+4. 运行 `xattr -cr "/Applications/Yes Sessions.app"`
 
 ---
 
