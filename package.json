@@ -1,6 +1,6 @@
 {
   "name": "yes-sessions",
-  "version": "9.4.0",
+  "version": "9.4.1",
   "description": "AI Session Manager - Browse and resume your AI conversations",
   "main": "dist-electron/main.js",
   "author": "Yes, Sessions Team",
