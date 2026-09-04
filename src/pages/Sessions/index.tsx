@@ -35,6 +35,7 @@ import { UserMessageNavigator } from '@/components/sessions/UserMessageNavigator
 import { filePreviewApi } from '@/lib/api/files';
 import {
   VirtualSessionList,
+  compareSessionsByRecency,
   formatSessionDateGroupKey,
   getSessionDirectoryGroupKey,
   type ViewMode,
@@ -129,7 +130,10 @@ export function SessionsPage({ selectedApp, onAppChange }: SessionsPageProps) {
 
   const { data: sessions, isLoading, error } = useSessions(selectedApp);
   const mainSessions = useMemo(
-    () => sessions?.filter((session) => session.kind !== 'subagent') || [],
+    () =>
+      sessions
+        ?.filter((session) => session.kind !== 'subagent')
+        .sort(compareSessionsByRecency) || [],
     [sessions]
   );
   const stats = useMemo(() => {

@@ -151,6 +151,28 @@ describe('VirtualSessionList', () => {
     unmount(root);
   });
 
+  it('orders sessions by recency regardless of the input order', () => {
+    const sameUpdatedAt = Date.UTC(2024, 0, 2, 10, 0);
+    const sessions = [
+      baseSessions[1],
+      {
+        ...baseSessions[0],
+        id: 'newest-created',
+        firstMessage: 'Newest created request',
+        createdAt: Date.UTC(2024, 0, 2, 9, 0),
+        updatedAt: sameUpdatedAt,
+      },
+      { ...baseSessions[0], updatedAt: sameUpdatedAt },
+    ];
+    const { container, root } = render(<Harness sessions={sessions} />);
+
+    const renderedIds = Array.from(container.querySelectorAll('[data-session-id]')).map(
+      (element) => element.getAttribute('data-session-id')
+    );
+    expect(renderedIds).toEqual(['newest-created', 'newer', 'older']);
+    unmount(root);
+  });
+
   it('collapses and expands all groups from header controls', () => {
     const { container, root } = render(<Harness />);
 
@@ -237,6 +259,43 @@ describe('VirtualSessionList', () => {
     expect(childButton).toBeTruthy();
     click(childButton!);
     expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ id: 'agent-child' }));
+    unmount(root);
+  });
+
+  it('orders expanded sub-agent sessions by recency', () => {
+    const child = (id: string, updatedAt: number): Session => ({
+      id,
+      appType: 'codebuddy',
+      fileName: `${id}.jsonl`,
+      filePath: `/repo/app/newer/subagents/${id}.jsonl`,
+      createdAt: updatedAt - 1,
+      updatedAt,
+      messageCount: 1,
+      firstMessage: id,
+      directory: '/repo/app',
+      kind: 'subagent',
+      parentSessionId: 'newer',
+    });
+    const { container, root } = render(
+      <Harness
+        sessions={[
+          ...baseSessions,
+          child('older-child', Date.UTC(2024, 0, 2, 10, 1)),
+          child('newer-child', Date.UTC(2024, 0, 2, 10, 2)),
+        ]}
+      />
+    );
+
+    const toggle = container
+      .querySelector('[data-session-id="newer"]')
+      ?.querySelector('[data-testid="toggle-subagents"]');
+    expect(toggle).toBeTruthy();
+    click(toggle!);
+
+    const childIds = Array.from(container.querySelectorAll('[data-session-kind="subagent"]')).map(
+      (element) => element.getAttribute('data-session-id')
+    );
+    expect(childIds).toEqual(['newer-child', 'older-child']);
     unmount(root);
   });
 });
