@@ -22,6 +22,10 @@ import type { Session } from '@/types';
 
 export type ViewMode = 'date' | 'directory';
 
+export function compareSessionsByRecency(a: Session, b: Session): number {
+  return b.updatedAt - a.updatedAt || b.createdAt - a.createdAt || a.id.localeCompare(b.id);
+}
+
 // Context for collapse state (shared with parent)
 const CollapseContext = createContext<{
   collapsedGroups: Set<string>;
@@ -137,9 +141,9 @@ function useDateGroupedSessions(
       groups.get(dateKey)!.push(session);
     }
 
-    // Sort sessions within each group by updatedAt descending
+    // Sort sessions within each group by recency, newest first
     for (const [, groupSessions] of groups) {
-      groupSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+      groupSessions.sort(compareSessionsByRecency);
     }
 
     // Sort date keys descending
@@ -193,9 +197,9 @@ function useDirectoryGroupedSessions(
       groups.get(dirKey)!.push(session);
     }
 
-    // Sort sessions within each group by updatedAt descending
+    // Sort sessions within each group by recency, newest first
     for (const [, groupSessions] of groups) {
-      groupSessions.sort((a, b) => b.updatedAt - a.updatedAt);
+      groupSessions.sort(compareSessionsByRecency);
     }
 
     // Sort directories by their most recent session's updatedAt descending
@@ -570,7 +574,7 @@ export function VirtualSessionList({
       children.set(session.parentSessionId, siblings);
     }
     for (const siblings of children.values()) {
-      siblings.sort((a, b) => a.createdAt - b.createdAt);
+      siblings.sort(compareSessionsByRecency);
     }
     return { mainSessions: main, childrenByParent: children };
   }, [sessions]);
