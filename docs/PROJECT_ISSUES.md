@@ -1,8 +1,10 @@
-# Yes Sessions 项目 review 记录
+# Yes Sessions Electron 版本 review 记录（归档）
+
+> 本文只记录 9.x Electron 版本的历史整改，不能作为当前 Rust/GPUI 实现依据。当前事实以根目录 `README.md`、`AGENTS.md`、`DESIGN.md` 与 `crates/` 源码为准。
 
 **版本**: 9.0.0
 **更新日期**: 2026-05-25
-**用途**: 当前项目的架构、功能和维护风险清单
+**用途**: 旧版迁移追溯
 
 ## 已处理
 
@@ -64,7 +66,7 @@
 - Git diff 预览中剩余的关闭按钮 title、图片 alt 和行数单位已迁入运行时 `diff.*` i18n key，并同步重新生成备份 locale 文件。
 - 主题快速切换按钮的 hover title 已迁入运行时 `settings.*` i18n key，并同步重新生成备份 locale 文件。
 - 已删除当前无引用的 `Card`、`Input`、`Label` shadcn 组件文件，并移除 `Layout` 中重复的 i18n 副作用导入；i18n 初始化保留在应用入口 `src/main.tsx` 和文件预览入口 `src/file-preview.tsx`。
-- 安装脚本、README、安装文档和 Homebrew 指南中的 GitHub Release/Raw URL 已修正到当前仓库 `KrabsWong/agent-manager` 和公开 Homebrew 产物仓库 `KrabsWong/homebrew-yes-sessions`，并修正安装脚本 help 里的旧版本示例与 `docs/INSTALL_SCRIPT.md` 中错位的 Markdown 片段。
+- 安装脚本、README、安装文档和 Homebrew 指南中的 GitHub Release/Raw URL 已修正到当前仓库 `KrabsWong/yes-sessions` 和公开 Homebrew 产物仓库 `KrabsWong/homebrew-yes-sessions`，并修正安装脚本 help 里的旧版本示例与 `docs/INSTALL_SCRIPT.md` 中错位的 Markdown 片段。
 - 主进程错误工具已移除旧 `CCError` 命名和未使用的 Result/sync wrapper/helper 导出，保留当前 IPC registry 实际使用的 `AppRuntimeError`、validation/input 工厂和 async IPC 错误包装。
 - 已删除无 UI 入口的 config import/export 和 renderer shell API，包括对应 IPC channel、handler、wrapper 与 config-store 导入导出方法；外链打开仍由主进程窗口策略处理。
 - 会话消息 parser 已从动态注册表收敛为静态内置 parser 表，删除未使用的 register/unregister/get parser API，当前只暴露生产使用的解析和能力判断函数。

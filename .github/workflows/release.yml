@@ -2,370 +2,148 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release (e.g. v1.2.3)'
+        description: Tag to release (for example v10.0.0)
         required: true
-        type: string
-      source_pr_number:
-        description: 'Source PR number'
-        required: false
-        type: string
-      source_pr_title:
-        description: 'Source PR title'
-        required: false
-        type: string
-      source_pr_url:
-        description: 'Source PR URL'
-        required: false
-        type: string
-      source_pr_author:
-        description: 'Source PR author'
-        required: false
-        type: string
-      source_pr_merge_commit:
-        description: 'Source PR merge commit SHA'
-        required: false
-        type: string
-      source_bump_type:
-        description: 'Version bump type'
-        required: false
         type: string
 
 permissions:
   contents: write
 
 jobs:
-  release:
-    runs-on: macos-latest
+  macos:
+    runs-on: macos-14
     steps:
       - name: Resolve tag
-        id: resolve-tag
+        id: tag
         run: |
-          # workflow_dispatch 时使用 input 的 tag，push tag 时使用 GITHUB_REF_NAME
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          if [ -n "${{ inputs.tag }}" ]; then
+            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: actions/checkout@v6
         with:
-          ref: ${{ steps.resolve-tag.outputs.tag }}
-          fetch-depth: 0
+          ref: ${{ steps.tag.outputs.value }}
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          node-version: '22'
+          targets: aarch64-apple-darwin
 
-      - name: Install dependencies
-        run: npm ci
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Verify version consistency
-        id: verify-version
-        run: |
-          # 从 tag 获取版本号（去掉 v 前缀）
-          TAG_VERSION=${{ steps.resolve-tag.outputs.tag }}
-          TAG_VERSION=${TAG_VERSION#v}
-
-          # 从 package.json 获取版本号
-          PKG_VERSION=$(node -p "require('./package.json').version")
-
-          echo "Tag version: $TAG_VERSION"
-          echo "Package.json version: $PKG_VERSION"
-
-          # 对比版本号
-          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
-            echo "❌ 版本号不一致！"
-            echo "   Tag: v$TAG_VERSION"
-            echo "   package.json: $PKG_VERSION"
-            echo ""
-            echo "如果你在使用自动版本管理，请不要手动打 tag。"
-            echo "正确流程："
-            echo "  1. 创建 PR 到 main 分支"
-            echo "  2. 添加标签: major / minor / patch"
-            echo "  3. 合并 PR，版本会自动升级"
-            echo ""
-            echo "如果你确实需要手动修复，请运行:"
-            echo "  npm version $TAG_VERSION --no-git-tag-version"
-            echo "  git add package.json package-lock.json"
-            echo "  git commit -m \"chore(release): bump version to $TAG_VERSION\""
-            echo "  git tag -d v$TAG_VERSION && git tag v$TAG_VERSION"
-            echo "  git push --force origin v$TAG_VERSION"
-            exit 1
-          fi
-
-          echo "✅ 版本号一致: $PKG_VERSION"
-          echo "version=$PKG_VERSION" >> $GITHUB_OUTPUT
-
-      - name: Build macOS
-        run: npm run build:mac
+      - name: Require distribution credentials
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Get version info
-        id: version
-        run: |
-          # 使用验证过的版本号，确保一致性
-          VERSION=${{ steps.verify-version.outputs.version }}
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Using verified version: $VERSION"
-
-      - name: Calculate SHA256
-        id: sha256
-        run: |
-          ARM64_SHA=$(shasum -a 256 release/Yes-Sessions-*-arm64.dmg | cut -d' ' -f1)
-          echo "arm64=$ARM64_SHA" >> $GITHUB_OUTPUT
-          echo "ARM64 SHA256: $ARM64_SHA"
-
-      - name: Generate release notes
-        env:
-          VERSION: ${{ steps.verify-version.outputs.version }}
-          TAG: ${{ steps.resolve-tag.outputs.tag }}
-          ARM64_SHA: ${{ steps.sha256.outputs.arm64 }}
-          SOURCE_PR_NUMBER: ${{ github.event.inputs.source_pr_number }}
-          SOURCE_PR_TITLE: ${{ github.event.inputs.source_pr_title }}
-          SOURCE_PR_URL: ${{ github.event.inputs.source_pr_url }}
-          SOURCE_PR_AUTHOR: ${{ github.event.inputs.source_pr_author }}
-          SOURCE_PR_MERGE_COMMIT: ${{ github.event.inputs.source_pr_merge_commit }}
-          SOURCE_BUMP_TYPE: ${{ github.event.inputs.source_bump_type }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          git fetch --force --tags
-
-          CURRENT_COMMIT=$(git rev-list -n 1 "$TAG")
-          CURRENT_SUBJECT=$(git log -1 --pretty=%s "$CURRENT_COMMIT")
-          CHANGELOG_END="$CURRENT_COMMIT"
-
-          if [[ "$CURRENT_SUBJECT" == chore\(release\):* ]]; then
-            CHANGELOG_END=$(git rev-parse "${CURRENT_COMMIT}^")
-          fi
-
-          PREV_TAG=$(git describe --tags --abbrev=0 "${CHANGELOG_END}^" 2>/dev/null || true)
-
-          if [ -n "$PREV_TAG" ]; then
-            RANGE="$PREV_TAG..$CHANGELOG_END"
-            COMPARE_LABEL="${PREV_TAG}...${TAG}"
-            COMPARE_URL="https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_TAG}...${TAG}"
-          else
-            RANGE="$CHANGELOG_END"
-            COMPARE_LABEL=""
-            COMPARE_URL=""
-          fi
-
-          if [ -z "$SOURCE_PR_NUMBER" ]; then
-            PR_DATA=$(gh api \
-              -H "Accept: application/vnd.github+json" \
-              "/repos/${GITHUB_REPOSITORY}/commits/${CHANGELOG_END}/pulls" \
-              --jq 'if length > 0 then .[0] | [.number, .title, .html_url, .user.login, .merge_commit_sha] | @tsv else empty end' \
-              2>/dev/null || true)
-
-            if [ -n "$PR_DATA" ]; then
-              IFS=$'\t' read -r SOURCE_PR_NUMBER SOURCE_PR_TITLE SOURCE_PR_URL SOURCE_PR_AUTHOR SOURCE_PR_MERGE_COMMIT <<< "$PR_DATA"
-            fi
-          fi
-
-          git log --no-merges --pretty=format:'%H%x09%h%x09%s' "$RANGE" > commits.tsv
-
-          while IFS=$'\t' read -r full_sha short_sha subject || [ -n "$full_sha" ]; do
-            case "$subject" in
-              chore\(release\):*) continue ;;
-            esac
-            printf -- '- [%s](https://github.com/%s/commit/%s) %s\n' "$short_sha" "$GITHUB_REPOSITORY" "$full_sha" "$subject"
-          done < commits.tsv > changelog.md
-
-          if [ ! -s changelog.md ]; then
-            echo "- Version ${VERSION}" > changelog.md
-          fi
-
-          {
-            if [ -n "$SOURCE_PR_NUMBER" ]; then
-              printf -- '- 来源 PR: [#%s %s](%s)\n' "$SOURCE_PR_NUMBER" "$SOURCE_PR_TITLE" "$SOURCE_PR_URL"
-            fi
-            if [ -n "$SOURCE_PR_AUTHOR" ]; then
-              printf -- '- 作者: [@%s](https://github.com/%s)\n' "$SOURCE_PR_AUTHOR" "$SOURCE_PR_AUTHOR"
-            fi
-            if [ -n "$SOURCE_BUMP_TYPE" ]; then
-              printf -- '- 版本类型: `%s`\n' "$SOURCE_BUMP_TYPE"
-            fi
-            if [ -n "$SOURCE_PR_MERGE_COMMIT" ]; then
-              SHORT_MERGE_SHA=$(printf '%s' "$SOURCE_PR_MERGE_COMMIT" | cut -c1-7)
-              printf -- '- 合并提交: [`%s`](https://github.com/%s/commit/%s)\n' "$SHORT_MERGE_SHA" "$GITHUB_REPOSITORY" "$SOURCE_PR_MERGE_COMMIT"
-            fi
-            if [ -n "$COMPARE_URL" ]; then
-              printf -- '- 版本对比: [%s](%s)\n' "$COMPARE_LABEL" "$COMPARE_URL"
-            fi
-          } > source-summary.md
-
-          if [ ! -s source-summary.md ]; then
-            echo "- Release tag: [${TAG}](https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG})" > source-summary.md
-          fi
-
-          cat > release-notes.md <<EOF
-          ## 本次变更
-
-          $(cat source-summary.md)
-
-          ## 更新日志
-
-          $(cat changelog.md)
-
-          ---
-
-          ## 安装指南
-
-          ### macOS (Apple Silicon)
-
-          1. 下载 \`Yes-Sessions-${VERSION}-arm64.dmg\`
-          2. 打开终端，移除安全隔离属性：
-             \`\`\`bash
-             xattr -c ~/Downloads/Yes-Sessions-${VERSION}-arm64.dmg
-             \`\`\`
-          3. 双击 DMG 安装
-
-          ### Homebrew
-
-          \`\`\`bash
-          brew update
-          brew upgrade --cask yes-sessions
-          \`\`\`
-
-          ---
-
-          ## 系统要求
-
-          - **macOS**: macOS 11.0 (Big Sur) 或更高版本（Apple Silicon）
-
-          ---
-
-          ## 文件校验
-
-          | 文件名 | SHA256 |
-          | --- | --- |
-          | Yes-Sessions-${VERSION}-arm64.dmg | \`${ARM64_SHA}\` |
-
-          ---
-
-          ## 相关链接
-
-          - Homebrew Tap: https://github.com/KrabsWong/homebrew-yes-sessions
-          - Cask 配置: https://github.com/KrabsWong/homebrew-yes-sessions/blob/main/Casks/yes-sessions.rb
-          - 完整文档: https://github.com/${GITHUB_REPOSITORY}#readme
-          - 问题反馈: https://github.com/${GITHUB_REPOSITORY}/issues
-          EOF
-
-          cat > homebrew-release-notes.md <<EOF
-          ## Yes Sessions v${VERSION}
-
-          ### 本次变更
-
-          $(cat source-summary.md)
-
-          ### 更新日志
-
-          $(cat changelog.md)
-
-          ---
-
-          ### 安装/更新
-
-          \`\`\`bash
-          brew update
-          brew upgrade --cask yes-sessions
-          \`\`\`
-
-          详见 [README](https://github.com/KrabsWong/homebrew-yes-sessions#readme)
-
-          ---
-
-          ### 系统要求
-
-          - macOS 11.0+ (Big Sur)
-          - Apple Silicon Mac
-
-          ---
-
-          ### 文件校验
-
-          | 文件名 | SHA256 |
-          | --- | --- |
-          | Yes-Sessions-${VERSION}-arm64.dmg | \`${ARM64_SHA}\` |
-
-          ---
-
-          ### 相关链接
-
-          - 源码 Release: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${TAG}
-          - Homebrew Tap: https://github.com/KrabsWong/homebrew-yes-sessions
-          - Cask 配置: https://github.com/KrabsWong/homebrew-yes-sessions/blob/main/Casks/yes-sessions.rb
-          EOF
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: ${{ steps.resolve-tag.outputs.tag }}
-          files: |
-            release/Yes-Sessions-*-arm64.dmg
-          body_path: release-notes.md
-          draft: false
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create Release in homebrew-yes-sessions (public)
-        env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-        run: |
-          VERSION=${{ steps.verify-version.outputs.version }}
-          DMG_FILE=$(ls release/Yes-Sessions-*-arm64.dmg)
-
-          # 在 homebrew-yes-sessions 仓库创建 release 并上传 DMG
-          # 使用公开仓库托管构建产物，确保 Homebrew 可以无认证下载
-          if gh release view "v${VERSION}" --repo KrabsWong/homebrew-yes-sessions >/dev/null 2>&1; then
-            gh release upload "v${VERSION}" "$DMG_FILE" \
-              --repo KrabsWong/homebrew-yes-sessions \
-              --clobber
-            gh release edit "v${VERSION}" \
-              --repo KrabsWong/homebrew-yes-sessions \
-              --title "v${VERSION}" \
-              --notes-file homebrew-release-notes.md \
-              --latest
-          else
-            gh release create "v${VERSION}" "$DMG_FILE" \
-              --repo KrabsWong/homebrew-yes-sessions \
-              --title "v${VERSION}" \
-              --notes-file homebrew-release-notes.md \
-              --latest
-          fi
-
-      - name: Update Homebrew Cask
-        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          VERSION=${{ steps.verify-version.outputs.version }}
-          SHA256=${{ steps.sha256.outputs.arm64 }}
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD CODESIGN_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD HOMEBREW_TAP_TOKEN; do
+            if [ -z "${!name}" ]; then
+              echo "Required release secret is missing: $name" >&2
+              exit 1
+            fi
+          done
 
-          # 配置 git
-          git config --global user.name "GitHub Actions"
-          git config --global user.email "actions@github.com"
+      - name: Install Developer ID certificate
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          CERTIFICATE_PATH="$RUNNER_TEMP/yes-sessions-signing.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/yes-sessions-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          printf '%s' "$MACOS_CERTIFICATE" | base64 -D > "$CERTIFICATE_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERTIFICATE_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH"
+          rm -f "$CERTIFICATE_PATH"
 
-          # 克隆 Tap 仓库
-          git clone https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/KrabsWong/homebrew-yes-sessions.git
-          cd homebrew-yes-sessions
+      - name: Verify version
+        id: version
+        run: |
+          TAG_VERSION="${{ steps.tag.outputs.value }}"
+          TAG_VERSION="${TAG_VERSION#v}"
+          CARGO_VERSION="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          test "$TAG_VERSION" = "$CARGO_VERSION"
+          echo "value=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
 
-          # 用 sed 替换版本号、SHA256、URL（macOS sed 需要 -i ''）
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Build app and DMG
+        run: ./scripts/package-macos.sh
+        env:
+          CARGO_BUILD_TARGET: aarch64-apple-darwin
+          CODESIGN_IDENTITY: ${{ secrets.CODESIGN_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+
+      - name: Calculate SHA256
+        id: sha
+        run: |
+          DMG="release/Yes-Sessions-${{ steps.version.outputs.value }}-arm64.dmg"
+          echo "value=$(shasum -a 256 "$DMG" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag.outputs.value }}
+          files: release/Yes-Sessions-${{ steps.version.outputs.value }}-arm64.dmg
+          generate_release_notes: true
+          body: |
+            macOS 13+ / Apple Silicon
+
+            SHA256: `${{ steps.sha.outputs.value }}`
+
+            Signed with Developer ID, notarized by Apple, and stapled for Gatekeeper validation.
+
+      - name: Publish artifact to Homebrew tap release
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: |
+          DMG="release/Yes-Sessions-${VERSION}-arm64.dmg"
+          if gh release view "v${VERSION}" --repo KrabsWong/homebrew-yes-sessions >/dev/null 2>&1; then
+            gh release upload "v${VERSION}" "$DMG" --repo KrabsWong/homebrew-yes-sessions --clobber
+          else
+            gh release create "v${VERSION}" "$DMG" \
+              --repo KrabsWong/homebrew-yes-sessions \
+              --title "v${VERSION}" \
+              --generate-notes
+          fi
+
+      - name: Update Homebrew cask
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          VERSION: ${{ steps.version.outputs.value }}
+          SHA256: ${{ steps.sha.outputs.value }}
+        run: |
+          gh repo clone KrabsWong/homebrew-yes-sessions homebrew-tap
+          cd homebrew-tap
           sed -i '' "s/version \".*\"/version \"${VERSION}\"/" Casks/yes-sessions.rb
-          sed -i '' "s|sha256 .*|sha256 \"${SHA256}\"|" Casks/yes-sessions.rb
+          sed -i '' "s/sha256 \".*\"/sha256 \"${SHA256}\"/" Casks/yes-sessions.rb
           sed -i '' "s|url \".*\"|url \"https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v${VERSION}/Yes-Sessions-${VERSION}-arm64.dmg\"|" Casks/yes-sessions.rb
+          sed -i '' 's/app "Yes[- ]Sessions.app"/app "Yes Sessions.app"/' Casks/yes-sessions.rb
+          git config user.name "GitHub Actions"
+          git config user.email "actions@github.com"
+          git add Casks/yes-sessions.rb
+          if git diff --cached --quiet; then exit 0; fi
+          git commit -m "Update yes-sessions to ${VERSION}" -m "Publish the Rust/GPUI Apple Silicon package and refresh its checksum."
+          git push origin main
 
-          git add .
-          git commit -m "Update yes-sessions to ${VERSION}"
-          git push
-
-          echo "✅ Homebrew Cask updated to version ${VERSION}"
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/yes-sessions-signing.keychain-db" || true

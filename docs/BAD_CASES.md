@@ -7,11 +7,10 @@
 - `AGENTS.md`
 - `README.md`
 - `docs/README.md`
-- `docs/PROJECT_RESEARCH.md`
-- `docs/PROJECT_ISSUES.md`
+- `DESIGN.md`
 
 当前特别需要继续遵守的经验：
 
-- i18n 实际运行资源在 `src/lib/i18n/index.ts`，不是 `src/locales/*.json`。
-- Electron preload、IPC、主进程 handler 的边界需要通过共享类型和运行时校验维护。
+- UI 文案统一维护在 `crates/yes-app/src/i18n.rs`，同时提供中文和英文。
+- provider 解析与路径边界留在 `yes-core`，UI 不直接读取外部会话文件。
 - 历史计划文档不能作为当前功能事实来源。

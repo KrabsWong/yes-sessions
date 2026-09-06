@@ -7,8 +7,7 @@
 当前事实来源：
 
 - `README.md`
-- `docs/PROJECT_RESEARCH.md`
-- `docs/PROJECT_ISSUES.md`
-- `src/pages/Sessions/index.tsx`
-- `electron/handlers/sessions.ts`
-- `electron/services/session/`
+- `AGENTS.md`
+- `DESIGN.md`
+- `crates/yes-core/`
+- `crates/yes-app/`

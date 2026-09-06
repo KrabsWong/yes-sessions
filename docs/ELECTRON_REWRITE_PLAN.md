@@ -10,4 +10,4 @@
 - `docs/PROJECT_ISSUES.md`
 - 当前源码
 
-保留本文件仅用于说明历史背景：Yes Sessions 已经是 Electron + React + TypeScript 桌面应用，当前重点是 AI CLI 会话浏览、详情查看、文件上下文、Git diff 和终端恢复，而不是旧计划中的 CC Switch 供应商配置/代理重写路线。
+保留本文件仅用于说明历史背景。当前 Yes Sessions 已经迁移为 Rust + GPUI Kit 单进程桌面应用，Electron、Chromium 与 Node.js 运行时均不再属于产品技术栈。

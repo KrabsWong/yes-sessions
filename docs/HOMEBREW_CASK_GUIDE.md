@@ -22,7 +22,7 @@
 
    ```bash
    # 使用 homebrew 提供的命令生成模板
-   brew create --cask https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v9.0.0/Yes-Sessions-9.0.0-arm64.dmg
+   brew create --cask https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v10.0.0/Yes-Sessions-10.0.0-arm64.dmg
 
    # 或者手动创建
    mkdir -p Casks
@@ -33,7 +33,7 @@
 
    ```bash
    # 下载文件并计算校验值
-   curl -L -o yes-sessions.dmg https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v9.0.0/Yes-Sessions-9.0.0-arm64.dmg
+   curl -L -o yes-sessions.dmg https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v10.0.0/Yes-Sessions-10.0.0-arm64.dmg
    shasum -a 256 yes-sessions.dmg
 
    # 或者使用 brew 命令
@@ -44,26 +44,28 @@
 
    ```ruby
    cask "yes-sessions" do
-     version "9.0.0"
+     version "10.0.0"
      sha256 "YOUR_SHA256_HERE"  # 替换为实际计算的值
 
      url "https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v#{version}/Yes-Sessions-#{version}-arm64.dmg"
      name "Yes Sessions"
      desc "AI Session Manager - Browse and resume your AI conversations"
-     homepage "https://github.com/KrabsWong/agent-manager"
+     homepage "https://github.com/KrabsWong/yes-sessions"
 
      livecheck do
        url :url
        strategy :github_latest
      end
 
-     app "Yes-Sessions.app"
+     app "Yes Sessions.app"
+
+     depends_on macos: ">= :ventura"
 
      zap trash: [
        "~/Library/Application Support/yes-sessions",
-       "~/Library/Preferences/com.yes-sessions.plist",
+       "~/Library/Preferences/com.yessessions.app.plist",
        "~/Library/Logs/yes-sessions",
-       "~/Library/Saved Application State/com.yes-sessions.savedState",
+       "~/Library/Saved Application State/com.yessessions.app.savedState",
      ]
    end
    ```
@@ -84,7 +86,7 @@
 7. **提交 PR**
    ```bash
    git add Casks/yes-sessions.rb
-   git commit -m "Add Yes Sessions 9.0.0"
+   git commit -m "Add Yes Sessions 10.0.0"
    git push origin main
    ```
    然后访问 GitHub 创建 Pull Request
@@ -127,7 +129,7 @@
 ```bash
 #!/bin/bash
 
-VERSION="9.0.0"
+VERSION="10.0.0"
 REPO="KrabsWong/homebrew-yes-sessions"
 
 # 计算 arm64 版本的 SHA256
