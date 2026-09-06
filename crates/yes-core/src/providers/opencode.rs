@@ -71,7 +71,7 @@ impl OpenCodeProvider {
         parts: &[Value],
         timestamp: i64,
         inherited_model: Option<String>,
-    ) -> SessionMessage {
+    ) -> Vec<SessionMessage> {
         let role = data
             .get("role")
             .and_then(Value::as_str)
@@ -99,40 +99,54 @@ impl OpenCodeProvider {
         }
 
         if role == "assistant" && !tool_parts.is_empty() {
-            let tool = tool_parts[0];
-            let state = tool.get("state").and_then(Value::as_object);
-            let mut message = SessionMessage::text(
-                MessageType::ToolUse,
-                Self::iso_time(timestamp),
-                content.join("\n\n"),
-            );
-            message.tool_name = Some(
-                tool.get("tool")
-                    .and_then(Value::as_str)
-                    .unwrap_or("tool")
-                    .to_owned(),
-            );
-            message.tool_input = state
-                .and_then(|value| value.get("input"))
-                .and_then(Value::as_object)
-                .cloned()
-                .or_else(|| Some(Map::new()));
-            message.tool_output =
-                state
-                    .and_then(|value| value.get("output"))
-                    .map(|output| ToolOutput {
-                        output: Some(if let Some(text) = output.as_str() {
-                            text.to_owned()
+            return tool_parts
+                .into_iter()
+                .enumerate()
+                .map(|(index, tool)| {
+                    let state = tool.get("state").and_then(Value::as_object);
+                    let mut message = SessionMessage::text(
+                        MessageType::ToolUse,
+                        Self::iso_time(timestamp),
+                        if index == 0 {
+                            content.join("\n\n")
                         } else {
-                            serde_json::to_string_pretty(output).unwrap_or_default()
-                        }),
-                        preview: None,
-                        truncated: false,
-                        extra: Map::new(),
-                    });
-            message.reasoning_content = (!reasoning.is_empty()).then(|| reasoning.join("\n\n"));
-            message.model = model;
-            return message;
+                            String::new()
+                        },
+                    );
+                    message.tool_name = Some(
+                        tool.get("tool")
+                            .and_then(Value::as_str)
+                            .unwrap_or("tool")
+                            .to_owned(),
+                    );
+                    message.tool_input = state
+                        .and_then(|value| value.get("input"))
+                        .and_then(Value::as_object)
+                        .cloned()
+                        .or_else(|| Some(Map::new()));
+                    message.tool_output =
+                        state
+                            .and_then(|value| value.get("output"))
+                            .map(|output| ToolOutput {
+                                output: Some(if let Some(text) = output.as_str() {
+                                    text.to_owned()
+                                } else {
+                                    serde_json::to_string_pretty(output).unwrap_or_default()
+                                }),
+                                preview: None,
+                                truncated: false,
+                                extra: Map::new(),
+                            });
+                    message.call_id = tool
+                        .get("callID")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    message.reasoning_content =
+                        (index == 0 && !reasoning.is_empty()).then(|| reasoning.join("\n\n"));
+                    message.model = model.clone();
+                    message
+                })
+                .collect();
         }
 
         let mut message = SessionMessage::text(
@@ -146,7 +160,7 @@ impl OpenCodeProvider {
         );
         message.reasoning_content = (!reasoning.is_empty()).then(|| reasoning.join("\n\n"));
         message.model = model;
-        message
+        vec![message]
     }
 
     fn base_session(&self, row: SessionRow) -> Session {
@@ -248,7 +262,7 @@ impl SessionProvider for OpenCodeProvider {
                 .filter_map(Result::ok)
                 .filter_map(|source| serde_json::from_str(&source).ok())
                 .collect::<Vec<Value>>();
-            messages.push(Self::parse_message(
+            messages.extend(Self::parse_message(
                 &data,
                 &parts,
                 timestamp,
@@ -286,6 +300,69 @@ impl SessionProvider for OpenCodeProvider {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn preserves_every_tool_call_and_output_without_duplicating_prose() {
+        let messages = OpenCodeProvider::parse_message(
+            &json!({"role": "assistant"}),
+            &[
+                json!({"type": "text", "text": "Checking files"}),
+                json!({"type": "reasoning", "text": "Need both files"}),
+                json!({"type": "tool", "tool": "read", "callID": "one", "state": {"input": {"path": "a"}, "output": "first result"}}),
+                json!({"type": "tool", "tool": "read", "callID": "two", "state": {"input": {"path": "b"}, "output": {"ok": true}}}),
+            ],
+            1,
+            Some("model".into()),
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].call_id.as_deref(), Some("one"));
+        assert_eq!(messages[1].call_id.as_deref(), Some("two"));
+        assert_eq!(messages[1].tool_input.as_ref().unwrap()["path"], "b");
+        assert_eq!(
+            messages[0].tool_output.as_ref().unwrap().output.as_deref(),
+            Some("first result")
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                messages[1]
+                    .tool_output
+                    .as_ref()
+                    .unwrap()
+                    .output
+                    .as_ref()
+                    .unwrap()
+            )
+            .unwrap(),
+            json!({"ok": true})
+        );
+        assert_eq!(messages[0].content.as_deref(), Some("Checking files"));
+        assert_eq!(
+            messages[0].reasoning_content.as_deref(),
+            Some("Need both files")
+        );
+        assert!(
+            messages[1]
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .is_empty()
+        );
+        assert!(messages[1].reasoning_content.is_none());
+        assert!(
+            messages
+                .iter()
+                .all(|message| message.model.as_deref() == Some("model"))
+        );
+        let user = OpenCodeProvider::parse_message(
+            &json!({"role": "user"}),
+            &[json!({"type": "text", "text": "hello"})],
+            1,
+            None,
+        );
+        assert_eq!(user.len(), 1);
+        assert_eq!(user[0].message_type, MessageType::User);
+        assert_eq!(user[0].content.as_deref(), Some("hello"));
+    }
 
     #[test]
     fn accepts_both_opencode_model_shapes() {

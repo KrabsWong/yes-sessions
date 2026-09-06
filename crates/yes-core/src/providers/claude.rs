@@ -1,5 +1,6 @@
 use std::{
     fs,
+    io::Read as _,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -316,6 +317,84 @@ impl ClaudeProvider {
         (millis(metadata.created()), millis(metadata.modified()))
     }
 
+    fn summary(&self, session_id: &str, entry: Option<&HistoryEntry>) -> Option<Session> {
+        // Bound list I/O independently of transcript size. Like the other JSONL
+        // providers, the message count is a prefix count until detail is opened.
+        const SUMMARY_BYTES: u64 = 256 * 1024;
+        let file_path = if let Some(entry) = entry {
+            self.projects_path()
+                .join(entry.project.as_ref()?.replace('/', "-"))
+                .join(format!("{session_id}.jsonl"))
+        } else {
+            self.transcripts_path().join(format!("{session_id}.jsonl"))
+        };
+        let canonical = file_path.canonicalize().ok()?;
+        if !canonical.starts_with(self.root.canonicalize().ok()?) {
+            return None;
+        }
+        let mut bytes = Vec::new();
+        fs::File::open(&canonical)
+            .ok()?
+            .take(SUMMARY_BYTES)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        let source = String::from_utf8_lossy(&bytes);
+        let mut first = String::new();
+        let mut last = String::new();
+        let mut count = 0;
+        for record in source
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        {
+            let kind = record.get("type").and_then(Value::as_str);
+            if !matches!(
+                kind,
+                Some("user" | "assistant" | "tool_use" | "tool_result" | "system")
+            ) {
+                continue;
+            }
+            count += 1;
+            let text = Self::text(
+                record
+                    .pointer("/message/content")
+                    .or_else(|| record.get("content")),
+                &["text"],
+            );
+            if !text.trim().is_empty() {
+                let preview = text.chars().take(100).collect::<String>();
+                if first.is_empty() {
+                    first = preview.clone();
+                }
+                last = preview;
+            }
+        }
+        let (created_at, updated_at) = Self::file_times(&canonical);
+        Some(Session {
+            id: session_id.into(),
+            app_type: AppType::Claude,
+            file_name: format!("{session_id}.jsonl"),
+            file_path,
+            created_at,
+            updated_at: updated_at.max(entry.map_or(0, |entry| entry.timestamp)),
+            message_count: count,
+            first_message: if first.is_empty() {
+                entry
+                    .and_then(|entry| entry.display.clone())
+                    .unwrap_or_default()
+            } else {
+                first
+            },
+            last_message: last,
+            directory: entry
+                .and_then(|entry| entry.project.as_ref())
+                .map(PathBuf::from),
+            uuid: None,
+            kind: SessionKind::Main,
+            parent_session_id: None,
+            agent_type: None,
+        })
+    }
+
     fn new_detail(&self, entry: &HistoryEntry) -> Option<SessionDetail> {
         let project = entry.project.as_ref()?;
         let file_path = self
@@ -476,11 +555,7 @@ impl SessionProvider for ClaudeProvider {
             if !seen.insert(entry.session_id.clone()) {
                 continue;
             }
-            if let Some(detail) = self.new_detail(&entry) {
-                let mut session = detail.session;
-                if session.first_message.is_empty() {
-                    session.first_message = entry.display.unwrap_or_default()
-                }
+            if let Some(session) = self.summary(&entry.session_id, Some(&entry)) {
                 sessions.push(session);
             }
         }
@@ -490,8 +565,8 @@ impl SessionProvider for ClaudeProvider {
                 if !name.starts_with("ses_") || !name.ends_with(".jsonl") {
                     continue;
                 }
-                if let Some(detail) = self.old_detail(name.trim_end_matches(".jsonl")) {
-                    sessions.push(detail.session)
+                if let Some(session) = self.summary(name.trim_end_matches(".jsonl"), None) {
+                    sessions.push(session)
                 }
             }
         }
@@ -515,6 +590,51 @@ impl SessionProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_reads_only_a_bounded_prefix_for_both_transcript_formats() {
+        let root =
+            std::env::temp_dir().join(format!("yes-claude-summary-test-{}", std::process::id()));
+        let project = root.join("projects/-tmp-project");
+        let transcripts = root.join("transcripts");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&transcripts).unwrap();
+        let modern = |text: &str| {
+            json!({"type": "user", "promptId": text, "message": {"content": text}}).to_string()
+        };
+        let legacy = |text: &str| json!({"type": "user", "content": text}).to_string();
+        for (path, first, last) in [
+            (
+                project.join("test-modern.jsonl"),
+                modern("first"),
+                modern("tail"),
+            ),
+            (
+                transcripts.join("ses_legacy.jsonl"),
+                legacy("first"),
+                legacy("tail"),
+            ),
+        ] {
+            fs::write(
+                path,
+                format!("{first}\n{}\n{last}\n", " ".repeat(512 * 1024)),
+            )
+            .unwrap();
+        }
+        fs::write(root.join("history.jsonl"), json!({"sessionId":"test-modern", "project":"/tmp/project", "timestamp":1, "display":"history preview"}).to_string()).unwrap();
+        let provider = ClaudeProvider::with_root(root.clone());
+        let sessions = provider.sessions().unwrap();
+        assert_eq!(sessions.len(), 2);
+        for session in sessions {
+            assert_eq!(session.message_count, 1);
+            assert_eq!(session.first_message, "first");
+            assert_eq!(session.last_message, "first");
+            let detail = provider.session_detail(&session.id).unwrap().unwrap();
+            assert_eq!(detail.messages.len(), 2);
+            assert_eq!(detail.messages[1].content.as_deref(), Some("tail"));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn merges_thinking_with_following_assistant_text() {

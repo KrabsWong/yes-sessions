@@ -32,22 +32,48 @@ fn command_exists(command: &str) -> bool {
         .is_ok_and(|status| status.success())
 }
 
-fn kitty_path() -> Option<PathBuf> {
-    if command_exists("kitty") {
-        return Some(PathBuf::from("kitty"));
+fn terminal_path(command: &str, bundle: &str) -> Option<PathBuf> {
+    let home = dirs::home_dir();
+    resolve_terminal_path(
+        command,
+        bundle,
+        Path::new("/Applications"),
+        home.as_deref(),
+        command_exists(command),
+    )
+}
+
+fn resolve_terminal_path(
+    command: &str,
+    bundle: &str,
+    applications: &Path,
+    home: Option<&Path>,
+    on_path: bool,
+) -> Option<PathBuf> {
+    if on_path {
+        return Some(PathBuf::from(command));
     }
-    let candidates = [
-        PathBuf::from("/Applications/kitty.app/Contents/MacOS/kitty"),
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join("Applications/kitty.app/Contents/MacOS/kitty"),
-    ];
-    candidates.into_iter().find(|path| path.exists())
+    let executable = PathBuf::from(bundle).join("Contents/MacOS").join(command);
+    std::iter::once(applications.join(&executable))
+        .chain(home.map(|home| home.join("Applications").join(&executable)))
+        .find(|path| {
+            use std::os::unix::fs::PermissionsExt as _;
+            path.metadata().is_ok_and(|metadata| {
+                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
+        })
+}
+
+fn ghostty_path() -> Option<PathBuf> {
+    terminal_path("ghostty", "Ghostty.app")
+}
+
+fn kitty_path() -> Option<PathBuf> {
+    terminal_path("kitty", "kitty.app")
 }
 
 pub fn terminal_info(preference: PreferredTerminal) -> TerminalInfo {
-    let ghostty_installed =
-        command_exists("ghostty") || Path::new("/Applications/Ghostty.app").exists();
+    let ghostty_installed = ghostty_path().is_some();
     let kitty_installed = kitty_path().is_some();
     let preferred = match preference {
         PreferredTerminal::Ghostty if ghostty_installed => ExternalTerminal::Ghostty,
@@ -101,7 +127,10 @@ pub fn resume_session(
 
     let mut process = match terminal {
         ExternalTerminal::Ghostty => {
-            let mut process = Command::new("ghostty");
+            let path = ghostty_path().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "Ghostty executable was not found")
+            })?;
+            let mut process = Command::new(path);
             process.args(["-e", "zsh", "-ic", &format!("{shell_command}; exec zsh -i")]);
             process
         }
@@ -134,6 +163,40 @@ pub fn resume_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolves_installed_ghostty_without_a_path_entry() {
+        use std::{fs, os::unix::fs::PermissionsExt as _};
+        let root = std::env::temp_dir().join(format!("yes-ghostty-test-{}", std::process::id()));
+        let applications = root.join("Applications");
+        let home = root.join("home");
+        let relative = "Ghostty.app/Contents/MacOS/ghostty";
+        let executable = applications.join(relative);
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::write(&executable, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            resolve_terminal_path("ghostty", "Ghostty.app", &applications, Some(&home), false),
+            Some(executable.clone())
+        );
+        let user_executable = home.join("Applications").join(relative);
+        fs::create_dir_all(user_executable.parent().unwrap()).unwrap();
+        fs::rename(&executable, &user_executable).unwrap();
+        assert_eq!(
+            resolve_terminal_path("ghostty", "Ghostty.app", &applications, Some(&home), false),
+            Some(user_executable.clone())
+        );
+        fs::set_permissions(&user_executable, fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(
+            resolve_terminal_path("ghostty", "Ghostty.app", &applications, Some(&home), false),
+            None
+        );
+        assert_eq!(
+            resolve_terminal_path("ghostty", "Ghostty.app", &applications, Some(&home), true),
+            Some(PathBuf::from("ghostty"))
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn quotes_shell_arguments() {

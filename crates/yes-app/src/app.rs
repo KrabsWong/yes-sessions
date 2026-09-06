@@ -177,6 +177,40 @@ fn collect_mermaid_sources(
     }
 }
 
+fn mermaid_sources_changed(
+    previous: &[yes_core::SessionMessage],
+    next: &[yes_core::SessionMessage],
+) -> bool {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    collect_mermaid_sources(previous, 0, &mut before);
+    collect_mermaid_sources(next, 0, &mut after);
+    before != after
+}
+
+fn selection_after_refresh(
+    previous: &[Session],
+    next: &[Session],
+    selected: Option<&str>,
+) -> Option<String> {
+    if let Some(id) = selected {
+        let matches = |session: &&Session| session.id == id || session.uuid.as_deref() == Some(id);
+        if let Some(session) = next.iter().find(matches) {
+            return Some(session.id.clone());
+        }
+        // A directly opened subagent may not be enumerated by its provider.
+        if !previous
+            .iter()
+            .any(|session| session.id == id || session.uuid.as_deref() == Some(id))
+        {
+            return Some(id.to_owned());
+        }
+    }
+    next.iter()
+        .find(|session| session.kind == yes_core::model::SessionKind::Main)
+        .map(|session| session.id.clone())
+}
+
 fn navigator_window(total: usize, active: usize, max_visible: usize) -> Range<usize> {
     if total <= max_visible {
         return 0..total;
@@ -258,6 +292,7 @@ pub struct YesSessions {
     detail: Option<Arc<SessionDetail>>,
     conversation_state: Entity<MessageScrollerState>,
     loading_sessions: bool,
+    refreshing_sessions: bool,
     loading_detail: bool,
     error: Option<String>,
     settings_open: bool,
@@ -301,6 +336,7 @@ impl YesSessions {
             detail: None,
             conversation_state: cx.new(|cx| MessageScrollerState::new(0, cx)),
             loading_sessions: false,
+            refreshing_sessions: false,
             loading_detail: false,
             error: None,
             settings_open: false,
@@ -595,6 +631,7 @@ impl YesSessions {
         self.detail_generation += 1;
         let generation = self.sessions_generation;
         self.loading_sessions = true;
+        self.refreshing_sessions = false;
         self.loading_detail = false;
         self.refreshing_detail = false;
         self.detail_source_signature = None;
@@ -643,6 +680,51 @@ impl YesSessions {
         .detach();
     }
 
+    fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        if self.loading_sessions || self.refreshing_sessions {
+            return;
+        }
+        let Some(provider) = self.registry.get(self.selected_app) else {
+            return;
+        };
+        self.refreshing_sessions = true;
+        let generation = self.sessions_generation;
+        let task = cx
+            .background_executor()
+            .spawn(async move { provider.sessions() });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                // A provider switch invalidates all requests for the previous list.
+                if this.sessions_generation != generation {
+                    return;
+                }
+                this.refreshing_sessions = false;
+                let Ok(sessions) = result else { return };
+                let selection = selection_after_refresh(
+                    &this.sessions,
+                    &sessions,
+                    this.selected_session_id.as_deref(),
+                );
+                let changed = this.sessions.as_ref() != &sessions;
+                if changed {
+                    this.sessions = Arc::new(sessions);
+                }
+                if selection != this.selected_session_id {
+                    if let Some(id) = selection {
+                        this.select_session(id, cx);
+                    } else {
+                        this.reset_detail(cx);
+                    }
+                    cx.notify();
+                } else if changed {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     fn select_app(&mut self, app_type: AppType, cx: &mut Context<Self>) {
         if self.selected_app == app_type {
             return;
@@ -651,20 +733,11 @@ impl YesSessions {
         self.load_sessions(cx);
     }
 
-    fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+    fn reset_detail(&mut self, cx: &mut Context<Self>) {
         self.detail_generation += 1;
-        let generation = self.detail_generation;
-        let ancestors = ancestor_session_ids(&self.sessions, &session_id);
-        for parent_id in &ancestors {
-            self.expanded_parents.insert(parent_id.clone());
-        }
-        if let Some(root_id) = ancestors.last()
-            && let Some(root) = self.sessions.iter().find(|session| session.id == *root_id)
-        {
-            self.collapsed_groups.remove(&self.session_group_key(root));
-        }
-        self.selected_session_id = Some(session_id.clone());
-        self.loading_detail = true;
+        self.selected_session_id = None;
+        self.error = None;
+        self.loading_detail = false;
         self.refreshing_detail = false;
         self.detail_source_signature = None;
         self.detail = None;
@@ -680,6 +753,22 @@ impl YesSessions {
         self.mermaid_views.clear();
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
+    }
+
+    fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let ancestors = ancestor_session_ids(&self.sessions, &session_id);
+        for parent_id in &ancestors {
+            self.expanded_parents.insert(parent_id.clone());
+        }
+        if let Some(root_id) = ancestors.last()
+            && let Some(root) = self.sessions.iter().find(|session| session.id == *root_id)
+        {
+            self.collapsed_groups.remove(&self.session_group_key(root));
+        }
+        self.reset_detail(cx);
+        self.selected_session_id = Some(session_id.clone());
+        self.loading_detail = true;
+        let generation = self.detail_generation;
         let Some(provider) = self.registry.get(self.selected_app) else {
             return;
         };
@@ -737,7 +826,7 @@ impl YesSessions {
     }
 
     fn refresh_selected_detail(&mut self, cx: &mut Context<Self>) {
-        if self.refreshing_detail {
+        if self.loading_detail || self.refreshing_detail {
             return;
         }
         let Some(session_id) = self.selected_session_id.clone() else {
@@ -792,6 +881,11 @@ impl YesSessions {
                             this.navigator_list_state
                                 .reset_with_uniform_height(navigator_count, px(30.));
                         }
+                        if this.detail.as_ref().is_some_and(|previous| {
+                            mermaid_sources_changed(&previous.messages, &detail.messages)
+                        }) {
+                            this.mermaid_views.clear();
+                        }
                         this.detail = Some(Arc::new(detail));
                         this.conversation_state.update(cx, |state, cx| {
                             if next_count > previous_count {
@@ -815,7 +909,10 @@ impl YesSessions {
             loop {
                 cx.background_executor().timer(Duration::from_secs(5)).await;
                 if this
-                    .update(cx, |this, cx| this.refresh_selected_detail(cx))
+                    .update(cx, |this, cx| {
+                        this.refresh_sessions(cx);
+                        this.refresh_selected_detail(cx);
+                    })
                     .is_err()
                 {
                     break;
@@ -3207,8 +3304,8 @@ mod tests {
 
     use super::{
         ancestor_session_ids, collect_mermaid_sources, detail_source_signature,
-        directory_group_labels, format_count, navigator_preview, navigator_window,
-        session_directory_group_key,
+        directory_group_labels, format_count, mermaid_sources_changed, navigator_preview,
+        navigator_window, selection_after_refresh, session_directory_group_key,
     };
     use crate::conversation::inline_subagent_scope_base;
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
@@ -3234,6 +3331,48 @@ mod tests {
             parent_session_id: parent_session_id.map(str::to_owned),
             agent_type: None,
         }
+    }
+
+    #[test]
+    fn refresh_preserves_selection_and_handles_new_or_deleted_sessions() {
+        let old = vec![session("old", None)];
+        let next = vec![session("new", None), session("old", None)];
+        assert_eq!(
+            selection_after_refresh(&old, &next, Some("old")).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            selection_after_refresh(&[], &next, None).as_deref(),
+            Some("new")
+        );
+        assert_eq!(
+            selection_after_refresh(&old, &next[..1], Some("old")).as_deref(),
+            Some("new")
+        );
+        assert_eq!(selection_after_refresh(&old, &[], Some("old")), None);
+        assert_eq!(
+            selection_after_refresh(&old, &next, Some("hidden-subagent")).as_deref(),
+            Some("hidden-subagent")
+        );
+        assert_eq!(selection_after_refresh(&[], &[], None), None);
+    }
+
+    #[test]
+    fn mermaid_cache_invalidates_changed_removed_and_reindexed_diagrams() {
+        let message = |text: &str| SessionMessage::text(MessageType::Assistant, "", text);
+        let old = vec![message("```mermaid\ngraph TD\nA-->B\n```")];
+        assert!(!mermaid_sources_changed(&old, &old));
+        let edited = vec![message("```mermaid\ngraph TD\nA-->C\n```")];
+        assert!(mermaid_sources_changed(&old, &edited));
+        assert!(mermaid_sources_changed(&old, &[]));
+        assert!(mermaid_sources_changed(
+            &old,
+            &[message("new text"), old[0].clone()]
+        ));
+        assert!(!mermaid_sources_changed(
+            &old,
+            &[old[0].clone(), message("extra prose")]
+        ));
     }
 
     #[test]

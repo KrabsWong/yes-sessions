@@ -163,7 +163,9 @@ impl Render for MermaidDiagram {
 
 fn mermaid_html(source: &str, dark: bool) -> anyhow::Result<String> {
     let mermaid_js = load_mermaid_js()?;
-    let encoded_source = serde_json::to_string(source)?;
+    // JSON quoting alone does not protect an inline HTML script: </script>
+    // terminates it even inside a JavaScript string. Escape every '<'.
+    let encoded_source = serde_json::to_string(source)?.replace('<', "\\u003c");
     let theme = if dark { "dark" } else { "default" };
     let foreground = if dark { "#e5e7eb" } else { "#172033" };
     let surface = if dark { "#15181d" } else { "#ffffff" };
@@ -206,4 +208,24 @@ fn load_mermaid_js() -> anyhow::Result<String> {
         .filter(|path| path.is_file())
         .unwrap_or(development_path);
     Ok(std::fs::read_to_string(path)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mermaid_html;
+
+    #[test]
+    fn diagram_source_cannot_terminate_the_script_element() {
+        let source = "graph TD\nA[\"</ScRiPt><script>window.injected=true</script><!--\"]";
+        let html = mermaid_html(source, false).unwrap();
+        let encoded = html
+            .split("const source=")
+            .nth(1)
+            .unwrap()
+            .split("; let scale=")
+            .next()
+            .unwrap();
+        assert!(!encoded.contains('<'));
+        assert_eq!(serde_json::from_str::<String>(encoded).unwrap(), source);
+    }
 }
