@@ -3,7 +3,7 @@ use std::{
     ops::Range,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 
 use chrono::{Local, TimeZone as _};
@@ -306,6 +306,7 @@ pub struct YesSessions {
     loading_inline_subagents: HashSet<String>,
     failed_inline_subagents: HashSet<String>,
     marquee_session_id: Option<String>,
+    sidebar_icon_transition: Option<(Instant, f32)>,
     stats_hovered: bool,
     navigator_hovered: bool,
     navigator_active_message: Option<usize>,
@@ -350,6 +351,7 @@ impl YesSessions {
             loading_inline_subagents: HashSet::new(),
             failed_inline_subagents: HashSet::new(),
             marquee_session_id: None,
+            sidebar_icon_transition: None,
             stats_hovered: false,
             navigator_hovered: false,
             navigator_active_message: None,
@@ -532,8 +534,10 @@ impl YesSessions {
             hsla(222.2 / 360., 0.474, 0.112, 1.)
         } else if dark && matches!(accent, AccentColor::Yellow | AccentColor::Lime) {
             gpui_kit::black()
-        } else {
+        } else if accent == AccentColor::Default {
             hsla(210. / 360., 0.40, 0.98, 1.)
+        } else {
+            gpui_kit::white()
         };
         let hover = hsla(
             hue / 360.,
@@ -580,6 +584,39 @@ impl YesSessions {
             1.,
         );
         let theme = Theme::global_mut(cx);
+        // Match Electron's secondary/accent presets as well as its derived primary surfaces.
+        if accent != AccentColor::Default {
+            let surface_saturation = match accent {
+                AccentColor::Slate => 0.20,
+                AccentColor::Zinc => 0.05,
+                AccentColor::Neutral => 0.,
+                AccentColor::Purple => {
+                    if dark {
+                        0.50
+                    } else {
+                        0.60
+                    }
+                }
+                _ if dark => 0.60,
+                AccentColor::Orange | AccentColor::Amber | AccentColor::Yellow => 0.90,
+                AccentColor::Green | AccentColor::Teal => 0.70,
+                _ => 0.80,
+            };
+            theme.secondary = hsla(
+                hue / 360.,
+                surface_saturation,
+                if dark { 0.25 } else { 0.94 },
+                1.,
+            );
+            theme.accent = hsla(
+                hue / 360.,
+                surface_saturation,
+                if dark { 0.20 } else { 0.96 },
+                1.,
+            );
+        }
+        theme.secondary_foreground = if dark { gpui_kit::white() } else { color };
+        theme.accent_foreground = theme.secondary_foreground;
         theme.primary = color;
         theme.primary_foreground = foreground;
         theme.primary_hover = hover;
@@ -1064,10 +1101,31 @@ impl YesSessions {
         cx.notify();
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn sidebar_icon_scale(&self) -> f32 {
+        let target = if self.settings.sidebar_collapsed {
+            -1.
+        } else {
+            1.
+        };
+        let Some((started, from)) = self.sidebar_icon_transition else {
+            return target;
+        };
+        let progress = (started.elapsed().as_secs_f32() / 0.2).min(1.);
+        from + (target - from) * ease_in_out(progress)
+    }
+
+    fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self
+            .sidebar_icon_transition
+            .is_some_and(|(started, _)| started.elapsed() < Duration::from_millis(200))
+        {
+            window.request_animation_frame();
+        }
         let language = self.settings.language;
         div()
-            .h(px(40.))
+            // Traffic lights start at y=18 and are 14pt tall, centered at y=25.
+            .h(px(50.))
+            .flex_none()
             .w_full()
             .flex()
             .items_center()
@@ -1087,7 +1145,9 @@ impl YesSessions {
                             .ghost()
                             .compact()
                             .size(px(32.))
-                            .icon(IconName::PanelLeft)
+                            .child(Icon::new(IconName::PanelLeft).size(px(16.)).transform(
+                                Transformation::scale(size(self.sidebar_icon_scale(), 1.)),
+                            ))
                             .tooltip(if self.settings.sidebar_collapsed {
                                 tr(language, "app.expandSidebar")
                             } else {
@@ -1099,7 +1159,9 @@ impl YesSessions {
                                 tr(language, "app.collapseSidebar")
                             })
                             .on_click(cx.listener(|this, _, _, cx| {
+                                let from = this.sidebar_icon_scale();
                                 this.settings.sidebar_collapsed = !this.settings.sidebar_collapsed;
+                                this.sidebar_icon_transition = Some((Instant::now(), from));
                                 this.save_settings();
                                 cx.notify();
                             })),
@@ -1147,8 +1209,17 @@ impl YesSessions {
             .h(px(36.))
             .text_size(px(14.))
             .font_weight(FontWeight::MEDIUM)
-            .icon(ProviderIcon::from(self.selected_app))
-            .label(self.selected_app.display_name())
+            .accessibility_label(self.selected_app.display_name())
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Icon::new(ProviderIcon::from(self.selected_app)).size(px(16.)))
+                    .child(self.selected_app.display_name()),
+            )
             .dropdown_caret(true)
             .dropdown_menu(move |menu, _, _| {
                 AppType::ALL
@@ -1423,7 +1494,7 @@ impl YesSessions {
                             .flex()
                             .items_center()
                             .rounded_md()
-                            .bg(cx.theme().selection)
+                            .bg(cx.theme().button)
                             .p(px(2.))
                             .child(
                                 Button::new("group-date")
@@ -1858,7 +1929,7 @@ impl YesSessions {
                                                 .flex_none()
                                                 .rounded(px(4.))
                                                 .bg(if is_selected {
-                                                    cx.theme().selection
+                                                    cx.theme().button
                                                 } else {
                                                     cx.theme().muted
                                                 })
@@ -2984,7 +3055,7 @@ impl YesSessions {
                 cx.theme().border
             })
             .bg(if value {
-                cx.theme().selection
+                cx.theme().button
             } else {
                 cx.theme().background
             })
@@ -3072,7 +3143,7 @@ impl YesSessions {
                 cx.theme().border
             })
             .bg(if enabled {
-                cx.theme().selection
+                cx.theme().button
             } else {
                 cx.theme().background
             })
@@ -3176,7 +3247,7 @@ impl YesSessions {
                 cx.theme().border.opacity(0.6)
             })
             .bg(if selected {
-                cx.theme().selection
+                cx.theme().button
             } else {
                 cx.theme().background
             })
@@ -3184,7 +3255,7 @@ impl YesSessions {
             .hover(|style| {
                 style
                     .border_color(cx.theme().list_active_border)
-                    .bg(cx.theme().selection)
+                    .bg(cx.theme().button)
             })
             .on_click(cx.listener(move |this, _, _, cx| this.set_terminal(terminal, cx)))
             .child(
@@ -3254,7 +3325,7 @@ impl Render for YesSessions {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(self.render_header(cx))
+            .child(self.render_header(window, cx))
             .child(
                 div()
                     .flex_1()

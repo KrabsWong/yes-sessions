@@ -577,7 +577,7 @@ fn render_system(item: &IndexedMessage, options: ConversationOptions, cx: &App) 
         .rounded_lg()
         .border_1()
         .border_color(cx.theme().border)
-        .bg(cx.theme().selection)
+        .bg(cx.theme().button)
         .overflow_hidden()
         .child(
             div()
@@ -1499,7 +1499,7 @@ fn render_user(
         );
     let bubble = div()
         .rounded_lg()
-        .bg(cx.theme().selection)
+        .bg(cx.theme().button)
         .p_3()
         .text_sm()
         .when(options.chat_bubbles, |view| {
@@ -1517,7 +1517,7 @@ fn render_user(
         if options.chat_bubbles {
             cx.theme().primary
         } else {
-            cx.theme().selection
+            cx.theme().button
         },
     );
     if options.chat_bubbles {
@@ -1643,8 +1643,8 @@ fn render_assistant_group(
         .gap_3()
         .child(avatar(
             ProviderIcon::from(options.provider),
-            cx.theme().primary,
-            cx.theme().selection,
+            cx.theme().foreground,
+            cx.theme().button,
         ))
         .child(
             div()
