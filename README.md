@@ -1,6 +1,6 @@
 # Yes Sessions
 
-Yes Sessions 是一款只面向 macOS 的 AI CLI 会话浏览与恢复工具。当前主线实现为纯 Rust 桌面应用：界面使用 GPUI Kit，只有 Mermaid 图表通过 `gpui-wry` 嵌入系统 WKWebView；应用不再携带 Electron、Chromium 或 Node.js 运行时。
+Yes Sessions 是一款只面向 macOS 的 AI CLI 会话浏览与恢复工具。应用使用纯 Rust 实现：界面使用 GPUI Kit，只有 Mermaid 图表通过 `gpui-wry` 嵌入系统 WKWebView，无需附带浏览器运行时。
 
 ![Logo](./build/icons/256x256.png)
 
@@ -68,7 +68,7 @@ packaging/              macOS Info.plist
 scripts/package-macos.sh
 ```
 
-应用是单进程 Rust 架构。耗时的会话读取通过 GPUI 后台任务执行并回到 UI 更新状态，不再经过 Electron IPC。Mermaid 是唯一的 WebView 使用场景，且使用 macOS 自带的 WebKit，不内置浏览器内核。
+应用是单进程 Rust 架构。耗时的会话读取通过 GPUI 后台任务执行并回到 UI 更新状态。Mermaid 是唯一的 WebView 使用场景，且使用 macOS 自带的 WebKit，不内置浏览器内核。
 
 ## 数据路径
 

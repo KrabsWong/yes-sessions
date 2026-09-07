@@ -1,6 +1,6 @@
 # Yes Sessions visual contract
 
-The retired Electron interface is the visual reference for the GPUI rewrite. The rewrite preserves its information architecture, density, spacing, colors, typography, and interaction states instead of introducing a new visual direction.
+The native GPUI interface uses the following information architecture, density, spacing, colors, typography, and interaction states as its visual contract.
 
 ## Product character
 
@@ -40,9 +40,9 @@ The retired Electron interface is the visual reference for the GPUI rewrite. The
 - Provider selection is one 36 px dropdown-style control with the provider icon and label.
 - Date/directory selection is a compact 10 px segmented control.
 - Selected sessions use the light primary surface plus a 2 px primary rail on the left.
-- A conversation turn owns one 32 px avatar. User text sits in a muted 12 px-padded bubble; assistant content is cardless; tool activity is nested beneath the assistant response.
+- A conversation turn owns one 32 px avatar. User text sits in a 12 px-padded primary-colored bubble with contrasting foreground text; assistant content is cardless; tool activity is nested beneath the assistant response.
 - Settings tabs use a bottom underline, not filled tab buttons. Settings content is divided into compact rows or selectable feature cards.
 
-## Scope exception
+## Preview surfaces
 
-The old splash screen and file-preview UI are intentionally omitted. Mermaid diagrams use the approved `gpui-wry` and Mermaid implementation.
+Files and Changes use a collapsible native panel on the right. File previews and diffs render with GPUI; Mermaid diagrams alone use `gpui-wry` and the system WKWebView.

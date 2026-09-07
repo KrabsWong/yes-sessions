@@ -23,7 +23,6 @@ logs/
 
 # Coverage
 coverage
-.nyc_output
 
 # System files
 .DS_Store

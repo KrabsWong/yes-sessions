@@ -1,3 +1,6 @@
+#[path = "session_search.rs"]
+mod session_search;
+use session_search::SessionSearch;
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
@@ -351,6 +354,10 @@ struct ParentConversation {
 }
 
 pub struct YesSessions {
+    root_focus: FocusHandle,
+    pub(crate) search_landing_scroll_pending: bool,
+    pub(crate) search_landing: Option<(usize, Instant)>,
+    session_search: SessionSearch,
     registry: Arc<ProviderRegistry>,
     settings_store: SettingsStore,
     pub settings: AppSettings,
@@ -403,6 +410,10 @@ impl YesSessions {
         Self::apply_theme(settings.theme, window, cx);
         Self::apply_accent(settings.accent_color, cx);
         let mut this = Self {
+            root_focus: cx.focus_handle(),
+            search_landing: None,
+            search_landing_scroll_pending: false,
+            session_search: SessionSearch::default(),
             registry: Arc::new(ProviderRegistry::default()),
             settings_store,
             settings,
@@ -462,6 +473,7 @@ impl YesSessions {
             }
         })
         .detach();
+        this.root_focus.focus(window, cx);
         this.observe_conversation_scroll(cx);
         crate::commands::update_menus(this.settings.language, cx);
         this.load_sessions(cx);
@@ -708,7 +720,7 @@ impl YesSessions {
             1.,
         );
         let theme = Theme::global_mut(cx);
-        // Match Electron's secondary/accent presets as well as its derived primary surfaces.
+        // Apply secondary/accent presets along with the derived primary surfaces.
         if accent != AccentColor::Default {
             let surface_saturation = match accent {
                 AccentColor::Slate => 0.20,
@@ -897,6 +909,9 @@ impl YesSessions {
     }
 
     fn reset_detail(&mut self, cx: &mut Context<Self>) {
+        self.search_landing = None;
+        self.search_landing_scroll_pending = false;
+        self.session_search = SessionSearch::default();
         self.unread_message_count = 0;
         self.detail_generation += 1;
         self.selected_session_id = None;
@@ -1366,6 +1381,16 @@ impl YesSessions {
                     .flex()
                     .items_center()
                     .gap_2()
+                    .child(
+                        Button::new("search-session")
+                            .ghost()
+                            .icon(IconName::Search)
+                            .tooltip(tr(language, "search.open"))
+                            .disabled(self.detail.is_none())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_session_search(window, cx)
+                            })),
+                    )
                     .child(
                         Button::new("settings")
                             .ghost()
@@ -2676,14 +2701,14 @@ impl YesSessions {
             .whitespace_normal()
             .child(title);
         let messages = Arc::new(detail.messages.clone());
-        if self.settings_open {
+        if self.settings_open || self.session_search.input.is_some() {
             for diagram in self.mermaid_views.values() {
                 MermaidDiagram::hide(diagram, cx);
             }
         } else {
             self.prepare_mermaid_views(window, cx);
         }
-        let mermaid_views = if self.settings_open {
+        let mermaid_views = if self.settings_open || self.session_search.input.is_some() {
             Arc::new(HashMap::new())
         } else {
             Arc::new(self.mermaid_views.clone())
@@ -3844,9 +3869,32 @@ impl YesSessions {
 
 impl Render for YesSessions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if window.focused(cx).is_none() {
+            self.root_focus.focus(window, cx);
+        }
         div()
             .id("yes-sessions-root")
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+            .track_focus(&self.root_focus)
+            .on_action(
+                cx.listener(|this, _: &crate::commands::FindInSession, window, cx| {
+                    this.open_session_search(window, cx)
+                }),
+            )
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.session_search.input.is_some()
+                    && matches!(event.keystroke.key.as_str(), "up" | "down")
+                {
+                    this.step_session_search(event.keystroke.key == "up", cx);
+                    cx.stop_propagation();
+                    return;
+                }
+                if event.keystroke.key == "escape" && this.session_search.input.is_some() {
+                    this.session_search = SessionSearch::default();
+                    this.root_focus.focus(window, cx);
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "escape" && this.preview_open && !this.settings_open {
                     let returned = this.workspace_preview.as_ref().is_some_and(|preview| {
                         preview.update(cx, |preview, cx| preview.return_to_list(cx))
@@ -3921,6 +3969,10 @@ impl Render for YesSessions {
                         .child(error),
                 )
             })
+            .when(
+                self.session_search.input.is_some() && self.detail.is_some(),
+                |view| view.child(self.render_session_search(cx)),
+            )
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
             })

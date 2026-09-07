@@ -2,10 +2,14 @@ use crate::i18n::tr;
 use gpui_kit::*;
 use yes_core::Language;
 
-actions!(yes_sessions, [Quit, CloseWindow, MinimizeWindow]);
+actions!(
+    yes_sessions,
+    [Quit, CloseWindow, MinimizeWindow, FindInSession]
+);
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-f", FindInSession, None),
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),

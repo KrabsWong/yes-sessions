@@ -1851,6 +1851,78 @@ fn render_user(
     }
 }
 
+// Paint above the message without changing its measured size or intercepting input.
+fn search_landing_feedback(
+    index: usize,
+    content: AnyElement,
+    owner: &WeakEntity<YesSessions>,
+    cx: &App,
+) -> AnyElement {
+    let landing = owner
+        .upgrade()
+        .and_then(|owner| owner.read(cx).search_landing);
+    let Some((target, started)) = landing
+        .filter(|(target, started)| *target == index && started.elapsed().as_secs_f32() < 4.)
+    else {
+        return content;
+    };
+    let should_scroll = owner
+        .upgrade()
+        .is_some_and(|owner| owner.read(cx).search_landing_scroll_pending);
+    let scroll_owner = owner.clone();
+    div()
+        .debug_selector(move || format!("search-landing-{index}").into())
+        .relative()
+        .w_full()
+        .min_w_0()
+        .child(content)
+        .child(
+            canvas(
+                move |bounds, window, _| {
+                    if should_scroll {
+                        window.request_autoscroll(Bounds {
+                            origin: bounds.origin,
+                            size: size(bounds.size.width, bounds.size.height.min(px(48.))),
+                        });
+                    }
+                },
+                move |_, _, _, cx| {
+                    if should_scroll {
+                        cx.defer(move |cx| {
+                            let _ = scroll_owner.update(cx, |this, cx| {
+                                if this.search_landing == Some((target, started)) {
+                                    this.search_landing_scroll_pending = false;
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+        .child(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(8.))
+                .border_2()
+                .with_animation(
+                    SharedString::from(format!("search-landing-{target}-{started:?}")),
+                    Animation::new(std::time::Duration::from_secs(4)),
+                    move |view, _| {
+                        let elapsed = started.elapsed().as_secs_f32();
+                        let fade = ((4. - elapsed) / 0.8).clamp(0., 1.);
+                        let pulse = 0.5 + 0.5 * (elapsed * std::f32::consts::TAU / 1.25).cos();
+                        view.border_color(rgb(0xe8b521).opacity((0.35 + pulse * 0.6) * fade))
+                            .bg(rgb(0xffd54f).opacity((0.035 + pulse * 0.075) * fade))
+                    },
+                ),
+        )
+        .into_any_element()
+}
+
 fn render_assistant_group(
     turn_index: usize,
     items: Vec<IndexedMessage>,
@@ -1913,7 +1985,19 @@ fn render_assistant_group(
                 cx,
             ));
         }
-        sections.push((index, body.into_any_element()));
+        let target = owner
+            .upgrade()
+            .and_then(|owner| owner.read(cx).search_landing)
+            .map(|(index, _)| index);
+        let feedback_index = pair
+            .tool_result
+            .as_ref()
+            .filter(|item| Some(item.index) == target)
+            .map_or(index, |item| item.index);
+        sections.push((
+            index,
+            search_landing_feedback(feedback_index, body.into_any_element(), &owner, cx),
+        ));
     }
     for item in items
         .iter()
@@ -1948,7 +2032,10 @@ fn render_assistant_group(
                     ))
                 },
             );
-        sections.push((item.index, body.into_any_element()));
+        sections.push((
+            item.index,
+            search_landing_feedback(item.index, body.into_any_element(), &owner, cx),
+        ));
     }
     // Claude interleaves explanatory text with tool blocks in the same turn.
     if options.provider == AppType::Claude {
@@ -2053,9 +2140,16 @@ fn render_turn(
         .w_full()
         .v_flex()
         .gap_3()
-        .children(systems.iter().map(|item| render_system(item, options, cx)))
+        .children(systems.iter().map(|item| {
+            search_landing_feedback(item.index, render_system(item, options, cx), &owner, cx)
+        }))
         .when_some(user, |view, item| {
-            view.child(render_user(&item, options, mermaid_views, cx))
+            view.child(search_landing_feedback(
+                item.index,
+                render_user(&item, options, mermaid_views, cx),
+                &owner,
+                cx,
+            ))
         })
         .when(!assistant.is_empty(), |view| {
             view.child(render_assistant_group(
