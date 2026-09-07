@@ -1,3 +1,4 @@
+pub mod claude_xml;
 pub mod git;
 pub mod mermaid;
 pub mod model;

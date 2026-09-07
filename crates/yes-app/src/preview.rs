@@ -7,6 +7,7 @@ use std::{
 
 use crate::{
     i18n::tr,
+    preview_selection::{CodeSelection, CodeText},
     preview_syntax::{TokenKind, highlight_lines},
 };
 use gpui_kit::component::{
@@ -21,6 +22,8 @@ use yes_core::{
     Language,
     workspace::{self, Change, ChangeScope, FileContent, PreviewImageFormat},
 };
+
+actions!(preview, [CopyCode, SelectAllCode]);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum PreviewTab {
@@ -44,6 +47,7 @@ struct CodeRow {
     old: Option<usize>,
     new: Option<usize>,
     text: String,
+    original_text: Option<String>,
     kind: char,
     syntax: Vec<(Range<usize>, TokenKind)>,
     old_syntax: Vec<(Range<usize>, TokenKind)>,
@@ -53,6 +57,7 @@ struct CodeRow {
 
 pub struct WorkspacePreview {
     root: PathBuf,
+    selection: Entity<CodeSelection>,
     change_count: Option<usize>,
     changes: Vec<Change>,
     branch: Option<String>,
@@ -111,6 +116,11 @@ impl WorkspacePreview {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        cx.bind_keys([
+            KeyBinding::new("cmd-c", CopyCode, Some("CodePreview")),
+            KeyBinding::new("cmd-a", SelectAllCode, Some("CodePreview")),
+        ]);
+        let selection = cx.new(|cx| CodeSelection::new(cx));
         let search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr(language, "preview.search")));
         let subscription = cx.subscribe(&search, |this, _, event: &InputEvent, cx| {
@@ -133,6 +143,7 @@ impl WorkspacePreview {
         });
         let mut this = Self {
             root,
+            selection,
             change_count: None,
             changes: vec![],
             branch: None,
@@ -523,6 +534,8 @@ impl WorkspacePreview {
         self.loading_content = true;
         self.content_error = None;
         self.code.clear();
+        self.selection
+            .update(cx, |state, _| state.reset(Default::default()));
         self.full_code.clear();
         self.expanded_context.clear();
         self.split_rows.clear();
@@ -599,6 +612,9 @@ impl WorkspacePreview {
             };
             result.map(|(mut code, image): (Vec<CodeRow>, _)| {
                 for row in &mut code {
+                    if row.text.contains('\t') {
+                        row.original_text = Some(row.text.clone());
+                    }
                     row.text = row.text.replace('\t', "    ");
                 }
                 if scope.is_some() {
@@ -634,7 +650,7 @@ impl WorkspacePreview {
                             .fold(0., f32::max)
                             + 128.;
                         this.full_code = code;
-                        this.rebuild_context();
+                        this.rebuild_context(cx);
                         this.highlight_visible(cx);
                         this.image = image;
                         if let Some(line) = line {
@@ -680,7 +696,7 @@ impl WorkspacePreview {
         .detach();
     }
 
-    fn rebuild_context(&mut self) {
+    fn rebuild_context(&mut self, cx: &mut Context<Self>) {
         self.code = if self
             .selected
             .as_ref()
@@ -691,6 +707,75 @@ impl WorkspacePreview {
             self.full_code.clone()
         };
         self.split_rows = pair_diff_rows(&self.code);
+        let text = |row: &CodeRow| {
+            if row.folded.is_some() || row.kind == '@' {
+                return None;
+            }
+            Some(
+                if self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(_, scope)| scope.is_some())
+                    && (row.old.is_some() || row.new.is_some())
+                {
+                    row.text.get(1..).unwrap_or_default().to_owned()
+                } else {
+                    row.text.clone()
+                },
+            )
+        };
+        let documents = [
+            self.code.iter().map(text).collect(),
+            self.split_rows
+                .iter()
+                .map(|(left, _)| left.and_then(|i| text(&self.code[i])))
+                .collect(),
+            self.split_rows
+                .iter()
+                .map(|(_, right)| right.and_then(|i| text(&self.code[i])))
+                .collect(),
+        ];
+        let original = |row: &CodeRow| {
+            row.original_text.as_ref().map(|text| {
+                if self
+                    .selected
+                    .as_ref()
+                    .is_some_and(|(_, scope)| scope.is_some())
+                    && (row.old.is_some() || row.new.is_some())
+                {
+                    text.get(1..).unwrap_or_default().to_owned()
+                } else {
+                    text.clone()
+                }
+            })
+        };
+        let originals = [
+            self.code.iter().map(original).collect(),
+            self.split_rows
+                .iter()
+                .map(|(left, _)| left.and_then(|i| original(&self.code[i])))
+                .collect(),
+            self.split_rows
+                .iter()
+                .map(|(_, right)| right.and_then(|i| original(&self.code[i])))
+                .collect(),
+        ];
+        self.selection.update(cx, |state, _| {
+            state.reset(documents);
+            state.originals = originals;
+            state.clear(
+                if self.side_by_side
+                    && self
+                        .selected
+                        .as_ref()
+                        .is_some_and(|(_, scope)| scope.is_some())
+                {
+                    1
+                } else {
+                    0
+                },
+            );
+        });
     }
 
     fn toggle_change_directory(
@@ -756,7 +841,7 @@ impl WorkspacePreview {
                                 ))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.expanded_context.insert(start);
-                                    this.rebuild_context();
+                                    this.rebuild_context(cx);
                                     this.highlight_visible(cx);
                                     cx.notify();
                                 }))
@@ -819,6 +904,17 @@ impl WorkspacePreview {
                                     }))
                                     .child(
                                         div()
+                                            .debug_selector(move || {
+                                                format!(
+                                                    "code-text-{}-{index}",
+                                                    match side {
+                                                        None => 0,
+                                                        Some(true) => 1,
+                                                        Some(false) => 2,
+                                                    }
+                                                )
+                                                .into()
+                                            })
                                             .h_full()
                                             .border_l_1()
                                             .border_color(cx.theme().border.opacity(0.5))
@@ -828,14 +924,25 @@ impl WorkspacePreview {
                                             } else {
                                                 cx.theme().foreground
                                             })
-                                            .child(StyledText::new(text).with_highlights(
-                                                row_highlights(
-                                                    row,
-                                                    side == Some(true),
-                                                    accent,
-                                                    is_diff,
-                                                    cx,
+                                            .child(CodeText::new(
+                                                StyledText::new(text.clone()).with_highlights(
+                                                    row_highlights(
+                                                        row,
+                                                        side == Some(true),
+                                                        accent,
+                                                        is_diff,
+                                                        cx,
+                                                    ),
                                                 ),
+                                                text.len(),
+                                                this.selection.clone(),
+                                                match side {
+                                                    None => 0,
+                                                    Some(true) => 1,
+                                                    Some(false) => 2,
+                                                },
+                                                index,
+                                                cx.theme().selection,
                                             )),
                                     )
                             })
@@ -968,7 +1075,24 @@ impl Render for WorkspacePreview {
                     }
                 })),
         );
-        let mut body = div().flex().flex_col().flex_1().min_h_0().min_w_0();
+        let mut body = div()
+            .key_context("CodePreview")
+            .track_focus(&self.selection.read(cx).focus)
+            .on_action(cx.listener(|this, _: &CopyCode, _, cx| {
+                let text = this.selection.read(cx).copy();
+                if !text.is_empty() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                }
+            }))
+            .on_action(cx.listener(|this, _: &SelectAllCode, window, cx| {
+                this.selection.update(cx, |state, _| state.select_all());
+                window.refresh();
+            }))
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .min_w_0();
         if self.changes_available {
             body = body.child(
                 div()
@@ -1373,7 +1497,7 @@ impl Render for WorkspacePreview {
                                     .label(tr(language, "preview.collapseContext"))
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.expanded_context.clear();
-                                        this.rebuild_context();
+                                        this.rebuild_context(cx);
                                         this.highlight_visible(cx);
                                         this.scroll.scroll_to_item(0, ScrollStrategy::Top);
                                         cx.notify();
@@ -1394,6 +1518,9 @@ impl Render for WorkspacePreview {
                                 ))
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.side_by_side = !this.side_by_side;
+                                    this.selection.update(cx, |state, _| {
+                                        state.clear(if this.side_by_side { 1 } else { 0 })
+                                    });
                                     cx.notify();
                                 })),
                         );
@@ -2006,6 +2133,86 @@ mod tests {
     use super::{PreviewTab, WorkspacePreview, parse_diff};
     use gpui_kit::{TestAppContext, px, size};
 
+    #[gpui_kit::test]
+    fn code_selection_copies_across_rows_and_keeps_diff_sides_separate(cx: &mut TestAppContext) {
+        use gpui_kit::{MouseButton, point};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(800.), px(500.)), |window, cx| {
+            WorkspacePreview::new(std::env::temp_dir(), yes_core::Language::En, window, cx)
+        });
+        let preview = window.root(cx).unwrap();
+        preview.update(cx, |preview, cx| {
+            preview.count_generation += 1;
+            preview.selected = Some(("file.rs".into(), None));
+            preview.list_visible = false;
+            preview.full_code = (0..100)
+                .map(|i| super::CodeRow {
+                    text: format!("line {i}"),
+                    new: Some(i + 1),
+                    ..Default::default()
+                })
+                .collect();
+            preview.rebuild_context(cx);
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let first = visual.debug_bounds("code-text-0-0").unwrap();
+        let third = visual.debug_bounds("code-text-0-2").unwrap();
+        visual.simulate_mouse_down(
+            point(first.left() + px(25.), first.center().y),
+            MouseButton::Left,
+            Default::default(),
+        );
+        visual.simulate_mouse_move(
+            point(third.right() + px(10.), third.center().y),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        visual.simulate_mouse_up(
+            point(third.right() + px(10.), third.center().y),
+            MouseButton::Left,
+            Default::default(),
+        );
+        let copied = preview.read_with(cx, |preview, cx| preview.selection.read(cx).copy());
+        assert!(copied.contains("line 1\nline 2"), "{copied:?}");
+        visual.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            copied
+        );
+        visual.simulate_keystrokes("cmd-a cmd-c");
+        assert!(
+            cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap())
+                .ends_with("line 99")
+        );
+        preview.update(cx, |preview, cx| {
+            preview.selection.update(cx, |state, _| state.select_all());
+            assert!(preview.selection.read(cx).copy().ends_with("line 99"));
+            preview.selected = Some((
+                "file.rs".into(),
+                Some(yes_core::workspace::ChangeScope::Unstaged),
+            ));
+            preview.full_code = parse_diff("@@ -1,2 +1,3 @@\n-old\n+new\n+extra\n same\n");
+            preview.rebuild_context(cx);
+            preview.side_by_side = true;
+            cx.notify();
+        });
+        let right = visual.debug_bounds("code-text-2-1").unwrap();
+        visual.simulate_click(right.center(), Default::default());
+        preview.update(cx, |preview, cx| {
+            preview.selection.update(cx, |state, _| state.select_all());
+            let text = preview.selection.read(cx).copy();
+            assert_eq!(text, "new\nextra\nsame");
+        });
+        let toggle = visual.debug_bounds("preview-diff-layout").unwrap();
+        visual.simulate_click(toggle.center(), Default::default());
+        preview.update(cx, |preview, cx| {
+            assert!(preview.selection.read(cx).copy().is_empty());
+            preview.selection.update(cx, |state, _| state.select_all());
+            assert_eq!(preview.selection.read(cx).copy(), "old\nnew\nextra\nsame");
+        });
+    }
+
     #[test]
     fn inline_changes_preserve_unicode_and_context_expands_from_snapshot() {
         let (a, b) = super::changed_ranges("let 名称 = 旧值;", "let 名称 = 新值;");
@@ -2107,7 +2314,7 @@ mod tests {
             }
             preview.full_code = parse_diff(&patch);
             super::mark_inline_changes(&mut preview.full_code);
-            preview.rebuild_context();
+            preview.rebuild_context(cx);
             cx.notify();
         });
         let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);

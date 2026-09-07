@@ -704,27 +704,37 @@ fn message_content(
     else {
         return div().into_any_element();
     };
+    message_content_text(&content, item.index, "body", 0, mermaid_views)
+}
+
+fn message_content_text(
+    content: &str,
+    message_index: usize,
+    part: &str,
+    diagram_start: usize,
+    mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
+) -> AnyElement {
     let mut body = div().v_flex().gap_2().min_w_0().w_full().text_sm();
-    let mut diagram_index = 0;
-    for segment in split_mermaid_blocks(&content) {
+    let mut diagram_index = diagram_start;
+    for segment in split_mermaid_blocks(content) {
         match segment {
             ContentSegment::Markdown(markdown) => {
                 body = body.child(conversation_markdown(
                     (
-                        ElementId::from(("message-content", item.index)),
-                        diagram_index.to_string(),
+                        ElementId::from(("message-content", message_index)),
+                        format!("{part}-{diagram_index}"),
                     ),
                     markdown,
                 ));
             }
             ContentSegment::Mermaid(source) => {
-                if let Some(diagram) = mermaid_views.get(&(item.index, diagram_index)) {
+                if let Some(diagram) = mermaid_views.get(&(message_index, diagram_index)) {
                     body = body.child(diagram.clone());
                 } else {
                     body = body.child(conversation_markdown(
                         (
-                            ElementId::from(("mermaid-fallback", item.index)),
-                            diagram_index.to_string(),
+                            ElementId::from(("mermaid-fallback", message_index)),
+                            format!("{part}-{diagram_index}"),
                         ),
                         format!("```mermaid\n{source}\n```"),
                     ));
@@ -732,6 +742,249 @@ fn message_content(
                 diagram_index += 1;
             }
         }
+    }
+    body.into_any_element()
+}
+
+fn xml_file_markdown(content: &str) -> String {
+    // A payload may itself contain fences or HTML. Keep it entirely inside code.
+    let longest = content.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}text\n{content}\n{fence}")
+}
+
+fn assistant_content(
+    turn_index: usize,
+    item: &IndexedMessage,
+    options: ConversationOptions,
+    mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
+    owner: WeakEntity<YesSessions>,
+    cx: &App,
+) -> AnyElement {
+    use yes_core::claude_xml::{ClaudeXmlSegment, parse_claude_xml};
+    if options.provider != AppType::Claude {
+        return message_content(item, mermaid_views);
+    }
+    let segments = parse_claude_xml(item.message.content.as_deref().unwrap_or_default());
+    let card_indices: Vec<_> = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, segment)| (!matches!(segment, ClaudeXmlSegment::Text(_))).then_some(i))
+        .collect();
+    if card_indices.is_empty() {
+        return message_content(item, mermaid_views);
+    }
+    let message_index = item.index;
+    let mut body = div().v_flex().w_full().min_w_0().gap_2();
+    if card_indices.len() > 1 {
+        let mut actions = div().flex().justify_end().gap_2();
+        for (expand, key) in [
+            (true, "sessions.expandAll"),
+            (false, "sessions.collapseAll"),
+        ] {
+            let owner = owner.clone();
+            let indices = card_indices.clone();
+            actions = actions.child(
+                Button::new((ElementId::from(("xml-actions", message_index)), key))
+                    .ghost()
+                    .debug_selector(move || format!("xml-action-{expand}"))
+                    .label(tr(options.language, key))
+                    .text_size(px(12.))
+                    .on_click(move |_, _, cx| {
+                        let _ = owner.update(cx, |this, cx| {
+                            this.toggle_claude_xml(
+                                turn_index,
+                                message_index,
+                                indices.clone(),
+                                expand,
+                                cx,
+                            );
+                        });
+                    }),
+            );
+        }
+        body = body.child(actions);
+    }
+    for (index, segment) in segments.into_iter().enumerate() {
+        let (path, content, entries) = match segment {
+            ClaudeXmlSegment::Text(text) => {
+                let original = item.message.content.as_deref().unwrap_or_default();
+                let preceding = &original[..text.as_ptr() as usize - original.as_ptr() as usize];
+                let diagram_start = split_mermaid_blocks(preceding)
+                    .iter()
+                    .filter(|segment| matches!(segment, ContentSegment::Mermaid(_)))
+                    .count();
+                body = body.child(message_content_text(
+                    text,
+                    message_index,
+                    &format!("xml-{index}"),
+                    diagram_start,
+                    mermaid_views,
+                ));
+                continue;
+            }
+            ClaudeXmlSegment::File { path, content } => (path, Some(content), None),
+            ClaudeXmlSegment::Directory { path, entries } => (path, None, Some(entries)),
+        };
+        let expanded = owner
+            .upgrade()
+            .and_then(|owner| {
+                owner
+                    .read(cx)
+                    .claude_xml_expanded
+                    .get(&(message_index, index))
+                    .copied()
+            })
+            .unwrap_or(index == card_indices[0]);
+        let directory = entries.is_some();
+        let toggle_owner = owner.clone();
+        let mut card = div()
+            .w_full()
+            .min_w_0()
+            .rounded_lg()
+            .border_1()
+            .border_color(cx.theme().border)
+            .overflow_hidden()
+            .child(
+                Button::new((
+                    ElementId::from(("xml-card", message_index)),
+                    index.to_string(),
+                ))
+                .ghost()
+                .w_full()
+                .h(px(36.))
+                .px_3()
+                .rounded_none()
+                .debug_selector(move || format!("xml-card-{message_index}-{index}"))
+                .accessibility_label(path.to_owned())
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .w_full()
+                        .min_w_0()
+                        .gap_2()
+                        .child(
+                            Icon::new(if directory {
+                                IconName::Folder
+                            } else {
+                                IconName::FileText
+                            })
+                            .size(px(14.)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_sm()
+                                .font_weight(FontWeight::MEDIUM)
+                                .child(path_basename(path.trim_end_matches('/')).to_owned()),
+                        )
+                        .child(
+                            div()
+                                .max_w(px(160.))
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(compact_tool_path(
+                                    path,
+                                    std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+                                )),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr(
+                                    options.language,
+                                    if directory {
+                                        "sessions.directory"
+                                    } else {
+                                        "message.xmlFile"
+                                    },
+                                )),
+                        )
+                        .child(
+                            Icon::new(if expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size(px(14.)),
+                        ),
+                )
+                .on_click(move |_, _, cx| {
+                    let _ = toggle_owner.update(cx, |this, cx| {
+                        this.toggle_claude_xml(
+                            turn_index,
+                            message_index,
+                            vec![index],
+                            !expanded,
+                            cx,
+                        );
+                    });
+                }),
+            );
+        if expanded {
+            let mut payload = div()
+                .id((
+                    ElementId::from(("xml-body", message_index)),
+                    index.to_string(),
+                ))
+                .debug_selector(move || format!("xml-body-{message_index}-{index}"))
+                .w_full()
+                .min_w_0()
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .border_t_1()
+                .border_color(cx.theme().border)
+                .p_3();
+            if let Some(content) = content {
+                payload = payload.child(conversation_markdown(
+                    (
+                        ElementId::from(("xml-code", message_index)),
+                        index.to_string(),
+                    ),
+                    xml_file_markdown(content),
+                ));
+            }
+            if let Some(entries) = entries {
+                let mut listing = div().v_flex().gap_1().child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!(
+                            "{} {}",
+                            entries.len(),
+                            tr(options.language, "message.xmlEntries")
+                        )),
+                );
+                for entry in entries {
+                    listing = listing.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_sm()
+                            .child(
+                                Icon::new(if entry.ends_with('/') {
+                                    IconName::Folder
+                                } else {
+                                    IconName::FileText
+                                })
+                                .size(px(14.)),
+                            )
+                            .child(div().min_w_0().child(entry.to_owned())),
+                    );
+                }
+                payload = payload.child(listing);
+            }
+            card = card.child(payload);
+        }
+        body = body.child(card);
     }
     body.into_any_element()
 }
@@ -1903,7 +2156,16 @@ fn render_assistant_group(
                     .content
                     .as_deref()
                     .is_some_and(|content| !content.is_empty()),
-                |view| view.child(message_content(item, mermaid_views)),
+                |view| {
+                    view.child(assistant_content(
+                        turn_index,
+                        item,
+                        options,
+                        mermaid_views,
+                        owner.clone(),
+                        cx,
+                    ))
+                },
             );
     }
     div()
@@ -2106,6 +2368,15 @@ mod tests {
         let bounds = visual.debug_bounds("historical-edit-diff").unwrap();
         assert!(bounds.size.width > px(0.) && bounds.size.width <= px(300.));
         assert!(bounds.size.height > px(0.));
+    }
+
+    #[test]
+    fn xml_code_payload_cannot_escape_its_fence() {
+        let source = "```\n<script>text</script>\n````";
+        assert_eq!(
+            super::xml_file_markdown(source),
+            format!("`````text\n{source}\n`````")
+        );
     }
 
     #[test]

@@ -364,6 +364,7 @@ pub struct YesSessions {
     expanded_parents: HashSet<String>,
     parent_transition: Option<(String, Instant, bool)>,
     expanded_messages: HashSet<usize>,
+    pub(crate) claude_xml_expanded: HashMap<(usize, usize), bool>,
     expanded_subagent_conversations: HashSet<String>,
     inline_subagent_details: HashMap<String, Arc<SessionDetail>>,
     loading_inline_subagents: HashSet<String>,
@@ -418,6 +419,7 @@ impl YesSessions {
             expanded_parents: HashSet::new(),
             parent_transition: None,
             expanded_messages: HashSet::new(),
+            claude_xml_expanded: HashMap::new(),
             expanded_subagent_conversations: HashSet::new(),
             inline_subagent_details: HashMap::new(),
             loading_inline_subagents: HashSet::new(),
@@ -882,6 +884,7 @@ impl YesSessions {
         self.preview_open = false;
         self.preview_icon_transition = None;
         self.expanded_messages.clear();
+        self.claude_xml_expanded.clear();
         self.expanded_subagent_conversations.clear();
         self.inline_subagent_details.clear();
         self.loading_inline_subagents.clear();
@@ -1063,6 +1066,24 @@ impl YesSessions {
             .map(|session| session.id.clone())
             .unwrap_or_else(|| session_id.to_owned());
         self.select_session(id, cx);
+    }
+
+    pub(crate) fn toggle_claude_xml(
+        &mut self,
+        turn_index: usize,
+        message_index: usize,
+        item_indices: Vec<usize>,
+        expanded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        for index in item_indices {
+            self.claude_xml_expanded
+                .insert((message_index, index), expanded);
+        }
+        self.conversation_state.update(cx, |state, cx| {
+            let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
+        });
+        cx.notify();
     }
 
     pub fn toggle_message(
@@ -3903,6 +3924,70 @@ mod tests {
     };
     use crate::conversation::inline_subagent_scope_base;
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
+
+    #[gpui_kit::test]
+    fn claude_xml_cards_expand_and_collapse_in_message(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(800.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            app.selected_app = AppType::Claude;
+            let mut fixture = session("xml-test", None);
+            fixture.app_type = AppType::Claude;
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                session: fixture,
+                messages: vec![SessionMessage::text(MessageType::Assistant,
+                    "2026-09-07T00:00:00Z",
+                    "Before\n<path>/src/main.rs</path><type>file</type><content>fn main() {}</content>\nBetween\n<path>/src/</path><type>directory</type><entries>main.rs\nchild/</entries>\nAfter")],
+            }));
+            app.conversation_state.update(cx, |state, cx| state.reset(1, cx));
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        assert!(visual.debug_bounds("xml-body-0-1").is_some());
+        assert!(visual.debug_bounds("xml-body-0-3").is_none());
+        let target = visual.debug_bounds("xml-card-0-3").unwrap().center();
+        visual.simulate_click(target, Default::default());
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("xml-body-0-3").is_some());
+        let target = visual.debug_bounds("xml-action-false").unwrap().center();
+        visual.simulate_click(target, Default::default());
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("xml-body-0-1").is_none());
+        assert!(visual.debug_bounds("xml-body-0-3").is_none());
+        let target = visual.debug_bounds("xml-action-true").unwrap().center();
+        visual.simulate_click(target, Default::default());
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("xml-body-0-1").is_some());
+        assert!(visual.debug_bounds("xml-body-0-3").is_some());
+        app.update(cx, |app, cx| {
+            app.selected_app = AppType::CodeBuddy;
+            app.conversation_state
+                .update(cx, |state, cx| state.reset(1, cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("xml-card-0-1").is_none());
+        app.update(cx, |app, cx| {
+            app.selected_app = AppType::Claude;
+            std::sync::Arc::make_mut(app.detail.as_mut().unwrap()).messages[0].message_type =
+                MessageType::User;
+            app.conversation_state
+                .update(cx, |state, cx| state.reset(1, cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("xml-card-0-1").is_none());
+        app.update(cx, |app, cx| {
+            app.reset_detail(cx);
+        });
+        assert!(app.read_with(cx, |app, _| app.claude_xml_expanded.is_empty()));
+    }
 
     #[gpui_kit::test]
     fn navigator_keeps_its_rail_stable_and_preview_reachable(cx: &mut gpui_kit::TestAppContext) {
