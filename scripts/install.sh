@@ -146,23 +146,15 @@ echo -e "${BLUE}  正在安装 Yes Sessions v${VERSION}${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo ""
 
-# 检查是否已安装。旧 Electron 版本使用连字符 bundle 名，原生版本使用空格。
-INSTALLED_BUNDLES=()
-for installed_bundle in "${INSTALL_DIR}/${APP_BUNDLE_NAME}" "${INSTALL_DIR}/${APP_NAME}.app"; do
-    if [ -d "$installed_bundle" ]; then
-        INSTALLED_BUNDLES+=("$installed_bundle")
-    fi
-done
-
-if [ "${#INSTALLED_BUNDLES[@]}" -gt 0 ]; then
+# 检查是否已安装原生应用。
+INSTALLED_BUNDLE="${INSTALL_DIR}/${APP_BUNDLE_NAME}"
+if [ -d "$INSTALLED_BUNDLE" ]; then
     echo -e "${YELLOW}⚠️  检测到已安装的旧版本${NC}"
     read -p "是否先卸载旧版本? (y/n) " -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo -e "${BLUE}正在卸载旧版本...${NC}"
-        for installed_bundle in "${INSTALLED_BUNDLES[@]}"; do
-            rm -rf "$installed_bundle"
-        done
+        rm -rf "$INSTALLED_BUNDLE"
         echo -e "${GREEN}✓ 旧版本已卸载${NC}"
     fi
     echo ""

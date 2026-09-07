@@ -12,7 +12,7 @@ Yes Sessions 是一款仅面向 macOS 的 AI CLI 会话管理器，使用 Rust�
 - rusqlite（OpenCode 数据）
 - serde / serde_json（JSON 与 JSONL 数据）
 
-项目不得重新引入 Electron、Chromium、Node.js 或通用 WebView 页面。需要原生 UI 时优先使用 GPUI Kit 组件；只有 Mermaid 内容可以进入 WKWebView。
+项目保持纯 Rust 原生架构，不得引入浏览器或 JavaScript 运行时，也不得使用通用 WebView 页面。原生 UI 优先使用 GPUI Kit 组件；只有 Mermaid 内容可以进入系统 WKWebView。
 
 ## 目录结构
 
@@ -41,4 +41,4 @@ cargo test --workspace
 ./scripts/package-macos.sh
 ```
 
-打包后还需执行 `codesign --verify --deep --strict`，正式分发版本需完成 Developer ID 签名、notarization 和 stapling。
+打包后还需执行 `codesign --verify --deep --strict`，无证书时允许 ad-hoc 签名分发，并说明首次启动的手动放行步骤；配置完整分发凭据时完成 Developer ID 签名、notarization 和 stapling。

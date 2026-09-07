@@ -172,28 +172,10 @@ impl SettingsStore {
     }
 
     pub fn load(&self) -> AppSettings {
-        if let Some(settings) = fs::read_to_string(&self.path)
+        fs::read_to_string(&self.path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-        {
-            return settings;
-        }
-
-        let legacy_path = self
-            .path
-            .parent()
-            .map(|parent| parent.join("yes-sessions-config.json"));
-        let legacy_settings = legacy_path
-            .and_then(|path| fs::read_to_string(path).ok())
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|value| value.get("settings").cloned())
-            .and_then(|settings| serde_json::from_value(settings).ok());
-        if let Some(settings) = legacy_settings {
-            let _ = self.save(&settings);
-            return settings;
-        }
-
-        AppSettings::default()
+            .unwrap_or_default()
     }
 
     pub fn save(&self, settings: &AppSettings) -> io::Result<()> {
@@ -219,16 +201,30 @@ mod tests {
     }
 
     #[test]
-    fn accepts_settings_nested_in_the_legacy_electron_store_shape() {
-        let value: serde_json::Value = serde_json::from_str(
-            r#"{"settings":{"language":"zh","theme":"dark","defaultApp":"codex"}}"#,
-        )
-        .unwrap();
-        let settings: AppSettings =
-            serde_json::from_value(value.get("settings").unwrap().clone()).unwrap();
-
-        assert_eq!(settings.language, Language::Zh);
-        assert_eq!(settings.theme, ThemePreference::Dark);
-        assert_eq!(settings.default_app, Some(AppType::Codex));
+    fn native_settings_load_save_and_invalid_file_defaults() {
+        let root = std::env::temp_dir().join(format!(
+            "yes-settings-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let store = SettingsStore::new(root.join("settings.json"));
+        assert_eq!(store.load().theme, ThemePreference::System);
+        let settings = AppSettings {
+            language: Language::Zh,
+            theme: ThemePreference::Dark,
+            default_app: Some(AppType::Codex),
+            ..AppSettings::default()
+        };
+        store.save(&settings).unwrap();
+        let loaded = store.load();
+        assert_eq!(loaded.language, Language::Zh);
+        assert_eq!(loaded.theme, ThemePreference::Dark);
+        assert_eq!(loaded.default_app, Some(AppType::Codex));
+        fs::write(root.join("settings.json"), "invalid json").unwrap();
+        assert_eq!(store.load().theme, ThemePreference::System);
+        fs::remove_dir_all(root).unwrap();
     }
 }
