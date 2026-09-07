@@ -4,6 +4,7 @@ pub mod model;
 pub mod providers;
 pub mod settings;
 pub mod terminal;
+pub mod workspace;
 
 pub use model::{AppType, MessageType, Session, SessionDetail, SessionMessage, SessionStats};
 pub use providers::{ProviderRegistry, SessionProvider};

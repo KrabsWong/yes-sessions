@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -394,6 +395,56 @@ fn input_string<'a>(
         .find_map(|key| input.get(*key).and_then(serde_json::Value::as_str))
 }
 
+fn tool_file_target(
+    name: &str,
+    input: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<(PathBuf, Option<usize>)> {
+    if !matches!(
+        name.to_ascii_lowercase().as_str(),
+        "read" | "write" | "edit" | "multiedit" | "read_file" | "write_file" | "edit_file"
+    ) {
+        return None;
+    }
+    let input = input?;
+    let path = input_string(input, &["file_path", "filePath", "path"])?;
+    if path.trim().is_empty() || path.contains('\0') {
+        return None;
+    }
+    let line = ["start_line", "line", "offset"]
+        .iter()
+        .find_map(|key| input.get(*key).and_then(serde_json::Value::as_u64))
+        .and_then(|line| usize::try_from(line).ok())
+        .filter(|line| *line > 0);
+    Some((PathBuf::from(path), line))
+}
+
+/// Keep the filename and its two nearest directories when shortening a tool path.
+fn compact_tool_path(path: &str, home: Option<&std::path::Path>) -> String {
+    let display = home
+        .filter(|home| !home.as_os_str().is_empty())
+        .and_then(|home| std::path::Path::new(path).strip_prefix(home).ok())
+        .map(|relative| {
+            if relative.as_os_str().is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", relative.display())
+            }
+        })
+        .unwrap_or_else(|| path.to_owned());
+    let parts: Vec<_> = display.split('/').filter(|part| !part.is_empty()).collect();
+    if display.chars().count() <= 64 || parts.len() <= 3 {
+        return display;
+    }
+    let root = if display.starts_with("~/") {
+        "~/"
+    } else if display.starts_with('/') {
+        "/"
+    } else {
+        ""
+    };
+    format!("{root}.../{}", parts[parts.len() - 3..].join("/"))
+}
+
 fn path_basename(path: &str) -> &str {
     path.rsplit('/')
         .next()
@@ -751,6 +802,14 @@ fn render_tool(
         tool_use.and_then(|item| item.message.tool_input.as_ref()),
     );
     let input = tool_use.and_then(|item| item.message.tool_input.as_ref());
+    let file_target = tool_file_target(&tool_name, input).filter(|_| {
+        owner
+            .upgrade()
+            .is_some_and(|owner| owner.read(cx).has_workspace())
+    });
+    let preview_owner = owner.clone();
+    let chevron_owner = owner.clone();
+    let summary = summary.filter(|_| file_target.is_none());
     let input_rows = tool_input_rows(input);
     let output = tool_output_text(tool_result.map(|item| &item.message))
         .or_else(|| tool_output_text(tool_use.map(|item| &item.message)));
@@ -778,94 +837,151 @@ fn render_tool(
         .bg(cx.theme().muted.opacity(0.45))
         .overflow_hidden()
         .child(
-            Button::new(("tool-toggle", message_index))
-                .ghost()
-                .w_full()
+            div()
                 .h(px(38.))
-                .px_3()
+                .w_full()
+                .flex()
+                .items_center()
                 .bg(cx.theme().button)
-                .accessibility_label(accessibility_label)
                 .child(
-                    div()
-                        .w_full()
+                    Button::new(("tool-toggle", message_index))
+                        .ghost()
+                        .flex_1()
                         .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .text_sm()
-                        .child(
-                            Icon::new(tool_icon(kind))
-                                .size(px(16.))
-                                .text_color(tool_color(kind)),
-                        )
+                        .h(px(38.))
+                        .px_3()
+                        .bg(cx.theme().button)
+                        .accessibility_label(accessibility_label)
                         .child(
                             div()
-                                .max_w(px(180.))
+                                .w_full()
                                 .min_w_0()
-                                .truncate()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child(title),
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_sm()
+                                .child(
+                                    Icon::new(tool_icon(kind))
+                                        .size(px(16.))
+                                        .text_color(tool_color(kind)),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(180.))
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_weight(FontWeight::MEDIUM)
+                                        .child(title),
+                                )
+                                .when(!model.is_empty(), |view| {
+                                    view.child(
+                                        div()
+                                            .max_w(px(180.))
+                                            .min_w_0()
+                                            .truncate()
+                                            .rounded(px(4.))
+                                            .bg(cx.theme().muted)
+                                            .px(px(6.))
+                                            .py(px(2.))
+                                            .text_size(px(12.))
+                                            .text_color(cx.theme().foreground.opacity(0.78))
+                                            .child(model),
+                                    )
+                                })
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .text_size(px(12.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(timestamp),
+                                )
+                                .when_some(summary, |view, summary| {
+                                    view.child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_right()
+                                            .text_size(px(12.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(summary),
+                                    )
+                                })
+                                .when(tool_use.is_none(), |view| {
+                                    view.child(
+                                        div()
+                                            .flex_none()
+                                            .text_size(px(10.))
+                                            .text_color(cx.theme().warning.opacity(0.7))
+                                            .child("※"),
+                                    )
+                                }),
                         )
-                        .when(!model.is_empty(), |view| {
-                            view.child(
-                                div()
-                                    .max_w(px(180.))
-                                    .min_w_0()
-                                    .truncate()
-                                    .rounded(px(4.))
-                                    .bg(cx.theme().muted)
-                                    .px(px(6.))
-                                    .py(px(2.))
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().foreground.opacity(0.78))
-                                    .child(model),
-                            )
-                        })
-                        .child(
-                            div()
-                                .ml_auto()
-                                .flex_none()
-                                .whitespace_nowrap()
-                                .text_size(px(12.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child(timestamp),
-                        )
-                        .when_some(summary, |view, summary| {
-                            view.child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_right()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(summary),
-                            )
-                        })
-                        .child(
-                            Icon::new(if is_expanded {
-                                IconName::ChevronUp
-                            } else {
-                                IconName::ChevronDown
-                            })
-                            .size(px(16.))
-                            .text_color(cx.theme().muted_foreground),
-                        )
-                        .when(tool_use.is_none(), |view| {
-                            view.child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(10.))
-                                    .text_color(cx.theme().warning.opacity(0.7))
-                                    .child("※"),
-                            )
+                        .on_click(move |_, _, cx| {
+                            let _ = owner.update(cx, |this, cx| {
+                                this.toggle_message(message_index, turn_index, cx)
+                            });
                         }),
                 )
-                .on_click(move |_, _, cx| {
-                    let _ = owner.update(cx, |this, cx| {
-                        this.toggle_message(message_index, turn_index, cx)
-                    });
-                }),
+                .when_some(file_target, |view, (path, line)| {
+                    let full_path = path.display().to_string();
+                    let home = std::env::var_os("HOME").map(PathBuf::from);
+                    let label = compact_tool_path(&full_path, home.as_deref());
+                    let (directory, filename) = label
+                        .rsplit_once('/')
+                        .map(|(directory, filename)| (format!("{directory}/"), filename.to_owned()))
+                        .unwrap_or_else(|| (String::new(), label));
+                    view.child(
+                        Button::new(("tool-file-preview", message_index))
+                            .ghost()
+                            .max_w(relative(0.6))
+                            .min_w_0()
+                            .h(px(38.))
+                            .px_2()
+                            .accessibility_label(full_path.clone())
+                            .tooltip(full_path)
+                            .child(
+                                div()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(div().min_w_0().truncate().child(directory))
+                                    .child(div().flex_none().whitespace_nowrap().child(filename)),
+                            )
+                            .on_click(move |_, window, cx| {
+                                let _ = preview_owner.update(cx, |this, cx| {
+                                    this.open_workspace_file(path.clone(), line, window, cx);
+                                });
+                            }),
+                    )
+                })
+                .child(
+                    Button::new(("tool-chevron-toggle", message_index))
+                        .ghost()
+                        .flex_none()
+                        .h(px(38.))
+                        .icon(if is_expanded {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .accessibility_label(tr(
+                            options.language,
+                            if is_expanded {
+                                "message.collapse"
+                            } else {
+                                "message.expand"
+                            },
+                        ))
+                        .on_click(move |_, _, cx| {
+                            let _ = chevron_owner.update(cx, |this, cx| {
+                                this.toggle_message(message_index, turn_index, cx)
+                            });
+                        }),
+                ),
         )
         .when(is_expanded && input.is_some(), |view| {
             view.child(
@@ -1793,6 +1909,32 @@ mod tests {
     use serde_json::json;
     use yes_core::{AppType, MessageType, SessionMessage};
 
+    #[test]
+    fn tool_paths_keep_filename_and_nearest_directories() {
+        let home = Some(std::path::Path::new("/Users/krabswang"));
+        assert_eq!(
+            super::compact_tool_path(
+                "/Users/krabswang/Workspaces/iPhoneqq/QQMainProject/Submodules/VAS/VASDubhe/StrongRemind/HalfScreen/QQStrongRemindHalfScreenView.m",
+                home
+            ),
+            "~/.../StrongRemind/HalfScreen/QQStrongRemindHalfScreenView.m"
+        );
+        assert_eq!(
+            super::compact_tool_path("/Users/krabswang/project/src/main.rs", home),
+            "~/project/src/main.rs"
+        );
+        assert_eq!(
+            super::compact_tool_path("/Users/krabswang-other/src/main.rs", home),
+            "/Users/krabswang-other/src/main.rs"
+        );
+        assert_eq!(
+            super::compact_tool_path("src/界面/文件.rs", home),
+            "src/界面/文件.rs"
+        );
+        assert_eq!(super::compact_tool_path("README.md", None), "README.md");
+        assert_eq!(super::compact_tool_path("/Users/krabswang", home), "~");
+    }
+
     fn tool_message(
         index: usize,
         message_type: MessageType,
@@ -1803,6 +1945,20 @@ mod tests {
         message.tool_name = Some(name.to_owned());
         message.call_id = Some(call_id.to_owned());
         IndexedMessage { index, message }
+    }
+
+    #[test]
+    fn preview_links_only_target_explicit_file_tools() {
+        let input = serde_json::json!({"file_path": "src/main.rs", "offset": 12});
+        assert_eq!(
+            super::tool_file_target("Read", input.as_object()),
+            Some((std::path::PathBuf::from("src/main.rs"), Some(12)))
+        );
+        assert!(super::tool_file_target("grep", input.as_object()).is_none());
+        assert!(super::tool_file_target("bash", input.as_object()).is_none());
+        assert!(
+            super::tool_file_target("read", serde_json::json!({"path":""}).as_object()).is_none()
+        );
     }
 
     #[test]

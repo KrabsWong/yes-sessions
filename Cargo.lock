@@ -10104,6 +10104,7 @@ dependencies = [
  "raw-window-handle",
  "rust-embed",
  "serde_json",
+ "syntect",
  "yes-core",
 ]
 

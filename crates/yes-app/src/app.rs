@@ -15,6 +15,7 @@ use gpui_kit::component::{
     menu::{DropdownMenu as _, PopupMenuItem},
     message_scroller::MessageScrollerState,
     resizable_panel,
+    tooltip::Tooltip,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -94,26 +95,47 @@ fn ancestor_session_ids(sessions: &[Session], session_id: &str) -> Vec<String> {
     ancestors
 }
 
-fn directory_group_labels(path: &str) -> (String, Option<String>) {
-    let parts = path
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>();
-    let Some(directory) = parts.last() else {
-        return (path.to_owned(), None);
-    };
-    let parent_parts = &parts[..parts.len() - 1];
-    let parent = match parent_parts {
-        [] => None,
-        [parent] => Some(format!("{parent}/...")),
-        [first, second] => Some(format!("/{first}/{second}")),
-        parents => Some(format!(
-            "../{}/{}...",
-            parents[parents.len() - 2],
-            parents[parents.len() - 1]
-        )),
-    };
-    ((*directory).to_owned(), parent)
+fn directory_group_root(paths: &HashSet<String>) -> Option<PathBuf> {
+    let mut parents = paths
+        .iter()
+        .filter_map(|path| std::path::Path::new(path).parent());
+    let mut root = parents.next()?.to_path_buf();
+    for parent in parents {
+        while !parent.starts_with(&root) {
+            if !root.pop() {
+                return None;
+            }
+        }
+    }
+    Some(root)
+}
+
+fn directory_group_labels(path: &str, root: Option<&std::path::Path>) -> (String, Option<String>) {
+    let path = std::path::Path::new(path);
+    let directory = path
+        .file_name()
+        .unwrap_or(path.as_os_str())
+        .to_string_lossy()
+        .into_owned();
+    let parent = path.parent().and_then(|parent| {
+        let parent = root
+            .and_then(|root| parent.strip_prefix(root).ok())
+            .unwrap_or(parent);
+        let parts = parent
+            .components()
+            .filter_map(|part| match part {
+                std::path::Component::Normal(name) => Some(name.to_string_lossy()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if parts.is_empty() {
+            None
+        } else {
+            // Closest ancestors carry more context than common workspace prefixes.
+            Some(parts[parts.len().saturating_sub(2)..].join("/"))
+        }
+    });
+    (directory, parent)
 }
 
 fn session_directory_group_key(session: &Session, no_directory_label: &str) -> String {
@@ -280,6 +302,7 @@ use crate::{
     },
     i18n::tr,
     mermaid::{MermaidDiagram, create_mermaid_diagram},
+    preview::WorkspacePreview,
 };
 
 pub struct YesSessions {
@@ -295,6 +318,10 @@ pub struct YesSessions {
     refreshing_sessions: bool,
     loading_detail: bool,
     error: Option<String>,
+    workspace_preview: Option<Entity<WorkspacePreview>>,
+    preview_subscription: Option<Subscription>,
+    preview_open: bool,
+    preview_icon_transition: Option<(Instant, f32)>,
     settings_open: bool,
     settings_tab: SettingsTab,
     session_view_mode: SessionViewMode,
@@ -340,6 +367,10 @@ impl YesSessions {
             refreshing_sessions: false,
             loading_detail: false,
             error: None,
+            workspace_preview: None,
+            preview_subscription: None,
+            preview_open: false,
+            preview_icon_transition: None,
             settings_open: false,
             settings_tab: SettingsTab::General,
             session_view_mode: SessionViewMode::Date,
@@ -675,6 +706,10 @@ impl YesSessions {
         self.error = None;
         self.sessions = Arc::new(Vec::new());
         self.detail = None;
+        self.workspace_preview = None;
+        self.preview_subscription = None;
+        self.preview_open = false;
+        self.preview_icon_transition = None;
         self.mermaid_views.clear();
         self.expanded_subagent_conversations.clear();
         self.inline_subagent_details.clear();
@@ -778,6 +813,10 @@ impl YesSessions {
         self.refreshing_detail = false;
         self.detail_source_signature = None;
         self.detail = None;
+        self.workspace_preview = None;
+        self.preview_subscription = None;
+        self.preview_open = false;
+        self.preview_icon_transition = None;
         self.expanded_messages.clear();
         self.expanded_subagent_conversations.clear();
         self.inline_subagent_details.clear();
@@ -1087,6 +1126,9 @@ impl YesSessions {
 
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.settings.language = language;
+        if let Some(preview) = &self.workspace_preview {
+            preview.update(cx, |preview, cx| preview.set_language(language, cx));
+        }
         self.mermaid_views.clear();
         self.save_settings();
         cx.notify();
@@ -1114,9 +1156,24 @@ impl YesSessions {
         from + (target - from) * ease_in_out(progress)
     }
 
+    fn preview_icon_scale(&self) -> f32 {
+        let target = if self.preview_open { -1. } else { 1. };
+        let Some((started, from)) = self.preview_icon_transition else {
+            return target;
+        };
+        let progress = (started.elapsed().as_secs_f32() / 0.2).min(1.);
+        from + (target - from) * ease_in_out(progress)
+    }
+
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self
             .sidebar_icon_transition
+            .is_some_and(|(started, _)| started.elapsed() < Duration::from_millis(200))
+        {
+            window.request_animation_frame();
+        }
+        if self
+            .preview_icon_transition
             .is_some_and(|(started, _)| started.elapsed() < Duration::from_millis(200))
         {
             window.request_animation_frame();
@@ -1189,14 +1246,51 @@ impl YesSessions {
                     }),
             )
             .child(
-                Button::new("settings")
-                    .ghost()
-                    .compact()
-                    .size(px(36.))
-                    .icon(IconName::Settings)
-                    .tooltip(tr(language, "app.settings"))
-                    .accessibility_label(tr(language, "app.settings"))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        Button::new("settings")
+                            .ghost()
+                            .compact()
+                            .size(px(36.))
+                            .icon(IconName::Settings)
+                            .tooltip(tr(language, "app.settings"))
+                            .accessibility_label(tr(language, "app.settings"))
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                    )
+                    .child(
+                        Button::new("toggle-workspace")
+                            .ghost()
+                            .compact()
+                            .size(px(32.))
+                            .disabled(!self.has_workspace())
+                            .child(Icon::new(IconName::PanelLeft).size(px(16.)).transform(
+                                Transformation::scale(size(self.preview_icon_scale(), 1.)),
+                            ))
+                            .tooltip(tr(
+                                language,
+                                if self.preview_open {
+                                    "preview.collapsePanel"
+                                } else {
+                                    "preview.expandPanel"
+                                },
+                            ))
+                            .accessibility_label(tr(
+                                language,
+                                if self.preview_open {
+                                    "preview.collapsePanel"
+                                } else {
+                                    "preview.expandPanel"
+                                },
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_workspace(window, cx)
+                                }),
+                            ),
+                    ),
             )
     }
 
@@ -1414,6 +1508,7 @@ impl YesSessions {
             .filter(|session| session.kind == yes_core::model::SessionKind::Main)
             .map(|session| self.session_group_key(session))
             .collect::<HashSet<_>>();
+        let directory_root = directory_group_root(&group_keys);
         let all_expanded = group_keys
             .iter()
             .all(|key| !self.collapsed_groups.contains(key));
@@ -1488,6 +1583,38 @@ impl YesSessions {
                                         .child(stats_summary.clone()),
                                 ))
                             }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(2.))
+                            .child(
+                                Button::new("expand-all-groups")
+                                    .debug_selector(|| "expand-all-groups".into())
+                                    .ghost()
+                                    .compact()
+                                    .size(px(24.))
+                                    .icon(IconName::ChevronDown)
+                                    .disabled(loading || main_count == 0 || all_expanded)
+                                    .tooltip(tr(language, "sessions.expandAll"))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.expand_all_groups(cx)),
+                                    ),
+                            )
+                            .child(
+                                Button::new("collapse-all-groups")
+                                    .debug_selector(|| "collapse-all-groups".into())
+                                    .ghost()
+                                    .compact()
+                                    .size(px(24.))
+                                    .icon(IconName::ChevronUp)
+                                    .disabled(loading || main_count == 0 || all_collapsed)
+                                    .tooltip(tr(language, "sessions.collapseAll"))
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.collapse_all_groups(cx)),
+                                    ),
+                            ),
                     )
                     .child(
                         div()
@@ -1632,14 +1759,19 @@ impl YesSessions {
                                     else {
                                         unreachable!()
                                     };
-                                    let (group_label, parent_path) =
-                                        if view_mode == SessionViewMode::Directory {
-                                            directory_group_labels(&label)
-                                        } else {
-                                            (label, None)
-                                        };
+                                    let (group_label, parent_path) = if view_mode
+                                        == SessionViewMode::Directory
+                                    {
+                                        directory_group_labels(&label, directory_root.as_deref())
+                                    } else {
+                                        (label, None)
+                                    };
+                                    let full_path = key.clone();
                                     return div()
                                         .id(("group", index))
+                                        .tooltip(move |window, cx| {
+                                            Tooltip::new(full_path.clone()).build(window, cx)
+                                        })
                                         .mx_2()
                                         .h(px(36.))
                                         .px_2()
@@ -1683,10 +1815,7 @@ impl YesSessions {
                                                     },
                                                 )
                                                 .child(
-                                                    div()
-                                                        .flex_none()
-                                                        .whitespace_nowrap()
-                                                        .child(group_label),
+                                                    div().min_w_0().truncate().child(group_label),
                                                 )
                                                 .when_some(parent_path, |view, parent_path| {
                                                     view.child(
@@ -1705,49 +1834,7 @@ impl YesSessions {
                                                             .child(parent_path),
                                                     )
                                                 }),
-                                        )
-                                        .when(index == 0, |view| {
-                                            view.child(
-                                                div()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(2.))
-                                                    .child(
-                                                        Button::new("expand-all-groups")
-                                                            .ghost()
-                                                            .compact()
-                                                            .size(px(24.))
-                                                            .icon(IconName::ChevronDown)
-                                                            .disabled(all_expanded)
-                                                            .tooltip(tr(
-                                                                language,
-                                                                "sessions.expandAll",
-                                                            ))
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.expand_all_groups(cx)
-                                                                },
-                                                            )),
-                                                    )
-                                                    .child(
-                                                        Button::new("collapse-all-groups")
-                                                            .ghost()
-                                                            .compact()
-                                                            .size(px(24.))
-                                                            .icon(IconName::ChevronUp)
-                                                            .disabled(all_collapsed)
-                                                            .tooltip(tr(
-                                                                language,
-                                                                "sessions.collapseAll",
-                                                            ))
-                                                            .on_click(cx.listener(
-                                                                |this, _, _, cx| {
-                                                                    this.collapse_all_groups(cx)
-                                                                },
-                                                            )),
-                                                    ),
-                                            )
-                                        });
+                                        );
                                 };
                                 let is_selected = selected.as_deref() == Some(session.id.as_str());
                                 let title = if session.first_message.is_empty() {
@@ -2248,6 +2335,88 @@ impl YesSessions {
             .into_any_element()
     }
 
+    fn set_preview_open(&mut self, open: bool, cx: &mut Context<Self>) {
+        if self.preview_open != open {
+            let from = self.preview_icon_scale();
+            self.preview_open = open;
+            self.preview_icon_transition = Some((Instant::now(), from));
+            cx.notify();
+        }
+    }
+
+    fn toggle_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.preview_open {
+            self.set_preview_open(false, cx);
+            return;
+        }
+        self.ensure_workspace_preview(window, cx);
+        if let Some(preview) = &self.workspace_preview {
+            preview.update(cx, |preview, cx| preview.reveal(cx));
+            self.set_preview_open(true, cx);
+        }
+    }
+
+    fn ensure_workspace_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workspace_preview.is_some() {
+            return;
+        }
+        let Some(root) = self
+            .detail
+            .as_ref()
+            .and_then(|detail| detail.session.directory.clone())
+        else {
+            return;
+        };
+        let language = self.settings.language;
+        let preview = cx.new(|cx| WorkspacePreview::new(root, language, window, cx));
+        self.preview_subscription = Some(cx.observe(&preview, |_, _, cx| cx.notify()));
+        self.workspace_preview = Some(preview);
+    }
+
+    pub fn has_workspace(&self) -> bool {
+        self.detail
+            .as_ref()
+            .is_some_and(|detail| detail.session.directory.is_some())
+    }
+
+    pub fn open_workspace_file(
+        &mut self,
+        path: PathBuf,
+        line: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ensure_workspace_preview(window, cx);
+        if let Some(preview) = &self.workspace_preview {
+            preview.update(cx, |preview, cx| preview.open_path(path, line, cx));
+            self.set_preview_open(true, cx);
+        }
+    }
+
+    fn render_workspace_preview(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(preview) = self.workspace_preview.clone() else {
+            return div().into_any_element();
+        };
+        div()
+            .v_flex()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .child(div().flex_1().min_h_0().child(preview))
+            .child(
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr(self.settings.language, "preview.currentWorkspace")),
+            )
+            .into_any_element()
+    }
+
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         if self.loading_detail {
@@ -2272,6 +2441,7 @@ impl YesSessions {
                 .child(tr(language, "sessions.select"))
                 .into_any_element();
         };
+        self.ensure_workspace_preview(window, cx);
         let session = &detail.session;
         let updated = Local
             .timestamp_millis_opt(session.updated_at)
@@ -2291,9 +2461,11 @@ impl YesSessions {
             session.first_message.clone()
         };
         let title_view = div()
+            .id("session-detail-title")
+            .debug_selector(|| "session-detail-title".into())
             .min_w_0()
-            .whitespace_nowrap()
-            .text_ellipsis()
+            .w_full()
+            .whitespace_normal()
             .child(title);
         let messages = Arc::new(detail.messages.clone());
         if self.settings_open {
@@ -2335,14 +2507,17 @@ impl YesSessions {
             .min_h_0()
             .child(
                 div()
+                    .flex_none()
+                    .min_w_0()
                     .p_4()
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .v_flex()
                     .child(
                         div()
+                            .min_w_0()
                             .flex()
-                            .items_center()
+                            .items_start()
                             .gap_2()
                             .when(
                                 session.kind == yes_core::model::SessionKind::Subagent,
@@ -3320,34 +3495,62 @@ impl YesSessions {
 impl Render for YesSessions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
+            .id("yes-sessions-root")
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.preview_open && !this.settings_open {
+                    this.set_preview_open(false, cx);
+                    cx.stop_propagation();
+                }
+            }))
             .relative()
             .v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(self.render_header(window, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .p_4()
-                    .when(self.settings.sidebar_collapsed, |view| {
-                        view.child(self.render_detail(window, cx))
-                    })
-                    .when(!self.settings.sidebar_collapsed, |view| {
-                        view.child(
-                            h_resizable("sessions-workspace")
-                                .child(
-                                    resizable_panel()
-                                        .size(px(320.))
-                                        .size_range(px(160.)..px(960.))
-                                        .child(self.render_sidebar(cx)),
-                                )
-                                .child(resizable_panel().child(self.render_detail(window, cx))),
+            .child(div().flex_1().min_h_0().flex().p_4().child({
+                let detail = self.render_detail(window, cx);
+                let sessions = if self.settings.sidebar_collapsed {
+                    detail
+                } else {
+                    h_resizable("sessions-workspace")
+                        .child(
+                            resizable_panel()
+                                .size(px(320.))
+                                .size_range(px(160.)..px(960.))
+                                .child(self.render_sidebar(cx)),
                         )
-                    }),
-            )
+                        .child(
+                            resizable_panel()
+                                .size_range(px(280.)..px(4000.))
+                                .child(detail),
+                        )
+                        .into_any_element()
+                };
+                if self.preview_open {
+                    h_resizable("app-workspace-preview")
+                        .child(
+                            resizable_panel()
+                                .size_range(
+                                    px(if self.settings.sidebar_collapsed {
+                                        280.
+                                    } else {
+                                        440.
+                                    })..px(4000.),
+                                )
+                                .child(sessions),
+                        )
+                        .child(
+                            resizable_panel()
+                                .size(px(400.))
+                                .size_range(px(320.)..px(2400.))
+                                .child(self.render_workspace_preview(cx)),
+                        )
+                        .into_any_element()
+                } else {
+                    sessions
+                }
+            }))
             .when_some(self.error.clone(), |view, error| {
                 view.child(
                     div()
@@ -3471,20 +3674,111 @@ mod tests {
         assert_eq!(ancestor_session_ids(&sessions, "first"), vec!["second"]);
     }
 
+    #[gpui_kit::test]
+    fn detail_title_wraps_as_available_width_shrinks(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1200.), px(700.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            let mut item = session("title-wrap", None);
+            item.first_message = "检查文件预览和差异对比面板的布局，确保缩小会话区域后标题能够自动换行并完整显示。 Review the workspace preview layout and preserve the full session title.".into();
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail { session: item, messages: vec![] }));
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let wide = visual.debug_bounds("session-detail-title").unwrap();
+        visual.simulate_resize(size(px(440.), px(700.)));
+        let narrow = visual.debug_bounds("session-detail-title").unwrap();
+        assert!(narrow.size.height > wide.size.height);
+        assert!(narrow.right() <= px(440.));
+    }
+
+    #[gpui_kit::test]
+    fn group_toolbar_clicks_do_not_toggle_the_first_group(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1100.), px(700.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = false;
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        for mode in [
+            super::SessionViewMode::Directory,
+            super::SessionViewMode::Date,
+        ] {
+            for count in [1, 2] {
+                app.update(cx, |app, cx| {
+                    app.session_view_mode = mode;
+                    app.sessions = std::sync::Arc::new(
+                        (0..count)
+                            .map(|index| {
+                                let mut item = session(&format!("item-{index}"), None);
+                                item.directory =
+                                    Some(PathBuf::from(format!("/workspace/project-{index}")));
+                                item.updated_at = 1_700_000_000_000 + index * 86_400_000;
+                                item
+                            })
+                            .collect(),
+                    );
+                    app.collapsed_groups.clear();
+                    cx.notify();
+                });
+                let collapse = visual.debug_bounds("collapse-all-groups").unwrap();
+                visual.simulate_click(collapse.center(), Default::default());
+                app.read_with(cx, |app, _| {
+                    assert_eq!(app.session_rows().len(), count as usize);
+                    assert_eq!(app.collapsed_groups.len(), count as usize);
+                });
+                let expand = visual.debug_bounds("expand-all-groups").unwrap();
+                visual.simulate_click(expand.center(), Default::default());
+                app.read_with(cx, |app, _| {
+                    assert!(app.collapsed_groups.is_empty());
+                    assert_eq!(app.session_rows().len(), count as usize * 2);
+                });
+            }
+        }
+    }
+
     #[test]
-    fn directory_labels_match_legacy_compaction() {
-        assert_eq!(directory_group_labels("project"), ("project".into(), None));
+    fn directory_labels_remove_shared_workspace_and_keep_nearest_parents() {
+        let paths = [
+            "/Users/me/Workspaces/client/app",
+            "/Users/me/Workspaces/server/app",
+            "/Users/me/Workspaces/project",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        let root = super::directory_group_root(&paths).unwrap();
+        assert_eq!(root, PathBuf::from("/Users/me/Workspaces"));
         assert_eq!(
-            directory_group_labels("/Users/project"),
-            ("project".into(), Some("Users/...".into()))
+            directory_group_labels("/Users/me/Workspaces/client/app", Some(&root)),
+            ("app".into(), Some("client".into()))
         );
         assert_eq!(
-            directory_group_labels("/Users/me/project"),
-            ("project".into(), Some("/Users/me".into()))
+            directory_group_labels("/Users/me/Workspaces/server/app", Some(&root)),
+            ("app".into(), Some("server".into()))
         );
         assert_eq!(
-            directory_group_labels("/Users/me/work/project"),
-            ("project".into(), Some("../me/work...".into()))
+            directory_group_labels("/Users/me/Workspaces/project", Some(&root)),
+            ("project".into(), None)
+        );
+        assert_eq!(
+            directory_group_labels("/Users/me/Workspaces/a/b/父目录/project", Some(&root)),
+            ("project".into(), Some("b/父目录".into()))
+        );
+        assert_eq!(
+            directory_group_labels("project", None),
+            ("project".into(), None)
         );
     }
 

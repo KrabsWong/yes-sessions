@@ -5,3 +5,5 @@ pub mod app_assets;
 pub mod conversation;
 pub mod i18n;
 pub mod mermaid;
+pub mod preview;
+mod preview_syntax;
