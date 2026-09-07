@@ -31,10 +31,60 @@ pub struct Entry {
     pub ignored: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewImageFormat {
+    Png,
+    Jpeg,
+    Gif,
+    Webp,
+    Bmp,
+    Tiff,
+    Ico,
+    Svg,
+}
+
+fn image_format(path: &Path, bytes: &[u8]) -> Option<PreviewImageFormat> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(PreviewImageFormat::Png)
+    } else if bytes.starts_with(b"\xff\xd8\xff") {
+        Some(PreviewImageFormat::Jpeg)
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(PreviewImageFormat::Gif)
+    } else if bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP") {
+        Some(PreviewImageFormat::Webp)
+    } else if bytes.starts_with(b"BM") {
+        Some(PreviewImageFormat::Bmp)
+    } else if bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*") {
+        Some(PreviewImageFormat::Tiff)
+    } else if bytes.starts_with(b"\0\0\x01\0") {
+        Some(PreviewImageFormat::Ico)
+    } else {
+        match path
+            .extension()?
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "png" => Some(PreviewImageFormat::Png),
+            "jpg" | "jpeg" => Some(PreviewImageFormat::Jpeg),
+            "gif" => Some(PreviewImageFormat::Gif),
+            "webp" => Some(PreviewImageFormat::Webp),
+            "bmp" => Some(PreviewImageFormat::Bmp),
+            "tif" | "tiff" => Some(PreviewImageFormat::Tiff),
+            "ico" => Some(PreviewImageFormat::Ico),
+            "svg" => Some(PreviewImageFormat::Svg),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum FileContent {
     Text(String),
-    Image(Vec<u8>),
+    Image {
+        format: PreviewImageFormat,
+        bytes: Vec<u8>,
+    },
     Unsupported,
 }
 
@@ -210,15 +260,43 @@ pub fn read_file(root: &Path, relative: &Path) -> Result<FileContent> {
     if bytes.len() as u64 > MAX_FILE_BYTES {
         return Ok(FileContent::Unsupported);
     }
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n")
-        || bytes.starts_with(b"\xff\xd8\xff")
-        || bytes.starts_with(b"GIF87a")
-        || bytes.starts_with(b"GIF89a")
-        || (bytes.starts_with(b"RIFF") && bytes.get(8..12) == Some(b"WEBP"))
-    {
-        return Ok(FileContent::Image(bytes));
+    if let Some(format) = image_format(relative, &bytes) {
+        return Ok(FileContent::Image { format, bytes });
     }
-    if bytes.contains(&0) {
+    let extension = relative
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_ascii_lowercase();
+    if bytes
+        .iter()
+        .any(|byte| *byte < 0x20 && !matches!(*byte, b'\t' | b'\n' | b'\r'))
+        || bytes.starts_with(b"%PDF-")
+        || matches!(
+            extension.as_str(),
+            "pdf"
+                | "zip"
+                | "gz"
+                | "tar"
+                | "7z"
+                | "rar"
+                | "bz2"
+                | "xz"
+                | "doc"
+                | "docx"
+                | "xls"
+                | "xlsx"
+                | "ppt"
+                | "pptx"
+                | "mp3"
+                | "mp4"
+                | "mov"
+                | "wav"
+                | "heic"
+                | "heif"
+                | "avif"
+        )
+    {
         return Ok(FileContent::Unsupported);
     }
     Ok(match String::from_utf8(bytes) {
@@ -591,6 +669,63 @@ mod tests {
                 .iter()
                 .any(|entry| entry.ignored)
         );
+    }
+
+    #[test]
+    fn images_and_unsupported_documents_are_classified_before_text() {
+        let fixture = Fixture::new();
+        for (name, bytes, expected) in [
+            (
+                "png.data",
+                b"\x89PNG\r\n\x1a\n".as_slice(),
+                PreviewImageFormat::Png,
+            ),
+            (
+                "jpg.data",
+                b"\xff\xd8\xff".as_slice(),
+                PreviewImageFormat::Jpeg,
+            ),
+            ("gif.data", b"GIF89a".as_slice(), PreviewImageFormat::Gif),
+            (
+                "webp.data",
+                b"RIFFxxxxWEBP".as_slice(),
+                PreviewImageFormat::Webp,
+            ),
+            ("bmp.data", b"BM".as_slice(), PreviewImageFormat::Bmp),
+            ("tiff.data", b"II*\0".as_slice(), PreviewImageFormat::Tiff),
+            (
+                "ico.data",
+                b"\0\0\x01\0".as_slice(),
+                PreviewImageFormat::Ico,
+            ),
+            (
+                "image.SVG",
+                b"<svg xmlns=\"http://www.w3.org/2000/svg\"/>".as_slice(),
+                PreviewImageFormat::Svg,
+            ),
+            (
+                "broken.PNG",
+                b"damaged image".as_slice(),
+                PreviewImageFormat::Png,
+            ),
+        ] {
+            fs::write(fixture.0.join(name), bytes).unwrap();
+            assert!(
+                matches!(read_file(&fixture.0, Path::new(name)).unwrap(), FileContent::Image { format, .. } if format == expected)
+            );
+        }
+        for (name, content) in [
+            ("document.pdf", "%PDF-1.7\nASCII contents"),
+            ("archive.zip", "PK archive"),
+            ("video.mp4", "video"),
+            ("control.data", "\u{1}binary"),
+        ] {
+            fs::write(fixture.0.join(name), content).unwrap();
+            assert!(matches!(
+                read_file(&fixture.0, Path::new(name)).unwrap(),
+                FileContent::Unsupported
+            ));
+        }
     }
 
     #[test]

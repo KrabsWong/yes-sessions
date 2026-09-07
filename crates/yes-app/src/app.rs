@@ -3498,7 +3498,12 @@ impl Render for YesSessions {
             .id("yes-sessions-root")
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                 if event.keystroke.key == "escape" && this.preview_open && !this.settings_open {
-                    this.set_preview_open(false, cx);
+                    let returned = this.workspace_preview.as_ref().is_some_and(|preview| {
+                        preview.update(cx, |preview, cx| preview.return_to_list(cx))
+                    });
+                    if !returned {
+                        this.set_preview_open(false, cx);
+                    }
                     cx.stop_propagation();
                 }
             }))

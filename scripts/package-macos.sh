@@ -45,6 +45,8 @@ cp "$project_root/packaging/Info.plist" "$contents/Info.plist"
 cp "$project_root/build/icon.icns" "$contents/Resources/icon.icns"
 cp "$project_root/crates/yes-app/assets/mermaid.min.js" "$contents/Resources/mermaid.min.js"
 cp "$project_root/crates/yes-app/third-party/MERMAID-LICENSE" "$contents/Resources/MERMAID-LICENSE"
+cp "$project_root/crates/yes-app/third-party/SYNTAX-LICENSES.txt" "$contents/Resources/SYNTAX-LICENSES.txt"
+cp "$project_root/crates/yes-app/third-party/TWO-FACE-LICENSE-MIT" "$contents/Resources/TWO-FACE-LICENSE-MIT"
 
 plutil -replace CFBundleShortVersionString -string "$marketing_version" "$contents/Info.plist"
 plutil -replace CFBundleVersion -string "$marketing_version" "$contents/Info.plist"

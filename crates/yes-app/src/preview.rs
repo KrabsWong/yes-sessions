@@ -19,7 +19,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yes_core::{
     Language,
-    workspace::{self, Change, ChangeScope, FileContent},
+    workspace::{self, Change, ChangeScope, FileContent, PreviewImageFormat},
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -85,6 +85,7 @@ pub struct WorkspacePreview {
     list_generation: u64,
     content_generation: u64,
     scroll: UniformListScrollHandle,
+    list_scroll: UniformListScrollHandle,
     horizontal_scroll: ScrollHandle,
     right_horizontal_scroll: ScrollHandle,
 }
@@ -152,6 +153,7 @@ impl WorkspacePreview {
             list_generation: 0,
             content_generation: 0,
             scroll: UniformListScrollHandle::new(),
+            list_scroll: UniformListScrollHandle::new(),
             horizontal_scroll: ScrollHandle::new(),
             right_horizontal_scroll: ScrollHandle::new(),
         };
@@ -198,10 +200,22 @@ impl WorkspacePreview {
     }
 
     pub fn set_tab(&mut self, tab: PreviewTab, cx: &mut Context<Self>) {
+        if self.tab != tab {
+            self.list_scroll = UniformListScrollHandle::new();
+        }
         self.tab = tab;
         self.list_visible = true;
         self.load_list(cx);
         self.load_count(cx);
+    }
+
+    pub fn return_to_list(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.list_visible {
+            return false;
+        }
+        self.list_visible = true;
+        cx.notify();
+        true
     }
 
     pub fn open_path(&mut self, path: PathBuf, line: Option<usize>, cx: &mut Context<Self>) {
@@ -472,19 +486,16 @@ impl WorkspacePreview {
                                 .collect(),
                             None,
                         ),
-                        FileContent::Image(bytes) => {
-                            let format = if bytes.starts_with(b"\x89PNG") {
-                                ImageFormat::Png
-                            } else if bytes.starts_with(b"\xff\xd8\xff") {
-                                ImageFormat::Jpeg
-                            } else if bytes.starts_with(b"GIF8") {
-                                ImageFormat::Gif
-                            } else if bytes.starts_with(b"RIFF") {
-                                ImageFormat::Webp
-                            } else if bytes.starts_with(b"BM") {
-                                ImageFormat::Bmp
-                            } else {
-                                ImageFormat::Png
+                        FileContent::Image { format, bytes } => {
+                            let format = match format {
+                                PreviewImageFormat::Png => ImageFormat::Png,
+                                PreviewImageFormat::Jpeg => ImageFormat::Jpeg,
+                                PreviewImageFormat::Gif => ImageFormat::Gif,
+                                PreviewImageFormat::Webp => ImageFormat::Webp,
+                                PreviewImageFormat::Bmp => ImageFormat::Bmp,
+                                PreviewImageFormat::Tiff => ImageFormat::Tiff,
+                                PreviewImageFormat::Ico => ImageFormat::Ico,
+                                PreviewImageFormat::Svg => ImageFormat::Svg,
                             };
                             (vec![], Some(Arc::new(Image::from_bytes(format, bytes))))
                         }
@@ -668,17 +679,9 @@ impl WorkspacePreview {
                                                     })
                                                     .iter()
                                                     .filter_map(|(range, kind)| {
-                                                        let token = match kind {
-                                                            TokenKind::Keyword => "keyword",
-                                                            TokenKind::String => "string",
-                                                            TokenKind::Comment => "comment",
-                                                            TokenKind::Number => "number",
-                                                            TokenKind::Type => "type",
-                                                            TokenKind::Function => "function",
-                                                        };
                                                         cx.theme()
                                                             .highlight_theme
-                                                            .style(token)
+                                                            .style(kind.theme_key())
                                                             .map(|style| (range.clone(), style))
                                                     }),
                                                 ),
@@ -691,6 +694,10 @@ impl WorkspacePreview {
             }),
         )
         .track_scroll(&self.scroll)
+        .map(|mut list| {
+            list.style().restrict_scroll_to_axis = Some(true);
+            list
+        })
         .w(px(self.code_width))
         .min_w_full()
         .h_full();
@@ -724,6 +731,10 @@ impl WorkspacePreview {
                     })
                     .size_full()
                     .overflow_x_scroll()
+                    .map(|mut view| {
+                        view.style().restrict_scroll_to_axis = Some(true);
+                        view
+                    })
                     .track_scroll(horizontal)
                     .child(code),
             )
@@ -997,11 +1008,66 @@ impl Render for WorkspacePreview {
                                 .collect()
                         }),
                     )
+                    .track_scroll(&self.list_scroll)
+                    .map(|mut list| {
+                        list.style().restrict_scroll_to_axis = Some(true);
+                        list
+                    })
                     .flex_1()
                     .min_h_0(),
                 );
             }
         } else {
+            body = body.child(
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        Button::new("preview-return-to-tree")
+                            .debug_selector(|| "preview-return-to-tree".into())
+                            .ghost()
+                            .w_full()
+                            .h(px(32.))
+                            .tooltip(tr(language, "preview.backShortcut"))
+                            .accessibility_label(tr(
+                                language,
+                                if self.tab == PreviewTab::Files {
+                                    "preview.backFiles"
+                                } else {
+                                    "preview.backChanges"
+                                },
+                            ))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .child(Icon::new(IconName::ArrowLeft).size(px(16.)))
+                                    .child(tr(
+                                        language,
+                                        if self.tab == PreviewTab::Files {
+                                            "preview.backFiles"
+                                        } else {
+                                            "preview.backChanges"
+                                        },
+                                    ))
+                                    .child(div().flex_1())
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Esc"),
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.return_to_list(cx);
+                            })),
+                    ),
+            );
             let mut heading = div()
                 .debug_selector(|| "preview-actions".into())
                 .flex()
@@ -1011,16 +1077,7 @@ impl Render for WorkspacePreview {
                 .px_3()
                 .py_2()
                 .border_b_1()
-                .border_color(cx.theme().border)
-                .child(
-                    Button::new("preview-show-list")
-                        .ghost()
-                        .label(tr(language, "preview.browse"))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.list_visible = true;
-                            cx.notify();
-                        })),
-                );
+                .border_color(cx.theme().border);
             if let Some((path, scope)) = self.selected.clone() {
                 body = body.child(
                     div()
@@ -1124,7 +1181,13 @@ impl Render for WorkspacePreview {
                     );
                 }
             }
-            body = body.child(heading);
+            if self.selected.as_ref().is_some_and(|(path, scope)| {
+                scope.is_some()
+                    || self.last_scope.is_some()
+                    || self.changes.iter().any(|change| &change.path == path)
+            }) {
+                body = body.child(heading);
+            }
             if self.loading_content {
                 body = body.child(div().p_4().child(tr(language, "preview.loading")));
             } else if let Some(error) = &self.content_error {
@@ -1135,18 +1198,37 @@ impl Render for WorkspacePreview {
                 );
             } else if let Some(image) = &self.image {
                 body = body.child(
-                    div().flex_1().min_h_0().p_4().child(
-                        img(image.clone())
-                            .size_full()
-                            .object_fit(ObjectFit::Contain),
-                    ),
+                    div()
+                        .id("preview-image")
+                        .debug_selector(|| "preview-image".into())
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .p_4()
+                        .child(
+                            img(image.clone())
+                                .size_full()
+                                .object_fit(ObjectFit::Contain)
+                                .with_loading(move || {
+                                    preview_notice(language, "preview.loading").into_any_element()
+                                })
+                                .with_fallback(move || {
+                                    preview_notice(language, "preview.imageError")
+                                        .into_any_element()
+                                }),
+                        ),
                 );
             } else if self
                 .code
                 .first()
                 .is_some_and(|row| row.text == "\0unsupported")
             {
-                body = body.child(div().p_4().child(tr(language, "preview.unsupported")));
+                body = body.child(
+                    preview_notice(language, "preview.unsupported")
+                        .id("preview-unsupported")
+                        .debug_selector(|| "preview-unsupported".into()),
+                );
             } else if self.code.is_empty() {
                 body = body.child(div().p_4().child(tr(language, "preview.empty")));
             } else {
@@ -1199,6 +1281,29 @@ impl Render for WorkspacePreview {
             .child(toolbar)
             .child(body)
     }
+}
+
+fn preview_notice(language: Language, key: &str) -> Div {
+    div()
+        .size_full()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .p_4()
+        .child(Icon::new(IconName::FileText).size(px(28.)))
+        .child(
+            div()
+                .w_full()
+                .text_center()
+                .whitespace_normal()
+                .text_size(px(13.))
+                .child(tr(language, key)),
+        )
 }
 
 fn color_code(path: &std::path::Path, code: &mut [CodeRow], diff: bool) {
@@ -1472,6 +1577,107 @@ mod tests {
     use gpui_kit::{TestAppContext, px, size};
 
     #[gpui_kit::test]
+    fn preview_scroll_locks_direction_and_back_preserves_tree(cx: &mut TestAppContext) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+        let root = std::env::temp_dir();
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(600.), px(600.)), |window, cx| {
+            WorkspacePreview::new(root, yes_core::Language::En, window, cx)
+        });
+        let preview = window.root(cx).unwrap();
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        for split in [false, true] {
+            preview.update(cx, |preview, cx| {
+                preview.selected = Some((
+                    "main.rs".into(),
+                    Some(yes_core::workspace::ChangeScope::Unstaged),
+                ));
+                preview.list_visible = false;
+                preview.side_by_side = split;
+                preview.code = parse_diff(&format!(
+                    "@@ -0,0 +1,200 @@\n{}",
+                    "+let value = 42;\n".repeat(200)
+                ));
+                preview.split_rows = super::pair_diff_rows(&preview.code);
+                preview.code_width = 1200.;
+                preview.scroll = gpui_kit::UniformListScrollHandle::new();
+                preview.horizontal_scroll = gpui_kit::ScrollHandle::new();
+                preview.right_horizontal_scroll = gpui_kit::ScrollHandle::new();
+                preview.tree_expanded.insert("src".into());
+                cx.notify();
+            });
+            let pane = visual.debug_bounds("preview-left-pane").unwrap();
+            visual.simulate_mouse_move(pane.center(), None, Default::default());
+            visual.simulate_event(ScrollWheelEvent {
+                position: pane.center(),
+                delta: ScrollDelta::Pixels(point(px(-1.), px(-40.))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Started,
+            });
+            visual.debug_bounds("preview-left-pane").unwrap();
+            preview.read_with(cx, |preview, _| {
+                assert_eq!(preview.horizontal_scroll.offset().x, px(0.));
+                assert_eq!(preview.scroll.0.borrow().base_handle.offset().y, px(-40.));
+            });
+            visual.simulate_event(ScrollWheelEvent {
+                position: pane.center(),
+                delta: ScrollDelta::Pixels(point(px(-40.), px(-1.))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Started,
+            });
+            visual.debug_bounds("preview-left-pane").unwrap();
+            preview.read_with(cx, |preview, _| {
+                assert_eq!(preview.horizontal_scroll.offset().x, px(-40.));
+                assert_eq!(preview.scroll.0.borrow().base_handle.offset().y, px(-40.));
+            });
+            let back = visual.debug_bounds("preview-return-to-tree").unwrap();
+            visual.simulate_click(back.center(), Default::default());
+            assert!(preview.read_with(cx, |preview, _| preview.list_visible
+                && preview.tree_expanded.contains(std::path::Path::new("src"))));
+        }
+    }
+
+    #[gpui_kit::test]
+    fn image_preview_switches_to_unsupported_notice(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "yes-image-preview-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("image.svg"), "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"80\" height=\"40\"><rect width=\"80\" height=\"40\" fill=\"red\"/></svg>").unwrap();
+        std::fs::write(root.join("document.pdf"), "%PDF-1.7\nASCII PDF").unwrap();
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(360.), px(600.)), |window, cx| {
+            WorkspacePreview::new(root.clone(), yes_core::Language::En, window, cx)
+        });
+        let preview = window.root(cx).unwrap();
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        for language in [yes_core::Language::En, yes_core::Language::Zh] {
+            preview.update(cx, |preview, cx| {
+                preview.set_language(language, cx);
+                preview.open_path("image.svg".into(), None, cx);
+            });
+            cx.run_until_parked();
+            let image = visual.debug_bounds("preview-image").unwrap();
+            assert!(image.size.width <= px(360.) && image.size.height > px(100.));
+            assert!(preview.read_with(cx, |preview, _| preview.image.is_some()
+                && preview.code.is_empty()));
+            preview.update(cx, |preview, cx| {
+                preview.open_path("document.pdf".into(), None, cx)
+            });
+            cx.run_until_parked();
+            let notice = visual.debug_bounds("preview-unsupported").unwrap();
+            assert!(notice.size.width <= px(360.) && notice.size.height > px(100.));
+            assert!(preview.read_with(cx, |preview, _| preview.image.is_none()));
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[gpui_kit::test]
     fn preview_reads_files_and_rejects_stale_results(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!(
             "yes-ui-preview-{}-{}",
@@ -1506,7 +1712,7 @@ mod tests {
         for language in [yes_core::Language::En, yes_core::Language::Zh] {
             preview.update(cx, |preview, cx| preview.set_language(language, cx));
             cx.run_until_parked();
-            let actions = visual.debug_bounds("preview-actions").unwrap();
+            let actions = visual.debug_bounds("preview-return-to-tree").unwrap();
             let code = visual.debug_bounds("preview-code-viewport").unwrap();
             assert!(actions.size.width <= px(360.));
             assert!(code.size.width <= px(360.) && code.size.height > px(100.));
@@ -1628,6 +1834,34 @@ mod tests {
                 (Some(5), Some(5))
             ]
         );
+    }
+
+    #[test]
+    fn files_and_both_diff_sides_highlight_modern_languages() {
+        for (path, before, after) in [
+            (
+                "main.ts",
+                "const count: number = 1;",
+                "const count: number = 2;",
+            ),
+            ("main.kt", "val count = 1", "val count = 2"),
+            ("main.swift", "let count = 1", "let count = 2"),
+            ("Cargo.toml", "name = \"before\"", "name = \"after\""),
+        ] {
+            let mut file = vec![super::CodeRow {
+                new: Some(1),
+                text: after.into(),
+                kind: ' ',
+                ..Default::default()
+            }];
+            super::color_code(std::path::Path::new(path), &mut file, false);
+            assert!(!file[0].syntax.is_empty(), "file: {path}");
+            let mut diff = parse_diff(&format!("@@ -1 +1 @@\n-{before}\n+{after}"));
+            super::color_code(std::path::Path::new(path), &mut diff, true);
+            assert!(!diff[1].old_syntax.is_empty(), "old side: {path}");
+            assert!(!diff[1].syntax.is_empty(), "unified deletion: {path}");
+            assert!(!diff[2].syntax.is_empty(), "new side: {path}");
+        }
     }
 
     #[test]

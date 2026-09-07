@@ -2,6 +2,12 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "preview.backFiles") => "返回文件树",
+        (_, "preview.backFiles") => "Back to files",
+        (Language::Zh, "preview.backChanges") => "返回变更列表",
+        (_, "preview.backChanges") => "Back to changes",
+        (Language::Zh, "preview.backShortcut") => "返回列表（Esc）",
+        (_, "preview.backShortcut") => "Back to list (Esc)",
         (Language::Zh, "preview.before") => "修改前",
         (_, "preview.before") => "Before",
         (Language::Zh, "preview.after") => "修改后",
@@ -36,17 +42,23 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::En, "preview.noChanges") => "No workspace changes",
         (Language::Zh, "preview.noFiles") => "没有找到文件",
         (Language::En, "preview.noFiles") => "No files found",
-        (Language::Zh, "preview.browse") => "文件列表",
-        (Language::En, "preview.browse") => "Browse",
         (Language::Zh, "preview.current") => "当前文件",
         (Language::En, "preview.current") => "Current file",
         (Language::Zh, "preview.unified") => "合并视图",
         (Language::En, "preview.unified") => "Unified",
         (Language::Zh, "preview.split") => "左右对比",
         (Language::En, "preview.split") => "Side by side",
-        (Language::Zh, "preview.unsupported") => "不支持此文件类型，或内容超过预览大小限制",
+        (Language::Zh, "preview.imageError") => {
+            "无法显示这张图片，文件可能已损坏或使用了不支持的图片编码。"
+        }
+        (_, "preview.imageError") => {
+            "This image could not be displayed. It may be damaged or use an unsupported encoding."
+        }
+        (Language::Zh, "preview.unsupported") => {
+            "暂不支持预览此文件，或内容超过预览限制。请选择文本或图片文件（最大 4 MiB）。"
+        }
         (Language::En, "preview.unsupported") => {
-            "Unsupported file type or content exceeds preview limits"
+            "This file type is not supported or exceeds preview limits. Select a text or image file up to 4 MiB."
         }
         (Language::Zh, "preview.empty") => "内容为空",
         (Language::En, "preview.empty") => "No content",

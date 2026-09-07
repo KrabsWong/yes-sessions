@@ -18,12 +18,35 @@ pub(crate) enum TokenKind {
     Number,
     Type,
     Function,
+    Property,
+    Tag,
+    Attribute,
 }
 
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+impl TokenKind {
+    pub(crate) fn theme_key(self) -> &'static str {
+        match self {
+            Self::Keyword => "keyword",
+            Self::String => "string",
+            Self::Comment => "comment",
+            Self::Number => "number",
+            Self::Type => "type",
+            Self::Function => "function",
+            Self::Property => "property",
+            Self::Tag => "tag",
+            Self::Attribute => "attribute",
+        }
+    }
+}
+
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 static TOKEN_SCOPES: LazyLock<Vec<(Scope, TokenKind)>> = LazyLock::new(|| {
     [
         ("comment", TokenKind::Comment),
+        ("meta.mapping.key", TokenKind::Property),
+        ("support.type.property-name", TokenKind::Property),
+        ("entity.other.attribute-name", TokenKind::Attribute),
+        ("entity.name.tag", TokenKind::Tag),
         ("string", TokenKind::String),
         ("constant.numeric", TokenKind::Number),
         ("constant.language", TokenKind::Keyword),
@@ -58,10 +81,32 @@ pub(crate) fn highlight_lines(
     lines: &[String],
 ) -> Vec<Vec<(Range<usize>, TokenKind)>> {
     let mut result = vec![Vec::new(); lines.len()];
-    let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
-        return result;
-    };
-    let Some(syntax) = SYNTAXES.find_syntax_by_extension(extension) else {
+    let filename = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+    let syntax = SYNTAXES
+        .find_syntax_by_extension(filename)
+        .or_else(|| SYNTAXES.find_syntax_by_extension(extension))
+        .or_else(|| match extension {
+            "jsx" => SYNTAXES.find_syntax_by_extension("tsx"),
+            "mjs" | "cjs" => SYNTAXES.find_syntax_by_extension("js"),
+            "mts" | "cts" => SYNTAXES.find_syntax_by_extension("ts"),
+            _ if filename.starts_with("Dockerfile.") => {
+                SYNTAXES.find_syntax_by_extension("Dockerfile")
+            }
+            _ => None,
+        })
+        .or_else(|| {
+            lines
+                .first()
+                .and_then(|line| SYNTAXES.find_syntax_by_first_line(line))
+        });
+    let Some(syntax) = syntax else {
         return result;
     };
     let mut parser = ParseState::new(syntax);
@@ -142,6 +187,79 @@ mod tests {
             *kind == TokenKind::Number && &lines[2][range.clone()] == "42"
         }));
         assert!(!spans[2].iter().any(|(_, kind)| *kind == TokenKind::Comment));
+    }
+
+    #[test]
+    fn common_languages_and_extensionless_files_are_highlighted() {
+        for (name, source) in [
+            ("main.rs", "fn main() { let count = 42; }"),
+            ("main.ts", "const count: number = 42;"),
+            ("main.tsx", "const view = <div title=\"hello\">{42}</div>;"),
+            ("main.jsx", "const view = <div title=\"hello\">{42}</div>;"),
+            ("main.kt", "fun main() { val count = 42 }"),
+            ("main.swift", "let count: Int = 42"),
+            ("main.py", "def main(): return 42"),
+            ("main.go", "package main; var count = 42"),
+            ("main.java", "class Main { int count = 42; }"),
+            ("main.m", "NSString *name = @\"hello\";"),
+            ("main.cpp", "int main() { return 42; }"),
+            ("Cargo.toml", "name = \"hello\""),
+            ("file.json", "{\"name\": \"hello\", \"count\": 42}"),
+            ("Dockerfile", "FROM rust:1.90"),
+            ("Makefile", "all: build"),
+            ("run", "#!/usr/bin/env python3\nprint(42)"),
+        ] {
+            let lines = source.lines().map(str::to_owned).collect::<Vec<_>>();
+            let highlights = highlight_lines(Path::new(name), &lines);
+            assert!(
+                highlights.iter().any(|line| !line.is_empty()),
+                "missing highlighting: {name}"
+            );
+            for (line, spans) in lines.iter().zip(highlights) {
+                assert!(
+                    spans
+                        .iter()
+                        .all(|(range, _)| line.get(range.clone()).is_some()),
+                    "invalid UTF-8 range: {name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn token_colors_are_available_in_both_themes() {
+        use gpui_kit::component::highlighter::HighlightTheme;
+        let light = HighlightTheme::default_light();
+        let dark = HighlightTheme::default_dark();
+        for theme in [&light, &dark] {
+            for kind in [
+                TokenKind::Keyword,
+                TokenKind::String,
+                TokenKind::Comment,
+                TokenKind::Number,
+                TokenKind::Type,
+                TokenKind::Function,
+                TokenKind::Property,
+                TokenKind::Tag,
+                TokenKind::Attribute,
+            ] {
+                assert!(
+                    theme
+                        .style(kind.theme_key())
+                        .and_then(|style| style.color)
+                        .is_some(),
+                    "missing token color: {kind:?}"
+                );
+            }
+            assert_ne!(
+                theme.style("keyword").unwrap().color,
+                theme.style("string").unwrap().color
+            );
+        }
+        assert_ne!(
+            light.style("keyword").unwrap().color,
+            dark.style("keyword").unwrap().color
+        );
     }
 
     #[test]
