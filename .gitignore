@@ -1,9 +1,5 @@
-# Dependencies
-node_modules
-
-# Build outputs
-dist
-dist-electron
+# Rust build output
+target
 
 # Release artifacts
 release
@@ -27,10 +23,6 @@ logs/
 
 # Coverage
 coverage
-.nyc_output
-
-# TypeScript
-*.tsbuildinfo
 
 # System files
 .DS_Store
