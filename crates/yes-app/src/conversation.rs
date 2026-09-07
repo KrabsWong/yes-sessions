@@ -7,7 +7,7 @@ use std::{
 use gpui_kit::base::StyledExt;
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonCustomVariant, ButtonVariants as _},
     message_scroller::{MessageScroller, MessageScrollerState},
     text::{TextView, TextViewStyle},
 };
@@ -838,19 +838,27 @@ fn render_tool(
         .overflow_hidden()
         .child(
             div()
+                .id(("tool-header", message_index))
                 .h(px(38.))
                 .w_full()
                 .flex()
                 .items_center()
                 .bg(cx.theme().button)
+                .hover(|style| style.bg(cx.theme().accent))
                 .child(
                     Button::new(("tool-toggle", message_index))
-                        .ghost()
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(cx.theme().transparent)
+                                .foreground(cx.theme().foreground)
+                                .hover(cx.theme().transparent)
+                                .active(cx.theme().transparent),
+                        )
+                        .rounded_none()
                         .flex_1()
                         .min_w_0()
                         .h(px(38.))
                         .px_3()
-                        .bg(cx.theme().button)
                         .accessibility_label(accessibility_label)
                         .child(
                             div()
@@ -960,7 +968,14 @@ fn render_tool(
                 })
                 .child(
                     Button::new(("tool-chevron-toggle", message_index))
-                        .ghost()
+                        .custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(cx.theme().transparent)
+                                .foreground(cx.theme().foreground)
+                                .hover(cx.theme().transparent)
+                                .active(cx.theme().transparent),
+                        )
+                        .rounded_none()
                         .flex_none()
                         .h(px(38.))
                         .icon(if is_expanded {

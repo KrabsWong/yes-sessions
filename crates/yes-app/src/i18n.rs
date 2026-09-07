@@ -2,6 +2,30 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "menu.quit") => "退出 Yes Sessions",
+        (_, "menu.quit") => "Quit Yes Sessions",
+        (Language::Zh, "menu.file") => "文件",
+        (_, "menu.file") => "File",
+        (Language::Zh, "menu.close") => "关闭窗口",
+        (_, "menu.close") => "Close Window",
+        (Language::Zh, "menu.window") => "窗口",
+        (_, "menu.window") => "Window",
+        (Language::Zh, "menu.minimize") => "最小化",
+        (_, "menu.minimize") => "Minimize",
+        (Language::Zh, "sessions.newMessages") => "新增 {count} 条消息",
+        (_, "sessions.newMessages") => "{count} new messages",
+        (Language::Zh, "mermaid.renderError") => "图表渲染失败，以下为原始内容。",
+        (_, "mermaid.renderError") => {
+            "The diagram could not be rendered. The original source is shown below."
+        }
+        (Language::Zh, "mermaid.retry") => "重试",
+        (_, "mermaid.retry") => "Retry",
+        (Language::Zh, "preview.imageAdded") => "新增图片，无修改前版本",
+        (_, "preview.imageAdded") => "New image; no previous version",
+        (Language::Zh, "preview.imageDeleted") => "图片已删除",
+        (_, "preview.imageDeleted") => "Image deleted",
+        (Language::Zh, "preview.changesAvailable") => "存在新的变更，点击刷新查看",
+        (_, "preview.changesAvailable") => "New changes available. Refresh to view.",
         (Language::Zh, "preview.backFiles") => "返回文件树",
         (_, "preview.backFiles") => "Back to files",
         (Language::Zh, "preview.backChanges") => "返回变更列表",

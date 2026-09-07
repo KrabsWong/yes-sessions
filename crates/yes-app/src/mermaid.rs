@@ -33,7 +33,7 @@ pub fn create_mermaid_diagram(
     window: &mut Window,
     cx: &mut App,
 ) -> anyhow::Result<Entity<MermaidDiagram>> {
-    let html = mermaid_html(source, dark)?;
+    let html = mermaid_html(source, dark, language)?;
     let raw = WebViewBuilder::new()
         .with_html(html)
         .with_transparent(true)
@@ -161,11 +161,16 @@ impl Render for MermaidDiagram {
     }
 }
 
-fn mermaid_html(source: &str, dark: bool) -> anyhow::Result<String> {
+fn mermaid_html(source: &str, dark: bool, language: Language) -> anyhow::Result<String> {
     let mermaid_js = load_mermaid_js()?;
     // JSON quoting alone does not protect an inline HTML script: </script>
     // terminates it even inside a JavaScript string. Escape every '<'.
     let encoded_source = serde_json::to_string(source)?.replace('<', "\\u003c");
+    let labels = serde_json::to_string(&[
+        tr(language, "mermaid.renderError"),
+        tr(language, "mermaid.retry"),
+    ])?
+    .replace('<', "\\u003c");
     let theme = if dark { "dark" } else { "default" };
     let foreground = if dark { "#e5e7eb" } else { "#172033" };
     let surface = if dark { "#15181d" } else { "#ffffff" };
@@ -177,9 +182,15 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:{surface};
 #stage.dragging{{cursor:grabbing}}
 #diagram{{transform-origin:center center;transition:transform .08s linear;padding:32px}}
 #diagram svg{{display:block;max-width:none}}
-#error{{display:none;white-space:pre-wrap;padding:18px;color:#ef4444;font:12px ui-monospace,monospace}}
+#fallback{{display:none;box-sizing:border-box;height:100%;overflow:auto;padding:18px}}
+#failure-heading{{display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:13px}}
+#retry{{flex:none;border:1px solid currentColor;border-radius:6px;padding:6px 12px;background:transparent;color:inherit;cursor:pointer}}
+#retry:disabled{{opacity:.5;cursor:wait}}
+#error,#source{{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace}}
+#error{{color:#ef4444}}
 </style><script>{mermaid_js}</script></head><body>
-<div id="stage"><div id="diagram"></div></div><pre id="error"></pre>
+<div id="stage"><div id="diagram"></div></div>
+<section id="fallback" aria-live="polite"><div id="failure-heading"><span id="failure-message"></span><button id="retry" type="button"></button></div><pre id="error"></pre><pre id="source"></pre></section>
 <script>
 const source={encoded_source}; let scale=1, x=0, y=0, dragging=false, sx=0, sy=0;
 const stage=document.getElementById('stage'), diagram=document.getElementById('diagram');
@@ -190,8 +201,29 @@ stage.addEventListener('wheel',e=>{{if(!(e.metaKey||e.ctrlKey))return;e.preventD
 stage.addEventListener('mousedown',e=>{{dragging=true;sx=e.clientX-x;sy=e.clientY-y;stage.classList.add('dragging')}});
 addEventListener('mousemove',e=>{{if(dragging){{x=e.clientX-sx;y=e.clientY-sy;apply()}}}});
 addEventListener('mouseup',()=>{{dragging=false;stage.classList.remove('dragging')}});
-mermaid.initialize({{startOnLoad:false,securityLevel:'strict',theme:'{theme}'}});
-mermaid.render('yes-sessions-mermaid',source).then(r=>diagram.innerHTML=r.svg).catch(error=>{{stage.style.display='none';const out=document.getElementById('error');out.style.display='block';out.textContent=String(error)}});
+const labels={labels}, fallback=document.getElementById('fallback'), retry=document.getElementById('retry');
+document.getElementById('failure-message').textContent=labels[0];
+retry.textContent=labels[1];
+document.getElementById('source').textContent=source;
+async function renderDiagram(){{
+    if(retry.disabled)return;
+    retry.disabled=true;
+    diagram.replaceChildren();
+    stage.style.display='grid';stage.style.visibility='hidden';
+    try{{
+        mermaid.initialize({{startOnLoad:false,securityLevel:'strict',theme:'{theme}'}});
+        const result=await mermaid.render('yes-sessions-mermaid',source,diagram);
+        diagram.innerHTML=result.svg;
+        fallback.style.display='none';stage.style.display='grid';stage.style.visibility='visible';
+        apply();
+    }}catch(error){{
+        diagram.replaceChildren();
+        stage.style.display='none';fallback.style.display='block';
+        document.getElementById('error').textContent=String(error);
+    }}finally{{retry.disabled=false}}
+}}
+retry.addEventListener('click',renderDiagram);
+renderDiagram();
 </script></body></html>"#
     ))
 }
@@ -213,11 +245,12 @@ fn load_mermaid_js() -> anyhow::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::mermaid_html;
+    use yes_core::Language;
 
     #[test]
     fn diagram_source_cannot_terminate_the_script_element() {
         let source = "graph TD\nA[\"</ScRiPt><script>window.injected=true</script><!--\"]";
-        let html = mermaid_html(source, false).unwrap();
+        let html = mermaid_html(source, false, Language::En).unwrap();
         let encoded = html
             .split("const source=")
             .nth(1)
@@ -227,5 +260,38 @@ mod tests {
             .unwrap();
         assert!(!encoded.contains('<'));
         assert_eq!(serde_json::from_str::<String>(encoded).unwrap(), source);
+    }
+
+    #[test]
+    fn render_failure_preserves_source_and_offers_retry_in_both_languages() {
+        for language in [Language::En, Language::Zh] {
+            let html = mermaid_html(
+                "not valid mermaid <img src=x onerror=alert(1)>",
+                true,
+                language,
+            )
+            .unwrap();
+            assert!(html.contains("document.getElementById('source').textContent=source"));
+            assert!(html.contains("document.getElementById('error').textContent=String(error)"));
+            assert!(html.contains("retry.addEventListener('click',renderDiagram)"));
+            assert!(html.contains("finally{retry.disabled=false}"));
+            assert!(html.contains("fallback.style.display='none';stage.style.display='grid'"));
+            assert!(html.contains("securityLevel:'strict'"));
+            let labels = html
+                .split("const labels=")
+                .nth(1)
+                .unwrap()
+                .split(", fallback=")
+                .next()
+                .unwrap();
+            let labels: Vec<String> = serde_json::from_str(labels).unwrap();
+            assert_eq!(
+                labels,
+                [
+                    crate::i18n::tr(language, "mermaid.renderError"),
+                    crate::i18n::tr(language, "mermaid.retry")
+                ]
+            );
+        }
     }
 }

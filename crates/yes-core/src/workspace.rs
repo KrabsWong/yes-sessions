@@ -502,6 +502,105 @@ pub fn changes(root: &Path) -> Result<Vec<Change>> {
     Ok(changes)
 }
 
+/// Read the two image versions for the selected Git scope. Missing sides represent
+/// additions/deletions; oversized or non-image sides remain unsupported.
+pub fn image_diff(
+    root: &Path,
+    relative: &Path,
+    scope: ChangeScope,
+) -> Result<Option<(Option<FileContent>, Option<FileContent>)>> {
+    let root = root.canonicalize()?;
+    valid_relative(relative)?;
+    let old_path = records(&root)?
+        .into_iter()
+        .find(|r| r.change.path == relative && r.change.scope == scope)
+        .and_then(|r| r.old_path)
+        .unwrap_or_else(|| relative.to_path_buf());
+    let prefix = git(&root, &args(&["rev-parse", "--show-prefix"]))?;
+    let prefix = prefix.strip_suffix(b"\n").unwrap_or(&prefix);
+    let read_revision = |revision: &str, path: &Path| -> Result<Option<FileContent>> {
+        let mut spec = revision.as_bytes().to_vec();
+        spec.push(b':');
+        spec.extend_from_slice(prefix);
+        spec.extend_from_slice(path.as_os_str().as_bytes());
+        let spec = OsString::from_vec(spec);
+        let Ok(size) = git(&root, &["cat-file".into(), "-s".into(), spec.clone()]) else {
+            return Ok(None);
+        };
+        let size: u64 = std::str::from_utf8(&size)?.trim().parse()?;
+        if size > MAX_FILE_BYTES {
+            return Ok(Some(FileContent::Unsupported));
+        }
+        let bytes = git(&root, &["show".into(), spec])?;
+        Ok(Some(match image_format(path, &bytes) {
+            Some(format) => FileContent::Image { format, bytes },
+            None => FileContent::Unsupported,
+        }))
+    };
+    let before = match scope {
+        ChangeScope::Staged => read_revision("HEAD", &old_path)?,
+        ChangeScope::Unstaged => read_revision("", &old_path)?,
+        ChangeScope::Untracked => None,
+    };
+    let after = if scope == ChangeScope::Staged {
+        read_revision("", relative)?
+    } else if root.join(relative).try_exists()? {
+        Some(read_file(&root, relative)?)
+    } else {
+        None
+    };
+    if image_format(relative, &[]).is_none()
+        && image_format(&old_path, &[]).is_none()
+        && !matches!(before, Some(FileContent::Image { .. }))
+        && !matches!(after, Some(FileContent::Image { .. }))
+    {
+        return Ok(None);
+    }
+    Ok(Some((before, after)))
+}
+
+/// A cheap change signal: status/index plus changed-file metadata, not diff contents.
+pub fn change_signature(root: &Path) -> Result<u64> {
+    use std::hash::{Hash, Hasher};
+    use std::os::unix::fs::MetadataExt;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    git(
+        root,
+        &args(&[
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ]),
+    )?
+    .hash(&mut hash);
+    git(root, &args(&["rev-parse", "HEAD"]))
+        .ok()
+        .hash(&mut hash);
+    let index = git(root, &args(&["rev-parse", "--git-path", "index"]))?;
+    let index = PathBuf::from(OsString::from_vec(
+        index.strip_suffix(b"\n").unwrap_or(&index).to_vec(),
+    ));
+    let mut paths = vec![root.join(index)];
+    paths.extend(records(root)?.into_iter().map(|r| root.join(r.change.path)));
+    for path in paths {
+        path.hash(&mut hash);
+        if let Ok(meta) = fs::symlink_metadata(path) {
+            (
+                meta.len(),
+                meta.mtime(),
+                meta.mtime_nsec(),
+                meta.ctime(),
+                meta.ctime_nsec(),
+            )
+                .hash(&mut hash);
+        }
+    }
+    Ok(hash.finish())
+}
+
 pub fn diff(root: &Path, relative: &Path, scope: ChangeScope) -> Result<String> {
     let canonical_root = root.canonicalize()?;
     let root = canonical_root.as_path();
@@ -599,6 +698,85 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn image_versions_follow_index_worktree_and_rename() {
+        let f = Fixture::new();
+        f.git(&["init", "-q"]);
+        f.git(&["config", "user.email", "test@example.com"]);
+        f.git(&["config", "user.name", "Test"]);
+        let old = b"<svg>old</svg>";
+        let staged = b"<svg>staged</svg>";
+        let current = b"<svg>current</svg>";
+        fs::write(f.0.join("image.svg"), old).unwrap();
+        f.git(&["add", "."]);
+        f.git(&["commit", "-qm", "initial"]);
+        fs::write(f.0.join("image.svg"), staged).unwrap();
+        f.git(&["add", "."]);
+        fs::write(f.0.join("image.svg"), current).unwrap();
+        let bytes = |side: Option<FileContent>| match side {
+            Some(FileContent::Image { bytes, .. }) => bytes,
+            _ => panic!("expected image"),
+        };
+        let (a, b) = image_diff(&f.0, Path::new("image.svg"), ChangeScope::Staged)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes(a), old);
+        assert_eq!(bytes(b), staged);
+        let (a, b) = image_diff(&f.0, Path::new("image.svg"), ChangeScope::Unstaged)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes(a), staged);
+        assert_eq!(bytes(b), current);
+        fs::remove_file(f.0.join("image.svg")).unwrap();
+        let (a, b) = image_diff(&f.0, Path::new("image.svg"), ChangeScope::Unstaged)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes(a), staged);
+        assert!(b.is_none());
+        fs::write(f.0.join("new.svg"), current).unwrap();
+        let (a, b) = image_diff(&f.0, Path::new("new.svg"), ChangeScope::Untracked)
+            .unwrap()
+            .unwrap();
+        assert!(a.is_none());
+        assert_eq!(bytes(b), current);
+        let png = b"\x89PNG\r\n\x1a\nimage";
+        fs::write(f.0.join("asset"), png).unwrap();
+        f.git(&["add", "asset"]);
+        fs::write(f.0.join("asset"), "working tree text").unwrap();
+        let (_, b) = image_diff(&f.0, Path::new("asset"), ChangeScope::Staged)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes(b), png);
+        fs::remove_file(f.0.join("asset")).unwrap();
+        let (a, b) = image_diff(&f.0, Path::new("asset"), ChangeScope::Unstaged)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes(a), png);
+        assert!(b.is_none());
+        f.git(&["reset", "--hard", "-q", "HEAD"]);
+        f.git(&["mv", "image.svg", "renamed.svg"]);
+        let (a, b) = image_diff(&f.0, Path::new("renamed.svg"), ChangeScope::Staged)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes(a), old);
+        assert_eq!(bytes(b), old);
+        assert!(image_diff(&f.0, Path::new("../outside.svg"), ChangeScope::Staged).is_err());
+    }
+
+    #[test]
+    fn change_signal_detects_edits_even_when_status_is_unchanged() {
+        let f = Fixture::new();
+        f.git(&["init", "-q"]);
+        fs::write(f.0.join("file.txt"), "one").unwrap();
+        let first = change_signature(&f.0).unwrap();
+        assert_eq!(first, change_signature(&f.0).unwrap());
+        fs::write(f.0.join("file.txt"), "different content").unwrap();
+        let second = change_signature(&f.0).unwrap();
+        assert_ne!(first, second);
+        f.git(&["add", "."]);
+        assert_ne!(second, change_signature(&f.0).unwrap());
     }
 
     #[test]

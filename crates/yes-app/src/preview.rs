@@ -75,6 +75,11 @@ pub struct WorkspacePreview {
     code_width: f32,
     diff_stats: (usize, usize),
     image: Option<Arc<Image>>,
+    image_diff: Option<(ImageSide, ImageSide)>,
+    change_signature: Option<u64>,
+    checking_changes: bool,
+    changes_available: bool,
+    signature_generation: u64,
     list_visible: bool,
     side_by_side: bool,
     list_started: bool,
@@ -143,6 +148,11 @@ impl WorkspacePreview {
             code_width: 128.,
             diff_stats: (0, 0),
             image: None,
+            image_diff: None,
+            change_signature: None,
+            checking_changes: false,
+            changes_available: false,
+            signature_generation: 0,
             list_visible: true,
             side_by_side: true,
             list_started: false,
@@ -158,7 +168,38 @@ impl WorkspacePreview {
             right_horizontal_scroll: ScrollHandle::new(),
         };
         this.load_count(cx);
+        this.check_for_changes(cx);
         this
+    }
+
+    pub fn check_for_changes(&mut self, cx: &mut Context<Self>) {
+        if self.checking_changes {
+            return;
+        }
+        self.checking_changes = true;
+        let generation = self.signature_generation;
+        let root = self.root.clone();
+        let task = cx
+            .background_executor()
+            .spawn(async move { workspace::change_signature(&root) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if generation != this.signature_generation {
+                    return;
+                }
+                this.checking_changes = false;
+                if let Ok(signature) = result {
+                    if let Some(previous) = this.change_signature {
+                        this.changes_available = previous != signature;
+                    } else {
+                        this.change_signature = Some(signature);
+                    }
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     pub fn change_count(&self) -> Option<usize> {
@@ -448,11 +489,26 @@ impl WorkspacePreview {
         self.split_rows.clear();
         self.diff_stats = (0, 0);
         self.image = None;
+        self.image_diff = None;
         self.scroll = UniformListScrollHandle::new();
         self.horizontal_scroll = ScrollHandle::new();
         self.right_horizontal_scroll = ScrollHandle::new();
         let root = self.root.clone();
         let task = cx.background_executor().spawn(async move {
+            if let Some(scope) = scope {
+                if let Some((before, after)) =
+                    workspace::image_diff(&root, &path, scope).map_err(|e| e.to_string())?
+                {
+                    return Ok((
+                        vec![],
+                        None,
+                        Some((
+                            ImageSide::from_content(before),
+                            ImageSide::from_content(after),
+                        )),
+                    ));
+                }
+            }
             let result = if let Some(scope) = scope {
                 workspace::diff(&root, &path, scope)
                     .map(|patch| {
@@ -487,16 +543,7 @@ impl WorkspacePreview {
                             None,
                         ),
                         FileContent::Image { format, bytes } => {
-                            let format = match format {
-                                PreviewImageFormat::Png => ImageFormat::Png,
-                                PreviewImageFormat::Jpeg => ImageFormat::Jpeg,
-                                PreviewImageFormat::Gif => ImageFormat::Gif,
-                                PreviewImageFormat::Webp => ImageFormat::Webp,
-                                PreviewImageFormat::Bmp => ImageFormat::Bmp,
-                                PreviewImageFormat::Tiff => ImageFormat::Tiff,
-                                PreviewImageFormat::Ico => ImageFormat::Ico,
-                                PreviewImageFormat::Svg => ImageFormat::Svg,
-                            };
+                            let format = image_format(format);
                             (vec![], Some(Arc::new(Image::from_bytes(format, bytes))))
                         }
                         FileContent::Unsupported => (
@@ -514,7 +561,7 @@ impl WorkspacePreview {
                     row.text = row.text.replace('\t', "    ");
                 }
                 color_code(&path, &mut code, scope.is_some());
-                (code, image)
+                (code, image, None)
             })
         });
         cx.spawn(async move |this, cx| {
@@ -525,7 +572,8 @@ impl WorkspacePreview {
                 }
                 this.loading_content = false;
                 match result {
-                    Ok((code, image)) => {
+                    Ok((code, image, image_diff)) => {
+                        this.image_diff = image_diff;
                         this.diff_stats = (
                             code.iter().filter(|row| row.kind == '+').count(),
                             code.iter().filter(|row| row.kind == '-').count(),
@@ -791,9 +839,15 @@ impl Render for WorkspacePreview {
         }
         toolbar = toolbar.child(div().flex_1()).child(
             Button::new("preview-refresh")
+                .debug_selector(|| "preview-refresh".into())
                 .ghost()
                 .label(tr(language, "preview.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.signature_generation += 1;
+                    this.change_signature = None;
+                    this.checking_changes = false;
+                    this.changes_available = false;
+                    this.check_for_changes(cx);
                     this.tree_generation += 1;
                     this.tree_children.clear();
                     this.tree_expanded.clear();
@@ -809,6 +863,18 @@ impl Render for WorkspacePreview {
                 })),
         );
         let mut body = div().flex().flex_col().flex_1().min_h_0().min_w_0();
+        if self.changes_available {
+            body = body.child(
+                div()
+                    .debug_selector(|| "preview-changes-available".into())
+                    .flex_none()
+                    .px_3()
+                    .py_2()
+                    .text_sm()
+                    .bg(cx.theme().selection.opacity(0.3))
+                    .child(tr(language, "preview.changesAvailable")),
+            );
+        }
         if self.list_visible {
             if self.tab == PreviewTab::Changes {
                 let (added, removed) = self
@@ -1108,7 +1174,7 @@ impl Render for WorkspacePreview {
                                         .to_string(),
                                 ),
                         )
-                        .when(scope.is_some(), |view| {
+                        .when(scope.is_some() && self.image_diff.is_none(), |view| {
                             view.child(change_stats(self.diff_stats.0, self.diff_stats.1))
                         }),
                 );
@@ -1162,23 +1228,25 @@ impl Render for WorkspacePreview {
                                 this.load_content(path.clone(), None, None, cx)
                             })),
                     );
-                    heading = heading.child(
-                        Button::new("preview-diff-layout")
-                            .debug_selector(|| "preview-diff-layout".into())
-                            .ghost()
-                            .label(tr(
-                                language,
-                                if self.side_by_side {
-                                    "preview.unified"
-                                } else {
-                                    "preview.split"
-                                },
-                            ))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.side_by_side = !this.side_by_side;
-                                cx.notify();
-                            })),
-                    );
+                    if self.image_diff.is_none() {
+                        heading = heading.child(
+                            Button::new("preview-diff-layout")
+                                .debug_selector(|| "preview-diff-layout".into())
+                                .ghost()
+                                .label(tr(
+                                    language,
+                                    if self.side_by_side {
+                                        "preview.unified"
+                                    } else {
+                                        "preview.split"
+                                    },
+                                ))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.side_by_side = !this.side_by_side;
+                                    cx.notify();
+                                })),
+                        );
+                    }
                 }
             }
             if self.selected.as_ref().is_some_and(|(path, scope)| {
@@ -1195,6 +1263,17 @@ impl Render for WorkspacePreview {
                     div()
                         .p_4()
                         .child(format!("{}: {error}", tr(language, "preview.error"))),
+                );
+            } else if let Some((before, after)) = &self.image_diff {
+                body = body.child(
+                    div()
+                        .debug_selector(|| "preview-image-diff".into())
+                        .flex()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .child(image_diff_side(before, language, true, cx))
+                        .child(image_diff_side(after, language, false, cx)),
                 );
             } else if let Some(image) = &self.image {
                 body = body.child(
@@ -1281,6 +1360,91 @@ impl Render for WorkspacePreview {
             .child(toolbar)
             .child(body)
     }
+}
+
+enum ImageSide {
+    Missing,
+    Unsupported,
+    Image(Arc<Image>),
+}
+
+impl ImageSide {
+    fn from_content(content: Option<FileContent>) -> Self {
+        match content {
+            None => Self::Missing,
+            Some(FileContent::Image { format, bytes }) => {
+                Self::Image(Arc::new(Image::from_bytes(image_format(format), bytes)))
+            }
+            _ => Self::Unsupported,
+        }
+    }
+}
+
+fn image_format(format: PreviewImageFormat) -> ImageFormat {
+    match format {
+        PreviewImageFormat::Png => ImageFormat::Png,
+        PreviewImageFormat::Jpeg => ImageFormat::Jpeg,
+        PreviewImageFormat::Gif => ImageFormat::Gif,
+        PreviewImageFormat::Webp => ImageFormat::Webp,
+        PreviewImageFormat::Bmp => ImageFormat::Bmp,
+        PreviewImageFormat::Tiff => ImageFormat::Tiff,
+        PreviewImageFormat::Ico => ImageFormat::Ico,
+        PreviewImageFormat::Svg => ImageFormat::Svg,
+    }
+}
+
+fn image_diff_side(side: &ImageSide, language: Language, before: bool, cx: &App) -> Div {
+    let mut pane = div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .w_1_2()
+        .h_full()
+        .min_w_0()
+        .min_h_0()
+        .overflow_hidden()
+        .border_l_1()
+        .border_color(cx.theme().border)
+        .child(div().p_2().text_sm().child(tr(
+            language,
+            if before {
+                "preview.before"
+            } else {
+                "preview.after"
+            },
+        )));
+    pane = pane.child(match side {
+        ImageSide::Missing => preview_notice(
+            language,
+            if before {
+                "preview.imageAdded"
+            } else {
+                "preview.imageDeleted"
+            },
+        )
+        .into_any_element(),
+        ImageSide::Unsupported => {
+            preview_notice(language, "preview.unsupported").into_any_element()
+        }
+        ImageSide::Image(image) => div()
+            .flex_1()
+            .min_h_0()
+            .min_w_0()
+            .p_3()
+            .child(
+                img(image.clone())
+                    .size_full()
+                    .object_fit(ObjectFit::Contain)
+                    .with_loading(move || {
+                        preview_notice(language, "preview.loading").into_any_element()
+                    })
+                    .with_fallback(move || {
+                        preview_notice(language, "preview.imageError").into_any_element()
+                    }),
+            )
+            .into_any_element(),
+    });
+    pane
 }
 
 fn preview_notice(language: Language, key: &str) -> Div {
@@ -1575,6 +1739,62 @@ fn parse_diff(patch: &str) -> Vec<CodeRow> {
 mod tests {
     use super::{PreviewTab, WorkspacePreview, parse_diff};
     use gpui_kit::{TestAppContext, px, size};
+
+    #[gpui_kit::test]
+    fn change_notice_preserves_preview_and_image_diff_fits_panel(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "yes-change-notice-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(
+            std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&root)
+                .status()
+                .unwrap()
+                .success()
+        );
+        std::fs::write(root.join("file.txt"), "initial").unwrap();
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(360.), px(600.)), |window, cx| {
+            WorkspacePreview::new(root.clone(), yes_core::Language::En, window, cx)
+        });
+        let preview = window.root(cx).unwrap();
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        cx.run_until_parked();
+        preview.update(cx, |preview, cx| {
+            preview.open_path("file.txt".into(), None, cx)
+        });
+        cx.run_until_parked();
+        std::fs::write(root.join("file.txt"), "new content from agent").unwrap();
+        preview.update(cx, |preview, cx| preview.check_for_changes(cx));
+        cx.run_until_parked();
+        preview.read_with(cx, |preview, _| {
+            assert!(preview.changes_available);
+            assert_eq!(preview.code[0].text, "initial");
+            assert!(!preview.list_visible);
+        });
+        assert!(visual.debug_bounds("preview-changes-available").is_some());
+        preview.update(cx, |preview, cx| {
+            preview.image_diff = Some((super::ImageSide::Missing, super::ImageSide::Unsupported));
+            cx.notify();
+        });
+        let bounds = visual.debug_bounds("preview-image-diff").unwrap();
+        assert!(bounds.size.width <= px(360.) && bounds.size.height > px(100.));
+        let refresh = visual.debug_bounds("preview-refresh").unwrap();
+        visual.simulate_click(refresh.center(), Default::default());
+        cx.run_until_parked();
+        preview.read_with(cx, |preview, _| {
+            assert!(!preview.changes_available);
+            assert_eq!(preview.code[0].text, "new content from agent");
+        });
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[gpui_kit::test]
     fn preview_scroll_locks_direction_and_back_preserves_tree(cx: &mut TestAppContext) {

@@ -580,7 +580,7 @@ impl CodeBuddyProvider {
         files
     }
 
-    fn active_titles(&self) -> HashMap<String, (String, Option<i64>)> {
+    fn active_titles(&self) -> HashMap<String, String> {
         let mut active = HashMap::new();
         let Ok(entries) = fs::read_dir(self.root.join("sessions")) else {
             return active;
@@ -599,9 +599,9 @@ impl CodeBuddyProvider {
                 continue;
             };
             let title = Self::string(value.pointer("/meta/currentTopic")).unwrap_or_default();
-            let updated = Self::timestamp_ms(value.get("updatedAt"))
-                .or_else(|| Self::timestamp_ms(value.get("lastHeartbeat")));
-            active.insert(id, (title, updated));
+            // Active-session timestamps track the CLI process heartbeat, not new messages.
+            // Read this metadata for the topic only; transcript updates drive recency.
+            active.insert(id, title);
         }
         active
     }
@@ -734,13 +734,10 @@ impl SessionProvider for CodeBuddyProvider {
             let active_value = active
                 .get(&file.id)
                 .or_else(|| file.internal_id.as_ref().and_then(|id| active.get(id)));
-            if let Some((title, updated)) = active_value {
+            if let Some(title) = active_value {
                 if !title.is_empty() {
                     session.file_name = title.clone();
                     session.last_message = title.clone();
-                }
-                if let Some(updated) = updated {
-                    session.updated_at = *updated;
                 }
             }
             match by_id.get(&session.id) {
@@ -768,6 +765,67 @@ impl SessionProvider for CodeBuddyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_session_heartbeat_does_not_override_transcript_recency() {
+        use std::time::Duration;
+        let root =
+            std::env::temp_dir().join(format!("yes-codebuddy-recency-{}", std::process::id()));
+        let project = root.join("projects/Users-test-project");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        for (id, seconds) in [("idle", 100), ("recent", 200)] {
+            let path = project.join(format!("{id}.jsonl"));
+            fs::write(
+                &path,
+                json!({"type":"message", "role":"user", "sessionId":id,
+                "timestamp":seconds * 1000, "content":"hello"})
+                .to_string(),
+            )
+            .unwrap();
+            fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_times(
+                    fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(seconds)),
+                )
+                .unwrap();
+        }
+        let active = root.join("sessions/123.json");
+        let provider = CodeBuddyProvider::with_root(root.clone());
+        for heartbeat in [300_000, 400_000] {
+            fs::write(
+                &active,
+                json!({"sessionId":"idle", "updatedAt":heartbeat,
+                "lastHeartbeat":heartbeat, "meta":{"currentTopic":"Idle topic"}})
+                .to_string(),
+            )
+            .unwrap();
+            let sessions = provider.sessions().unwrap();
+            assert_eq!(
+                sessions
+                    .iter()
+                    .map(|session| session.id.as_str())
+                    .collect::<Vec<_>>(),
+                ["recent", "idle"]
+            );
+            assert_eq!(sessions[1].updated_at, 100_000);
+            assert_eq!(sessions[1].file_name, "Idle topic");
+        }
+        // Real transcript activity still moves the session above the previous latest session.
+        let path = project.join("idle.jsonl");
+        fs::write(&path, format!("{}\n{}\n", fs::read_to_string(&path).unwrap(),
+            json!({"type":"message", "role":"assistant", "timestamp":500_000, "content":"reply"}))).unwrap();
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(UNIX_EPOCH + Duration::from_secs(500)))
+            .unwrap();
+        assert_eq!(provider.sessions().unwrap()[0].id, "idle");
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn removes_codebuddy_control_blocks() {

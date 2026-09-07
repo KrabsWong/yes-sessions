@@ -210,6 +210,29 @@ fn mermaid_sources_changed(
     before != after
 }
 
+fn update_conversation_scroll(
+    state: &mut MessageScrollerState,
+    previous_count: usize,
+    next_count: usize,
+    cx: &mut Context<MessageScrollerState>,
+) {
+    if next_count > previous_count {
+        state.append(next_count - previous_count, cx);
+    } else if next_count < previous_count {
+        state.splice(next_count..previous_count, 0, cx);
+    }
+    // Preserve the absolute position within a turn when streaming changes its height.
+    state.remeasure_items(0..next_count, cx);
+}
+
+fn unread_after_refresh(current: usize, previous: usize, next: usize, scrolled_up: bool) -> usize {
+    if scrolled_up {
+        current.saturating_add(next.saturating_sub(previous))
+    } else {
+        0
+    }
+}
+
 fn selection_after_refresh(
     previous: &[Session],
     next: &[Session],
@@ -314,6 +337,7 @@ pub struct YesSessions {
     selected_session_id: Option<String>,
     detail: Option<Arc<SessionDetail>>,
     conversation_state: Entity<MessageScrollerState>,
+    unread_message_count: usize,
     loading_sessions: bool,
     refreshing_sessions: bool,
     loading_detail: bool,
@@ -363,6 +387,7 @@ impl YesSessions {
             selected_session_id: None,
             detail: None,
             conversation_state: cx.new(|cx| MessageScrollerState::new(0, cx)),
+            unread_message_count: 0,
             loading_sessions: false,
             refreshing_sessions: false,
             loading_detail: false,
@@ -396,7 +421,11 @@ impl YesSessions {
             refreshing_detail: false,
         };
         cx.observe_window_appearance(window, |this, window, cx| {
-            if this.settings.theme == ThemePreference::System {
+            // AppKit may report appearance again when restoring/activating a window.
+            // Do not rebuild themes and Mermaid views unless light/dark actually changed.
+            if this.settings.theme == ThemePreference::System
+                && ThemeMode::from(window.appearance()) != cx.theme().mode
+            {
                 Self::configure_theme(
                     ThemePreference::System,
                     this.settings.accent_color,
@@ -408,6 +437,21 @@ impl YesSessions {
             }
         })
         .detach();
+        let mut was_scrolled_up = false;
+        cx.observe(&this.conversation_state, move |this, state, cx| {
+            let state = state.read(cx);
+            let scrolled_up = state.is_scrolled_up();
+            let clear_unread = this.unread_message_count > 0 && state.is_following_tail();
+            if clear_unread {
+                this.unread_message_count = 0;
+            }
+            if clear_unread || scrolled_up != was_scrolled_up {
+                was_scrolled_up = scrolled_up;
+                cx.notify();
+            }
+        })
+        .detach();
+        crate::commands::update_menus(this.settings.language, cx);
         this.load_sessions(cx);
         this.start_live_refresh(cx);
         this
@@ -695,6 +739,7 @@ impl YesSessions {
     }
 
     fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        self.unread_message_count = 0;
         self.sessions_generation += 1;
         self.detail_generation += 1;
         let generation = self.sessions_generation;
@@ -806,6 +851,7 @@ impl YesSessions {
     }
 
     fn reset_detail(&mut self, cx: &mut Context<Self>) {
+        self.unread_message_count = 0;
         self.detail_generation += 1;
         self.selected_session_id = None;
         self.error = None;
@@ -962,15 +1008,17 @@ impl YesSessions {
                         }) {
                             this.mermaid_views.clear();
                         }
+                        this.unread_message_count = unread_after_refresh(
+                            this.unread_message_count,
+                            this.detail
+                                .as_ref()
+                                .map_or(0, |detail| detail.messages.len()),
+                            detail.messages.len(),
+                            !this.conversation_state.read(cx).is_following_tail(),
+                        );
                         this.detail = Some(Arc::new(detail));
                         this.conversation_state.update(cx, |state, cx| {
-                            if next_count > previous_count {
-                                state.append(next_count - previous_count, cx);
-                            } else if next_count == previous_count {
-                                state.remeasure(cx);
-                            } else {
-                                state.reset(next_count, cx);
-                            }
+                            update_conversation_scroll(state, previous_count, next_count, cx);
                         });
                         cx.notify();
                     }
@@ -988,6 +1036,11 @@ impl YesSessions {
                     .update(cx, |this, cx| {
                         this.refresh_sessions(cx);
                         this.refresh_selected_detail(cx);
+                        if this.preview_open {
+                            if let Some(preview) = &this.workspace_preview {
+                                preview.update(cx, |preview, cx| preview.check_for_changes(cx));
+                            }
+                        }
                     })
                     .is_err()
                 {
@@ -1126,6 +1179,7 @@ impl YesSessions {
 
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.settings.language = language;
+        crate::commands::update_menus(language, cx);
         if let Some(preview) = &self.workspace_preview {
             preview.update(cx, |preview, cx| preview.set_language(language, cx));
         }
@@ -1517,7 +1571,9 @@ impl YesSessions {
                 .iter()
                 .all(|key| self.collapsed_groups.contains(key));
         div()
+            .debug_selector(|| "sessions-sidebar".into())
             .w_full()
+            .min_w_0()
             .h_full()
             .v_flex()
             .min_h_0()
@@ -1583,38 +1639,6 @@ impl YesSessions {
                                         .child(stats_summary.clone()),
                                 ))
                             }),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(2.))
-                            .child(
-                                Button::new("expand-all-groups")
-                                    .debug_selector(|| "expand-all-groups".into())
-                                    .ghost()
-                                    .compact()
-                                    .size(px(24.))
-                                    .icon(IconName::ChevronDown)
-                                    .disabled(loading || main_count == 0 || all_expanded)
-                                    .tooltip(tr(language, "sessions.expandAll"))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.expand_all_groups(cx)),
-                                    ),
-                            )
-                            .child(
-                                Button::new("collapse-all-groups")
-                                    .debug_selector(|| "collapse-all-groups".into())
-                                    .ghost()
-                                    .compact()
-                                    .size(px(24.))
-                                    .icon(IconName::ChevronUp)
-                                    .disabled(loading || main_count == 0 || all_collapsed)
-                                    .tooltip(tr(language, "sessions.collapseAll"))
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.collapse_all_groups(cx)),
-                                    ),
-                            ),
                     )
                     .child(
                         div()
@@ -1769,12 +1793,17 @@ impl YesSessions {
                                     let full_path = key.clone();
                                     return div()
                                         .id(("group", index))
+                                        .debug_selector(move || {
+                                            format!("session-group-{index}").into()
+                                        })
                                         .tooltip(move |window, cx| {
                                             Tooltip::new(full_path.clone()).build(window, cx)
                                         })
-                                        .mx_2()
+                                        .w_full()
+                                        .min_w_0()
+                                        .overflow_hidden()
                                         .h(px(36.))
-                                        .px_2()
+                                        .px_4()
                                         .rounded_md()
                                         .cursor_pointer()
                                         .flex()
@@ -1834,7 +1863,66 @@ impl YesSessions {
                                                             .child(parent_path),
                                                     )
                                                 }),
-                                        );
+                                        )
+                                        .when(index == 0, |view| {
+                                            view.child(
+                                                div()
+                                                    .flex()
+                                                    .flex_none()
+                                                    .items_center()
+                                                    .gap(px(2.))
+                                                    .child(
+                                                        Button::new("expand-all-groups")
+                                                            .debug_selector(|| {
+                                                                "expand-all-groups".into()
+                                                            })
+                                                            .ghost()
+                                                            .compact()
+                                                            .size(px(24.))
+                                                            .icon(IconName::ChevronDown)
+                                                            .disabled(
+                                                                loading
+                                                                    || main_count == 0
+                                                                    || all_expanded,
+                                                            )
+                                                            .tooltip(tr(
+                                                                language,
+                                                                "sessions.expandAll",
+                                                            ))
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    this.expand_all_groups(cx);
+                                                                },
+                                                            )),
+                                                    )
+                                                    .child(
+                                                        Button::new("collapse-all-groups")
+                                                            .debug_selector(|| {
+                                                                "collapse-all-groups".into()
+                                                            })
+                                                            .ghost()
+                                                            .compact()
+                                                            .size(px(24.))
+                                                            .icon(IconName::ChevronUp)
+                                                            .disabled(
+                                                                loading
+                                                                    || main_count == 0
+                                                                    || all_collapsed,
+                                                            )
+                                                            .tooltip(tr(
+                                                                language,
+                                                                "sessions.collapseAll",
+                                                            ))
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    cx.stop_propagation();
+                                                                    this.collapse_all_groups(cx);
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
+                                        });
                                 };
                                 let is_selected = selected.as_deref() == Some(session.id.as_str());
                                 let title = if session.first_message.is_empty() {
@@ -2080,6 +2168,8 @@ impl YesSessions {
                             .collect::<Vec<_>>()
                     }),
                 )
+                .w_full()
+                .min_w_0()
                 .h_full()
                 .into_any_element()
             })
@@ -2498,6 +2588,9 @@ impl YesSessions {
             mermaid_views,
             cx.weak_entity(),
         );
+        let unread = self.unread_message_count;
+        let scroller = scroller.jump_button(false);
+        let show_jump = unread > 0 || self.conversation_state.read(cx).is_scrolled_up();
         let navigator = self.render_user_navigator(&detail.messages, cx);
         div()
             .flex_1()
@@ -2695,7 +2788,123 @@ impl YesSessions {
                     .flex_1()
                     .min_h_0()
                     .child(scroller.size_full())
-                    .child(navigator),
+                    .child(navigator)
+                    .when(show_jump, |view| {
+                        view.child(
+                            div()
+                                .absolute()
+                                .bottom_4()
+                                .left_0()
+                                .right_0()
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    Button::new("conversation-jump-latest")
+                                        .debug_selector(|| "conversation-jump-latest".into())
+                                        .rounded_full()
+                                        .primary()
+                                        .h(px(32.))
+                                        .px_4()
+                                        .py_2()
+                                        .shadow_lg()
+                                        .when(unread == 0, |button| {
+                                            button
+                                                .accessibility_label(tr(
+                                                    language,
+                                                    "sessions.jumpLatest",
+                                                ))
+                                                .child(
+                                                    div()
+                                                        .text_size(px(12.))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child(tr(language, "sessions.jumpLatest")),
+                                                )
+                                        })
+                                        .when(unread > 0, |button| {
+                                            button
+                                                .accessibility_label(
+                                                    tr(language, "sessions.newMessages")
+                                                        .replace("{count}", &unread.to_string()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex()
+                                                        .items_center()
+                                                        .gap_2()
+                                                        .text_size(px(12.))
+                                                        .font_weight(FontWeight::MEDIUM)
+                                                        .child(
+                                                            div()
+                                                                .debug_selector(|| {
+                                                                    "new-messages-indicator".into()
+                                                                })
+                                                                .relative()
+                                                                .size(px(8.))
+                                                                .flex_none()
+                                                                .child(
+                                                                    div()
+                                                                        .absolute()
+                                                                        .rounded_full()
+                                                                        .bg(cx
+                                                                            .theme()
+                                                                            .primary_foreground)
+                                                                        .with_animation(
+                                                                            "new-messages-ping",
+                                                                            Animation::new(
+                                                                                Duration::from_secs(
+                                                                                    1,
+                                                                                ),
+                                                                            )
+                                                                            .repeat()
+                                                                            .with_easing(|t| {
+                                                                                1. - (1. - t)
+                                                                                    .powi(3)
+                                                                            }),
+                                                                            |dot, phase| {
+                                                                                dot.size(px(
+                                                                                    8. + phase * 8.
+                                                                                ))
+                                                                                .left(px(
+                                                                                    -phase * 4.
+                                                                                ))
+                                                                                .top(
+                                                                                    px(-phase * 4.),
+                                                                                )
+                                                                                .opacity(
+                                                                                    0.75 * (1.
+                                                                                        - phase),
+                                                                                )
+                                                                            },
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .relative()
+                                                                        .size(px(8.))
+                                                                        .rounded_full()
+                                                                        .bg(cx
+                                                                            .theme()
+                                                                            .primary_foreground),
+                                                                ),
+                                                        )
+                                                        .child(
+                                                            tr(language, "sessions.newMessages")
+                                                                .replace(
+                                                                    "{count}",
+                                                                    &unread.to_string(),
+                                                                ),
+                                                        ),
+                                                )
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.unread_message_count = 0;
+                                            this.conversation_state
+                                                .update(cx, |state, cx| state.scroll_to_end(cx));
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                    }),
             )
             .into_any_element()
     }
@@ -3585,9 +3794,119 @@ mod tests {
         ancestor_session_ids, collect_mermaid_sources, detail_source_signature,
         directory_group_labels, format_count, mermaid_sources_changed, navigator_preview,
         navigator_window, selection_after_refresh, session_directory_group_key,
+        unread_after_refresh, update_conversation_scroll,
     };
     use crate::conversation::inline_subagent_scope_base;
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
+
+    #[gpui_kit::test]
+    fn unread_button_keeps_count_through_layout_and_clears_on_click(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(600.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                session: session("unread-test", None),
+                messages: (0..30)
+                    .map(|i| {
+                        SessionMessage::text(
+                            MessageType::User,
+                            "2026-09-07T00:00:00Z",
+                            format!("Message {i}\n{}", "History content\n".repeat(10)),
+                        )
+                    })
+                    .collect(),
+            }));
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(30, cx);
+                state.scroll_to_end(cx);
+            });
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.debug_bounds("session-detail-title").unwrap();
+        // Scroll state alone must update the parent overlay, without unread messages
+        // or an explicit notification on the app entity.
+        app.update(cx, |app, cx| {
+            app.conversation_state.update(cx, |state, cx| {
+                state.scroll_to_item(0, cx);
+            });
+        });
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("conversation-jump-latest").is_some());
+        app.update(cx, |app, cx| {
+            app.conversation_state
+                .update(cx, |state, cx| state.scroll_to_end(cx));
+        });
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("conversation-jump-latest").is_none());
+        app.update(cx, |app, cx| {
+            app.conversation_state.update(cx, |state, cx| {
+                state.scroll_to_item(0, cx);
+            });
+            app.unread_message_count = 3;
+            app.conversation_state.update(cx, |state, cx| {
+                state.remeasure_items(0..30, cx);
+            });
+            cx.notify();
+        });
+        cx.run_until_parked();
+        visual.debug_bounds("session-detail-title").unwrap();
+        app.read_with(cx, |app, cx| {
+            assert!(
+                app.conversation_state.read(cx).is_scrolled_up(),
+                "expected history position; following={}, count={}",
+                app.conversation_state.read(cx).is_following_tail(),
+                app.unread_message_count
+            );
+        });
+        let button = visual.debug_bounds("conversation-jump-latest").unwrap();
+        assert!(button.size.width > px(80.));
+        assert_eq!(app.read_with(cx, |app, _| app.unread_message_count), 3);
+        visual.simulate_click(button.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(app.read_with(cx, |app, _| app.unread_message_count), 0);
+    }
+
+    #[gpui_kit::test]
+    fn live_updates_preserve_manual_scroll_and_follow_only_at_tail(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::AppContext as _;
+        use gpui_kit::component::message_scroller::MessageScrollerState;
+        let state = cx.new(|cx| MessageScrollerState::new(10, cx));
+        state.update(cx, |state, cx| {
+            state.scroll_to_item(2, cx);
+            assert!(!state.is_following_tail());
+            update_conversation_scroll(state, 10, 12, cx);
+            assert_eq!(state.item_count(), 12);
+            assert!(!state.is_following_tail());
+            update_conversation_scroll(state, 12, 12, cx);
+            assert!(!state.is_following_tail());
+            update_conversation_scroll(state, 12, 8, cx);
+            assert!(!state.is_following_tail());
+            state.scroll_to_end(cx);
+            update_conversation_scroll(state, 8, 9, cx);
+            assert!(state.is_following_tail());
+        });
+    }
+
+    #[test]
+    fn unread_counts_messages_only_while_reading_history() {
+        assert_eq!(unread_after_refresh(0, 10, 12, true), 2);
+        assert_eq!(unread_after_refresh(2, 12, 15, true), 5);
+        // Streaming an existing message and a compacted history add no messages.
+        assert_eq!(unread_after_refresh(5, 15, 15, true), 5);
+        assert_eq!(unread_after_refresh(5, 15, 10, true), 5);
+        assert_eq!(unread_after_refresh(5, 15, 16, false), 0);
+    }
 
     fn session(id: &str, parent_session_id: Option<&str>) -> Session {
         Session {
@@ -3728,7 +4047,7 @@ mod tests {
                             .map(|index| {
                                 let mut item = session(&format!("item-{index}"), None);
                                 item.directory =
-                                    Some(PathBuf::from(format!("/workspace/project-{index}")));
+                                    Some(PathBuf::from(format!("/workspace/gamecenter-pc-official-account-with-long-name-{index}")));
                                 item.updated_at = 1_700_000_000_000 + index * 86_400_000;
                                 item
                             })
@@ -3738,6 +4057,12 @@ mod tests {
                     cx.notify();
                 });
                 let collapse = visual.debug_bounds("collapse-all-groups").unwrap();
+                let header = visual.debug_bounds("session-group-0").unwrap();
+                assert_eq!(collapse.center().y, header.center().y);
+                let sidebar = visual.debug_bounds("sessions-sidebar").unwrap();
+                assert!(header.right() <= sidebar.right());
+                assert!(collapse.right() <= sidebar.right() - px(16.));
+                assert!((header.right() - collapse.right() - px(16.)).abs() <= px(1.));
                 visual.simulate_click(collapse.center(), Default::default());
                 app.read_with(cx, |app, _| {
                     assert_eq!(app.session_rows().len(), count as usize);
