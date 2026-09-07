@@ -4511,6 +4511,15 @@ mod tests {
     #[gpui_kit::test]
     fn group_toolbar_clicks_do_not_toggle_the_first_group(cx: &mut gpui_kit::TestAppContext) {
         use gpui_kit::{px, size};
+        let provider_root = std::env::temp_dir().join(format!(
+            "yes-sessions-group-toolbar-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(provider_root.join("projects")).unwrap();
         cx.update(gpui_kit::init);
         let window = cx.open_window(size(px(1100.), px(700.)), super::YesSessions::new);
         let app = window.root(cx).unwrap();
@@ -4518,6 +4527,13 @@ mod tests {
             app.sessions_generation += 1;
             app.loading_sessions = false;
             app.settings.sidebar_collapsed = false;
+            app.selected_app = AppType::Claude;
+            // Availability must not depend on CLI data installed on the test host.
+            let mut registry = yes_core::providers::ProviderRegistry::default();
+            registry.register(std::sync::Arc::new(
+                yes_core::providers::ClaudeProvider::with_root(provider_root.clone()),
+            ));
+            app.registry = std::sync::Arc::new(registry);
             cx.notify();
         });
         let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
@@ -4562,6 +4578,7 @@ mod tests {
                 });
             }
         }
+        fs::remove_dir_all(provider_root).unwrap();
     }
 
     #[test]
