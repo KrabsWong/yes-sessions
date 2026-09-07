@@ -362,6 +362,7 @@ pub struct YesSessions {
     session_view_mode: SessionViewMode,
     collapsed_groups: HashSet<String>,
     expanded_parents: HashSet<String>,
+    parent_transition: Option<(String, Instant, bool)>,
     expanded_messages: HashSet<usize>,
     expanded_subagent_conversations: HashSet<String>,
     inline_subagent_details: HashMap<String, Arc<SessionDetail>>,
@@ -415,6 +416,7 @@ impl YesSessions {
             session_view_mode: SessionViewMode::Date,
             collapsed_groups: HashSet::new(),
             expanded_parents: HashSet::new(),
+            parent_transition: None,
             expanded_messages: HashSet::new(),
             expanded_subagent_conversations: HashSet::new(),
             inline_subagent_details: HashMap::new(),
@@ -1223,6 +1225,13 @@ impl YesSessions {
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self
+            .parent_transition
+            .as_ref()
+            .is_some_and(|(_, started, _)| started.elapsed() < Duration::from_millis(160))
+        {
+            window.request_animation_frame();
+        }
+        if self
             .navigator_motion
             .is_some_and(|started| started.elapsed() < Duration::from_millis(140))
         {
@@ -1523,6 +1532,8 @@ impl YesSessions {
     }
 
     fn toggle_parent(&mut self, id: &str, cx: &mut Context<Self>) {
+        let expanding = !self.expanded_parents.contains(id);
+        self.parent_transition = Some((id.to_owned(), Instant::now(), expanding));
         if !self.expanded_parents.remove(id) {
             self.expanded_parents.insert(id.to_owned());
         }
@@ -1564,6 +1575,7 @@ impl YesSessions {
         let rows = Arc::new(self.session_rows());
         let view_mode = self.session_view_mode;
         let expanded_parents = self.expanded_parents.clone();
+        let parent_transition = self.parent_transition.clone();
         let marquee_session_id = self.marquee_session_id.clone();
         let marquee_enabled = self.settings.enable_title_marquee;
         let group_keys = sessions
@@ -1949,6 +1961,34 @@ impl YesSessions {
                                 let is_subagent =
                                     session.kind == yes_core::model::SessionKind::Subagent;
                                 let children_expanded = expanded_parents.contains(&session.id);
+                                let transition =
+                                    parent_transition.as_ref().map(|(id, started, expanding)| {
+                                        let t = (started.elapsed().as_secs_f32() / 0.16).min(1.);
+                                        (id, 1. - (1. - t).powi(3), *expanding)
+                                    });
+                                let arrow_progress =
+                                    transition.filter(|(id, _, _)| **id == session.id).map_or(
+                                        if children_expanded { 1. } else { 0. },
+                                        |(_, t, expanding)| {
+                                            if expanding { t } else { 1. - t }
+                                        },
+                                    );
+                                let reveal = transition
+                                    .filter(|(id, _, expanding)| {
+                                        *expanding
+                                            && session.parent_session_id.as_ref() == Some(*id)
+                                    })
+                                    .map_or(1., |(_, t, _)| t);
+                                let purple = if cx.theme().mode == ThemeMode::Dark {
+                                    rgb(0xd8b4fe)
+                                } else {
+                                    rgb(0x9333ea)
+                                };
+                                let purple_hover = if cx.theme().mode == ThemeMode::Dark {
+                                    Hsla::from(rgb(0x581c87)).opacity(0.4)
+                                } else {
+                                    rgb(0xf3e8ff).into()
+                                };
                                 let parent_id = session.id.clone();
                                 let title_width = title
                                     .chars()
@@ -2132,25 +2172,31 @@ impl YesSessions {
                                     .when(child_count > 0, |view| {
                                         view.child(
                                             Button::new(("toggle-children", index))
-                                                .ghost()
+                                                .custom(
+                                                    ButtonCustomVariant::new(cx)
+                                                        .color(cx.theme().transparent)
+                                                        .foreground(purple.into())
+                                                        .hover(purple_hover)
+                                                        .active(purple_hover),
+                                                )
+                                                .rounded(px(4.))
                                                 .compact()
                                                 .absolute()
                                                 .right_1()
                                                 .h(px(24.))
                                                 .px(px(6.))
-                                                .text_color(hsla(270. / 360., 0.67, 0.62, 1.))
+                                                .text_color(purple)
                                                 .child(
                                                     div()
                                                         .flex()
                                                         .items_center()
                                                         .gap_1()
                                                         .child(
-                                                            Icon::new(if children_expanded {
-                                                                IconName::ChevronDown
-                                                            } else {
-                                                                IconName::ChevronRight
-                                                            })
-                                                            .size(px(14.)),
+                                                            Icon::new(IconName::ChevronRight)
+                                                                .size(px(14.))
+                                                                .rotate(percentage(
+                                                                    arrow_progress * 0.25,
+                                                                )),
                                                         )
                                                         .child(
                                                             Icon::new(IconName::Bot).size(px(12.)),
@@ -2168,6 +2214,9 @@ impl YesSessions {
                                     });
                                 div()
                                     .id(("session-wrapper", index))
+                                    .relative()
+                                    .left(px((1. - reveal) * -4.))
+                                    .opacity(reveal)
                                     .w_full()
                                     .h(px(36.))
                                     .pl(px(8. + (depth.min(4) * 20) as f32))
@@ -2688,27 +2737,41 @@ impl YesSessions {
                                     .child(title_view),
                             ),
                     )
-                    .when_some(parent_id, |view, parent_id| {
-                        view.child(
-                            div().mt_1().w_full().flex().justify_center().child(
-                                Button::new("back-to-parent")
-                                    .text()
-                                    .compact()
-                                    .h(px(20.))
-                                    .text_size(px(12.))
-                                    .icon(IconName::ArrowLeft)
-                                    .label(tr(language, "sessions.backToParent"))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.open_sub_agent(&parent_id, cx)
-                                    })),
-                            ),
-                        )
-                    })
                     .child(
                         div()
                             .mt_2()
                             .v_flex()
                             .gap_1()
+                            .when_some(parent_id, |view, parent_id| {
+                                let (color, hover) = if cx.theme().mode == ThemeMode::Dark {
+                                    (rgb(0xd8b4fe), rgb(0xe9d5ff))
+                                } else {
+                                    (rgb(0x9333ea), rgb(0x7e22ce))
+                                };
+                                view.child(
+                                    div().flex().justify_start().child(
+                                        BaseButton::new("back-to-parent")
+                                            .accessibility_label(tr(
+                                                language,
+                                                "sessions.backToParent",
+                                            ))
+                                            .cursor_pointer()
+                                            .debug_selector(|| "back-to-parent".into())
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.))
+                                            .h(px(20.))
+                                            .text_size(px(12.))
+                                            .text_color(color)
+                                            .hover(move |style| style.text_color(hover))
+                                            .child(Icon::new(IconName::ArrowLeft).size(px(14.)))
+                                            .child(tr(language, "sessions.backToParent"))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.open_sub_agent(&parent_id, cx)
+                                            })),
+                                    ),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex()
@@ -4167,7 +4230,7 @@ mod tests {
             app.loading_sessions = false;
             app.settings.sidebar_collapsed = true;
             app.settings_open = false;
-            let mut item = session("title-wrap", None);
+            let mut item = session("title-wrap", Some("parent"));
             item.first_message = "检查文件预览和差异对比面板的布局，确保缩小会话区域后标题能够自动换行并完整显示。 Review the workspace preview layout and preserve the full session title.".into();
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail { session: item, messages: vec![] }));
             cx.notify();
@@ -4178,6 +4241,10 @@ mod tests {
         let narrow = visual.debug_bounds("session-detail-title").unwrap();
         assert!(narrow.size.height > wide.size.height);
         assert!(narrow.right() <= px(440.));
+        let back = visual.debug_bounds("back-to-parent").unwrap();
+        assert_eq!(back.left(), px(440.) - narrow.right());
+        assert!(back.top() >= narrow.bottom());
+        assert!(back.size.width < px(200.));
     }
 
     #[gpui_kit::test]
