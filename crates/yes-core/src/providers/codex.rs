@@ -1,7 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
-    io::Read,
+    io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -103,6 +103,132 @@ impl CodexProvider {
             .unwrap_or_default()
     }
 
+    fn session_kind(
+        meta: &Map<String, Value>,
+    ) -> Option<(SessionKind, Option<String>, Option<String>)> {
+        let Some(subagent) = meta.get("source").and_then(|source| source.get("subagent")) else {
+            return Some((SessionKind::Main, None, None));
+        };
+        // Guardian/review workers are internal control sessions, not user conversations.
+        let spawn = subagent.get("thread_spawn")?;
+        let parent = spawn.get("parent_thread_id")?.as_str()?.to_owned();
+        let label = spawn
+            .get("agent_path")
+            .and_then(Value::as_str)
+            .and_then(|path| path.rsplit('/').find(|part| !part.is_empty()))
+            .or_else(|| spawn.get("agent_role").and_then(Value::as_str))
+            .or_else(|| spawn.get("agent_nickname").and_then(Value::as_str))
+            .map(str::to_owned);
+        Some((SessionKind::Subagent, Some(parent), label))
+    }
+
+    fn subagent_content_preview(
+        meta: &Map<String, Value>,
+        records: &[Value],
+        tail: bool,
+    ) -> String {
+        let start = if tail {
+            0
+        } else {
+            meta.get("subagent_history_start_ordinal")
+                .and_then(Value::as_u64)
+                .unwrap_or(0) as usize
+        };
+        let created = Self::timestamp_ms(meta.get("timestamp").and_then(Value::as_str));
+        let own = records
+            .iter()
+            .skip(start)
+            .filter(|record| {
+                record.get("type").and_then(Value::as_str) == Some("response_item")
+                    && match (
+                        created,
+                        Self::timestamp_ms(record.get("timestamp").and_then(Value::as_str)),
+                    ) {
+                        (Some(created), Some(time)) => time >= created,
+                        (Some(_), None) if tail => false,
+                        _ => true,
+                    }
+            })
+            .collect::<Vec<_>>();
+        for record in &own {
+            let text = Self::value_text(record.pointer("/payload/content"));
+            let preview = match record.pointer("/payload/type").and_then(Value::as_str) {
+                Some("agent_message") if text.contains("Message Type: NEW_TASK") => text
+                    .split_once("Payload:")
+                    .map(|(_, text)| text.trim().to_owned())
+                    .unwrap_or_default(),
+                Some("message")
+                    if record.pointer("/payload/role").and_then(Value::as_str) == Some("user") =>
+                {
+                    Self::normalize_user(&text)
+                }
+                _ => String::new(),
+            };
+            if !preview.trim().is_empty() {
+                return Self::truncate(preview.trim(), 200);
+            }
+        }
+        own.iter()
+            .find_map(|record| {
+                if record.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+                    || record.pointer("/payload/role").and_then(Value::as_str) != Some("assistant")
+                {
+                    return None;
+                }
+                let text = Self::value_text(record.pointer("/payload/content"));
+                (!text.trim().is_empty()).then(|| Self::truncate(text.trim(), 200))
+            })
+            .unwrap_or_default()
+    }
+
+    fn subagent_preview(
+        &self,
+        path: &Path,
+        meta: &Map<String, Value>,
+        records: &[Value],
+    ) -> String {
+        let preview = Self::subagent_content_preview(meta, records, false);
+        if !preview.is_empty() {
+            return preview;
+        }
+        // Forked histories can fill the prefix before the child's own messages.
+        // A bounded tail finds readable replies without scanning inherited history.
+        let read_tail = || -> Option<String> {
+            let mut file = fs::File::open(path).ok()?;
+            let offset = file.metadata().ok()?.len().saturating_sub(256 * 1024);
+            if offset == 0 {
+                return None;
+            }
+            file.seek(SeekFrom::Start(offset)).ok()?;
+            let mut bytes = Vec::new();
+            file.take(256 * 1024).read_to_end(&mut bytes).ok()?;
+            let start = bytes.iter().position(|b| *b == b'\n')? + 1;
+            let records = bytes[start..]
+                .split(|b| *b == b'\n')
+                .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+                .collect::<Vec<_>>();
+            Some(Self::subagent_content_preview(meta, &records, true))
+        };
+        read_tail().unwrap_or_default()
+    }
+
+    fn first_user_preview(records: &[Value]) -> String {
+        records
+            .iter()
+            .find_map(|record| {
+                if record.get("type").and_then(Value::as_str) != Some("response_item")
+                    || record.pointer("/payload/type").and_then(Value::as_str) != Some("message")
+                    || record.pointer("/payload/role").and_then(Value::as_str) != Some("user")
+                {
+                    return None;
+                }
+                let text =
+                    Self::normalize_user(&Self::value_text(record.pointer("/payload/content")));
+                (!text.trim().is_empty()).then(|| Self::truncate(&text, 200))
+            })
+            .unwrap_or_default()
+    }
+
     fn is_review(records: &[Value]) -> bool {
         records.iter().any(|record| {
             record.get("type").and_then(Value::as_str) == Some("turn_context")
@@ -156,6 +282,12 @@ impl CodexProvider {
 
     fn normalize_user(content: &str) -> String {
         let trimmed = content.trim();
+        if let Some(rest) = trimmed.strip_prefix("<recommended_plugins>") {
+            return rest
+                .split_once("</recommended_plugins>")
+                .map(|(_, rest)| Self::normalize_user(rest))
+                .unwrap_or_default();
+        }
         let hidden_prefixes = [
             "# AGENTS.md instructions for",
             "<skill>",
@@ -433,6 +565,106 @@ impl CodexProvider {
         messages
     }
 
+    fn link_subagents(&self, parent_id: &str, messages: &mut [SessionMessage]) {
+        let spawn_calls = messages
+            .iter()
+            .filter(|message| {
+                message.message_type == MessageType::ToolUse
+                    && message
+                        .tool_name
+                        .as_deref()
+                        .is_some_and(|name| name.ends_with("spawn_agent"))
+            })
+            .filter_map(|message| message.call_id.clone())
+            .collect::<HashSet<_>>();
+        if spawn_calls.is_empty() {
+            return;
+        }
+        // Read only bounded metadata, never each child's full transcript.
+        let mut targets = HashMap::<String, Option<String>>::new();
+        for path in self.session_files() {
+            let Ok(file) = fs::File::open(&path) else {
+                continue;
+            };
+            let mut line = String::new();
+            if BufReader::new(file.take(256 * 1024))
+                .read_line(&mut line)
+                .is_err()
+            {
+                continue;
+            }
+            let Ok(record) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            if record.get("type").and_then(Value::as_str) != Some("session_meta") {
+                continue;
+            }
+            let Some(meta) = record.get("payload").and_then(Value::as_object) else {
+                continue;
+            };
+            let Some((SessionKind::Subagent, Some(parent), _)) = Self::session_kind(meta) else {
+                continue;
+            };
+            if parent != parent_id {
+                continue;
+            }
+            let Some(id) = meta.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            let agent_path = record
+                .pointer("/payload/source/subagent/thread_spawn/agent_path")
+                .and_then(Value::as_str);
+            for alias in std::iter::once(id)
+                .chain(agent_path)
+                .chain(agent_path.and_then(|path| path.rsplit('/').next()))
+            {
+                targets
+                    .entry(alias.to_owned())
+                    .and_modify(|previous| {
+                        if previous.as_deref() != Some(id) {
+                            *previous = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(id.to_owned()));
+            }
+        }
+        let mut linked_calls = HashMap::new();
+        for message in messages
+            .iter_mut()
+            .filter(|message| message.message_type == MessageType::ToolResult)
+        {
+            let Some(call_id) = message.call_id.as_ref() else {
+                continue;
+            };
+            if !spawn_calls.contains(call_id) {
+                continue;
+            }
+            let output = message
+                .tool_output
+                .as_ref()
+                .and_then(|output| output.output.as_deref())
+                .and_then(|text| serde_json::from_str::<Value>(text).ok());
+            let target = ["agent_id", "thread_id", "task_name"]
+                .into_iter()
+                .filter_map(|key| output.as_ref()?.get(key)?.as_str())
+                .find_map(|target| targets.get(target).and_then(Clone::clone));
+            if let Some(target) = target {
+                message.sub_agent_session_id = Some(target.clone());
+                linked_calls.insert(call_id.clone(), target);
+            }
+        }
+        for message in messages
+            .iter_mut()
+            .filter(|message| message.message_type == MessageType::ToolUse)
+        {
+            message.sub_agent_session_id = message
+                .call_id
+                .as_ref()
+                .and_then(|id| linked_calls.get(id))
+                .cloned();
+        }
+    }
+
     fn parse_summary(records: &[Value]) -> (usize, String, String) {
         let mut count = 0;
         let mut first = String::new();
@@ -508,7 +740,14 @@ impl CodexProvider {
         // only needs metadata and a preview; full parsing is deferred until the
         // user opens a session.
         let source = Self::read_summary_prefix(path)?;
-        if source.is_empty() || source.contains("codex-auto-review") {
+        if source.is_empty() {
+            return None;
+        }
+        let records = source
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>();
+        if Self::is_review(&records) {
             return None;
         }
         let first_record = source
@@ -527,18 +766,17 @@ impl CodexProvider {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| Self::file_id(path))?;
+        let (kind, parent_session_id, agent_type) = Self::session_kind(&meta)?;
         let index_entry = index.get(&id);
         let candidates = source
             .lines()
             .filter(|line| Self::line_is_summary_item(line))
             .collect::<Vec<_>>();
-        let first = candidates
-            .iter()
-            .find_map(|line| {
-                let preview = Self::line_preview(line);
-                (!preview.is_empty()).then_some(preview)
-            })
-            .unwrap_or_default();
+        let first = if kind == SessionKind::Subagent {
+            self.subagent_preview(path, &meta, &records)
+        } else {
+            Self::first_user_preview(&records)
+        };
         let last = candidates
             .iter()
             .rev()
@@ -566,13 +804,20 @@ impl CodexProvider {
             message_count: candidates.len(),
             first_message: index_entry
                 .and_then(|entry| entry.thread_name.clone())
-                .unwrap_or_else(|| Self::truncate(&first, 200)),
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| (!first.is_empty()).then(|| Self::truncate(&first, 200)))
+                .or_else(|| agent_type.clone())
+                .unwrap_or_default(),
             last_message: Self::truncate(&last, 200),
             directory: meta.get("cwd").and_then(Value::as_str).map(PathBuf::from),
             uuid: None,
-            kind: SessionKind::Main,
-            parent_session_id: None,
-            agent_type: None,
+            kind,
+            parent_session_id,
+            agent_type: meta
+                .get("source")
+                .and_then(|source| source.pointer("/subagent/thread_spawn/agent_role"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         })
     }
 
@@ -587,13 +832,17 @@ impl CodexProvider {
             return None;
         }
         let meta = Self::metadata(records);
+        let (kind, parent_session_id, agent_type) = Self::session_kind(&meta)?;
         let id = meta
             .get("id")
             .and_then(Value::as_str)
             .map(str::to_owned)
             .or_else(|| Self::file_id(path))?;
         let cwd = meta.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-        let messages = include_messages.then(|| self.parse_messages(records, cwd.as_deref()));
+        let mut messages = include_messages.then(|| self.parse_messages(records, cwd.as_deref()));
+        if let Some(messages) = messages.as_mut() {
+            self.link_subagents(&id, messages);
+        }
         let (message_count, first, last) = if let Some(messages) = &messages {
             let first = messages
                 .iter()
@@ -649,13 +898,27 @@ impl CodexProvider {
             message_count,
             first_message: index_entry
                 .and_then(|entry| entry.thread_name.clone())
-                .unwrap_or(first),
+                .filter(|title| !title.trim().is_empty())
+                .or_else(|| {
+                    let preview = if kind == SessionKind::Subagent {
+                        self.subagent_preview(path, &meta, records)
+                    } else {
+                        first.clone()
+                    };
+                    (!preview.is_empty()).then_some(preview)
+                })
+                .or_else(|| agent_type.clone())
+                .unwrap_or_default(),
             last_message: last,
             directory: cwd,
             uuid: None,
-            kind: SessionKind::Main,
-            parent_session_id: None,
-            agent_type: None,
+            kind,
+            parent_session_id,
+            agent_type: meta
+                .get("source")
+                .and_then(|source| source.pointer("/subagent/thread_spawn/agent_role"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
         };
         Some((session, messages.unwrap_or_default()))
     }
@@ -719,12 +982,210 @@ mod tests {
     use super::*;
 
     #[test]
+    fn sidebar_classifies_workers_and_uses_real_user_titles() {
+        let root = std::env::temp_dir().join(format!("yes-codex-sidebar-{}", std::process::id()));
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let provider = CodexProvider::with_root(root.clone());
+        let write = |id: &str, source: Value, extra: Vec<Value>| {
+            let mut records = vec![
+                json!({"type":"session_meta","payload":{"id":id,"source":source,"cwd":"/tmp"}}),
+            ];
+            records.extend(extra);
+            let path = root.join("sessions").join(format!("{id}.jsonl"));
+            fs::write(
+                &path,
+                records
+                    .iter()
+                    .map(Value::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            )
+            .unwrap();
+            (path, records)
+        };
+        let user = |text: &str| json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+        let (path, records) = write(
+            "main",
+            json!("cli"),
+            vec![
+                user("<recommended_plugins>runtime</recommended_plugins>"),
+                json!({"type":"response_item","payload":{"type":"reasoning","summary":[{"text":"Internal planning"}]}}),
+                user("Please explain codex-auto-review behavior"),
+            ],
+        );
+        let summary = provider
+            .make_session_summary(&path, &HashMap::new())
+            .unwrap();
+        assert_eq!(
+            summary.first_message,
+            "Please explain codex-auto-review behavior"
+        );
+        assert_eq!(summary.kind, SessionKind::Main);
+        assert_eq!(
+            provider
+                .make_session(&path, &records, &HashMap::new(), true)
+                .unwrap()
+                .0
+                .first_message,
+            summary.first_message
+        );
+        let (path, records) = write(
+            "child",
+            json!({"subagent":{"thread_spawn":{"parent_thread_id":"main","agent_path":"/root/review_ui","agent_nickname":"Newton"}}}),
+            vec![user("Inherited parent request")],
+        );
+        let child = provider
+            .make_session_summary(&path, &HashMap::new())
+            .unwrap();
+        assert_eq!(child.kind, SessionKind::Subagent);
+        assert_eq!(child.parent_session_id.as_deref(), Some("main"));
+        assert_eq!(child.first_message, "Inherited parent request");
+        assert_eq!(
+            provider
+                .make_session(&path, &records, &HashMap::new(), true)
+                .unwrap()
+                .0
+                .parent_session_id,
+            child.parent_session_id
+        );
+        let (path, records) = write(
+            "guardian",
+            json!({"subagent":{"other":"guardian"}}),
+            vec![user("Control history")],
+        );
+        assert!(
+            provider
+                .make_session_summary(&path, &HashMap::new())
+                .is_none()
+        );
+        assert!(
+            provider
+                .make_session(&path, &records, &HashMap::new(), true)
+                .is_none()
+        );
+        assert_eq!(provider.sessions().unwrap().len(), 2);
+        let mut index = HashMap::new();
+        index.insert(
+            "main".into(),
+            IndexEntry {
+                id: "main".into(),
+                thread_name: Some("Saved title".into()),
+                updated_at: None,
+            },
+        );
+        assert_eq!(
+            provider
+                .make_session_summary(&root.join("sessions/main.jsonl"), &index)
+                .unwrap()
+                .first_message,
+            "Saved title"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn spawned_agent_links_resolve_task_paths_and_ids_within_the_parent() {
+        let root = std::env::temp_dir().join(format!("yes-codex-links-{}", std::process::id()));
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let meta = |id: &str, parent: &str| json!({"type":"session_meta","payload":{"id":id,"source":{"subagent":{"thread_spawn":{"parent_thread_id":parent,"agent_path":"/root/reference_colors"}}}}});
+        fs::write(
+            root.join("sessions/child.jsonl"),
+            meta("child", "parent").to_string(),
+        )
+        .unwrap();
+        fs::write(
+            root.join("sessions/other.jsonl"),
+            meta("other", "different-parent").to_string(),
+        )
+        .unwrap();
+        let provider = CodexProvider::with_root(root.clone());
+        for output in [
+            json!({"task_name":"/root/reference_colors"}),
+            json!({"agent_id":"child"}),
+        ] {
+            let records = vec![
+                json!({"type":"response_item","payload":{"type":"function_call","name":"spawn_agent","call_id":"call","arguments":"{\"message\":\"Review colors\"}"}}),
+                json!({"type":"response_item","payload":{"type":"function_call_output","call_id":"call","output":output.to_string()}}),
+            ];
+            let mut messages = provider.parse_messages(&records, None);
+            provider.link_subagents("parent", &mut messages);
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message.sub_agent_session_id.as_deref() == Some("child"))
+            );
+            let mut messages = provider.parse_messages(&records, None);
+            provider.link_subagents("unrelated", &mut messages);
+            assert!(
+                messages
+                    .iter()
+                    .all(|message| message.sub_agent_session_id.is_none())
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn child_titles_skip_inherited_history_and_use_readable_own_content() {
+        let meta = json!({"subagent_history_start_ordinal":1});
+        let message = |role: &str, text: &str| json!({"type":"response_item","payload":{"type":"message","role":role,"content":[{"type":"input_text","text":text}]}});
+        let inherited = message("user", "Unrelated parent request");
+        let task = json!({"type":"response_item","payload":{"type":"agent_message","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\nReview sidebar layout"}]}});
+        assert_eq!(
+            CodexProvider::subagent_content_preview(
+                meta.as_object().unwrap(),
+                &[inherited.clone(), task],
+                false
+            ),
+            "Review sidebar layout"
+        );
+        let encrypted = json!({"type":"response_item","payload":{"type":"agent_message","content":[{"type":"input_text","text":"Message Type: NEW_TASK\nPayload:\n"},{"type":"encrypted_content","encrypted_content":"unreadable"}]}});
+        assert_eq!(
+            CodexProvider::subagent_content_preview(
+                meta.as_object().unwrap(),
+                &[
+                    inherited,
+                    encrypted,
+                    message("assistant", "Verified sidebar colors and spacing")
+                ],
+                false
+            ),
+            "Verified sidebar colors and spacing"
+        );
+    }
+
+    #[test]
+    fn child_title_reads_only_bounded_tail_after_large_forked_history() {
+        let root =
+            std::env::temp_dir().join(format!("yes-codex-title-tail-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("child.jsonl");
+        let meta = json!({"type":"session_meta","payload":{"id":"child","timestamp":"2026-09-07T10:00:00Z","subagent_history_start_ordinal":2,"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","agent_path":"/root/check_colors"}}}}});
+        let inherited = json!({"type":"response_item","timestamp":"2026-09-07T09:00:00Z","payload":{"type":"message","role":"user","content":"x".repeat(300*1024)}});
+        let reply = json!({"type":"response_item","timestamp":"2026-09-07T10:01:00Z","payload":{"type":"message","role":"assistant","content":"Checked sidebar colors"}});
+        fs::write(&path, format!("{meta}\n{inherited}\n{reply}\n")).unwrap();
+        let provider = CodexProvider::with_root(root.clone());
+        let summary = provider
+            .make_session_summary(&path, &HashMap::new())
+            .unwrap();
+        assert_eq!(summary.first_message, "Checked sidebar colors");
+        assert!(summary.agent_type.is_none());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn hides_codex_runtime_context_messages() {
         assert!(
             CodexProvider::normalize_user("<environment_context>secret</environment_context>")
                 .is_empty()
         );
         assert_eq!(CodexProvider::normalize_user("hello"), "hello");
+        assert_eq!(
+            CodexProvider::normalize_user(
+                "<recommended_plugins>list</recommended_plugins>\nReal request"
+            ),
+            "\nReal request"
+        );
     }
 
     #[test]

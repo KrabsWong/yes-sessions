@@ -1559,6 +1559,7 @@ fn render_subagent(
     let description = subagent_string(input, "description")
         .or_else(|| subagent_string(input, "task"))
         .or_else(|| subagent_string(input, "prompt"))
+        .or_else(|| subagent_string(input, "message"))
         .unwrap_or_else(|| tr(options.language, "sessions.subAgentDefaultDesc").to_owned());
     let agent_type =
         subagent_string(input, "subagent_type").or_else(|| subagent_string(input, "type"));
