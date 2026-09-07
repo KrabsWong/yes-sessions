@@ -1590,6 +1590,7 @@ fn render_subagent(
         .or_else(|| tool_use.and_then(|item| item.message.sub_agent_session_id.clone()));
     let status = tool_result
         .and_then(|item| item.message.metadata.get("subtype"))
+        .or_else(|| tool_use.and_then(|item| item.message.metadata.get("subtype")))
         .and_then(|value| value.as_str())
         .unwrap_or(if tool_result.is_some() {
             "completed"

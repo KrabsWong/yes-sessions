@@ -25,6 +25,7 @@ struct SessionRow {
     created_at: i64,
     updated_at: i64,
     message_count: usize,
+    parent_id: Option<String>,
 }
 
 impl Default for OpenCodeProvider {
@@ -76,7 +77,8 @@ impl OpenCodeProvider {
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or("assistant");
-        let model = Self::model_name(data.get("model")).or(inherited_model);
+        let model =
+            Self::model_name(data.get("modelID").or_else(|| data.get("model"))).or(inherited_model);
         let mut content = Vec::new();
         let mut reasoning = Vec::new();
         let mut tool_parts = Vec::new();
@@ -124,25 +126,36 @@ impl OpenCodeProvider {
                         .and_then(Value::as_object)
                         .cloned()
                         .or_else(|| Some(Map::new()));
-                    message.tool_output =
-                        state
-                            .and_then(|value| value.get("output"))
-                            .map(|output| ToolOutput {
-                                output: Some(if let Some(text) = output.as_str() {
-                                    text.to_owned()
-                                } else {
-                                    serde_json::to_string_pretty(output).unwrap_or_default()
-                                }),
-                                preview: None,
-                                truncated: false,
-                                extra: Map::new(),
-                            });
+                    message.tool_output = state
+                        .and_then(|value| value.get("output").or_else(|| value.get("error")))
+                        .map(|output| ToolOutput {
+                            output: Some(if let Some(text) = output.as_str() {
+                                text.to_owned()
+                            } else {
+                                serde_json::to_string_pretty(output).unwrap_or_default()
+                            }),
+                            preview: None,
+                            truncated: false,
+                            extra: Map::new(),
+                        });
                     message.call_id = tool
                         .get("callID")
                         .and_then(Value::as_str)
                         .map(str::to_owned);
                     message.reasoning_content =
                         (index == 0 && !reasoning.is_empty()).then(|| reasoning.join("\n\n"));
+                    if let Some(state) = state {
+                        if let Some(status) = state.get("status") {
+                            message.metadata.insert("subtype".into(), status.clone());
+                        }
+                        if message.tool_name.as_deref() == Some("task") {
+                            message.sub_agent_session_id = state
+                                .get("metadata")
+                                .and_then(|metadata| metadata.get("sessionId"))
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                        }
+                    }
                     message.model = model.clone();
                     message
                 })
@@ -164,21 +177,36 @@ impl OpenCodeProvider {
     }
 
     fn base_session(&self, row: SessionRow) -> Session {
+        let kind = if row.parent_id.is_some() {
+            SessionKind::Subagent
+        } else {
+            SessionKind::Main
+        };
+        // OpenCode appends the role to generated child titles; show it as a badge.
+        let (title, agent_type) = if kind == SessionKind::Subagent {
+            row.title
+                .strip_suffix(" subagent)")
+                .and_then(|title| title.rsplit_once(" (@"))
+                .map(|(title, role)| (title.to_owned(), Some(role.to_owned())))
+                .unwrap_or_else(|| (row.title.clone(), None))
+        } else {
+            (row.title.clone(), None)
+        };
         Session {
             id: row.id,
             app_type: AppType::OpenCode,
-            file_name: row.title.clone(),
+            file_name: title.clone(),
             file_path: self.database_path.clone(),
             created_at: row.created_at,
             updated_at: row.updated_at,
             message_count: row.message_count,
-            first_message: row.title,
+            first_message: title,
             last_message: String::new(),
             directory: Some(PathBuf::from(row.directory)),
             uuid: None,
-            kind: SessionKind::Main,
-            parent_session_id: None,
-            agent_type: None,
+            kind,
+            parent_session_id: row.parent_id,
+            agent_type,
         }
     }
 }
@@ -194,7 +222,7 @@ impl SessionProvider for OpenCodeProvider {
     fn sessions(&self) -> Result<Vec<Session>> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT s.id, s.directory, COALESCE(s.title, ''), s.time_created, s.time_updated, COUNT(m.id) \
+            "SELECT s.id, s.directory, COALESCE(s.title, ''), s.time_created, s.time_updated, COUNT(m.id), s.parent_id \
              FROM session s LEFT JOIN message m ON m.session_id = s.id \
              WHERE s.time_archived IS NULL GROUP BY s.id ORDER BY s.time_updated DESC",
         )?;
@@ -206,6 +234,7 @@ impl SessionProvider for OpenCodeProvider {
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
                 message_count: row.get(5)?,
+                parent_id: row.get(6)?,
             })
         })?;
         Ok(rows
@@ -218,7 +247,7 @@ impl SessionProvider for OpenCodeProvider {
         let connection = self.connection()?;
         let row = connection
             .query_row(
-                "SELECT id, directory, COALESCE(title, ''), time_created, time_updated \
+                "SELECT id, directory, COALESCE(title, ''), time_created, time_updated, parent_id \
              FROM session WHERE id = ?1",
                 params![session_id],
                 |row| {
@@ -229,6 +258,7 @@ impl SessionProvider for OpenCodeProvider {
                         created_at: row.get(3)?,
                         updated_at: row.get(4)?,
                         message_count: 0,
+                        parent_id: row.get(5)?,
                     })
                 },
             )
@@ -254,7 +284,8 @@ impl SessionProvider for OpenCodeProvider {
         for result in message_rows {
             let (message_id, timestamp, data_source) = result?;
             let data: Value = serde_json::from_str(&data_source).unwrap_or(Value::Null);
-            current_model = Self::model_name(data.get("model")).or(current_model);
+            current_model = Self::model_name(data.get("modelID").or_else(|| data.get("model")))
+                .or(current_model);
             let part_rows = parts_statement.query_map(params![session_id, message_id], |row| {
                 row.get::<_, String>(0)
             })?;
@@ -270,6 +301,19 @@ impl SessionProvider for OpenCodeProvider {
             ));
         }
 
+        let mut children = connection.prepare("SELECT id FROM session WHERE parent_id = ?1")?;
+        let child_ids = children
+            .query_map(params![session_id], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        for message in &mut messages {
+            if message
+                .sub_agent_session_id
+                .as_ref()
+                .is_some_and(|id| !child_ids.contains(id))
+            {
+                message.sub_agent_session_id = None;
+            }
+        }
         let mut session = self.base_session(row);
         session.message_count = messages.len();
         session.last_message = messages
@@ -300,6 +344,65 @@ impl SessionProvider for OpenCodeProvider {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn groups_children_and_links_only_existing_child_sessions() {
+        let path = std::env::temp_dir().join(format!("yes-opencode-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch(r#"CREATE TABLE session (id TEXT, directory TEXT, title TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER, parent_id TEXT);
+            CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+            CREATE TABLE part (session_id TEXT, message_id TEXT, time_created INTEGER, data TEXT);
+            INSERT INTO session VALUES ('parent','/tmp','Project overview',1,2,NULL,NULL),
+                ('child','/tmp','Inspect rendering (@explore subagent)',1,2,NULL,'parent'),
+                ('other','/tmp','Another session',1,2,NULL,NULL);
+            INSERT INTO message VALUES ('message','parent',1,'{"role":"assistant","modelID":"actual-model"}');"#).unwrap();
+        for (index, target) in ["child", "missing", "other"].iter().enumerate() {
+            let part = json!({"type":"tool","tool":"task","callID":target,"state":{
+                "status":"completed","input":{"description":"Inspect rendering"},
+                "output":"Done","metadata":{"sessionId":target}
+            }});
+            connection
+                .execute(
+                    "INSERT INTO part VALUES ('parent','message',?1,?2)",
+                    params![index, part.to_string()],
+                )
+                .unwrap();
+        }
+        drop(connection);
+        let provider = OpenCodeProvider::with_database_path(path.clone());
+        let sessions = provider.sessions().unwrap();
+        let child = sessions
+            .iter()
+            .find(|session| session.id == "child")
+            .unwrap();
+        assert_eq!(child.kind, SessionKind::Subagent);
+        assert_eq!(child.parent_session_id.as_deref(), Some("parent"));
+        assert_eq!(child.first_message, "Inspect rendering");
+        assert_eq!(child.agent_type.as_deref(), Some("explore"));
+        let detail = provider.session_detail("parent").unwrap().unwrap();
+        assert_eq!(detail.messages.len(), 3);
+        assert_eq!(
+            detail.messages[0].sub_agent_session_id.as_deref(),
+            Some("child")
+        );
+        assert!(
+            detail.messages[1..]
+                .iter()
+                .all(|message| message.sub_agent_session_id.is_none())
+        );
+        assert!(
+            detail
+                .messages
+                .iter()
+                .all(|message| message.model.as_deref() == Some("actual-model"))
+        );
+        assert_eq!(detail.messages[0].metadata["subtype"], "completed");
+        let detail = provider.session_detail("child").unwrap().unwrap();
+        assert_eq!(detail.session.parent_session_id, child.parent_session_id);
+        assert_eq!(detail.session.first_message, child.first_message);
+        std::fs::remove_file(path).unwrap();
+    }
 
     #[test]
     fn preserves_every_tool_call_and_output_without_duplicating_prose() {
