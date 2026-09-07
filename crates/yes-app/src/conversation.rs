@@ -73,9 +73,15 @@ fn tool_use_matches_result(tool_use: &IndexedMessage, tool_result: &IndexedMessa
         .is_some_and(|tool_name| use_message.tool_name.as_deref() == Some(tool_name))
 }
 
+// Legacy transcripts may omit IDs; an explicit mismatch must remain an orphan.
+fn tool_ids_allow_fallback(tool_use: &IndexedMessage, tool_result: &IndexedMessage) -> bool {
+    tool_use.message.call_id.is_none() || tool_result.message.call_id.is_none()
+}
+
 fn tool_use_name_matches_result(tool_use: &IndexedMessage, tool_result: &IndexedMessage) -> bool {
     tool_use.message.message_type == MessageType::ToolUse
         && tool_result.message.message_type == MessageType::ToolResult
+        && tool_ids_allow_fallback(tool_use, tool_result)
         && tool_result
             .message
             .tool_name
@@ -107,9 +113,10 @@ fn turn_has_matching_tool_name(turn: &ConversationTurn, tool_result: &IndexedMes
     })
 }
 
-fn turn_has_unmatched_tool_use(turn: &ConversationTurn) -> bool {
+fn turn_has_unmatched_tool_use(turn: &ConversationTurn, tool_result: &IndexedMessage) -> bool {
     turn.messages.iter().any(|candidate| {
         candidate.message.message_type == MessageType::ToolUse
+            && tool_ids_allow_fallback(candidate, tool_result)
             && !turn.messages.iter().any(|existing| {
                 existing.message.message_type == MessageType::ToolResult
                     && ((existing.message.call_id.is_some()
@@ -172,13 +179,13 @@ fn build_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversati
                     turn.messages.push(item);
                 } else if let Some(turn) = current
                     .as_mut()
-                    .filter(|turn| turn_has_unmatched_tool_use(turn))
+                    .filter(|turn| turn_has_unmatched_tool_use(turn, &item))
                 {
                     turn.messages.push(item);
                 } else if let Some(turn) = turns
                     .iter_mut()
                     .rev()
-                    .find(|turn| turn_has_unmatched_tool_use(turn))
+                    .find(|turn| turn_has_unmatched_tool_use(turn, &item))
                 {
                     turn.messages.push(item);
                 } else if let Some(turn) = current.as_mut() {
@@ -259,13 +266,23 @@ fn pair_tool_messages(items: &[IndexedMessage]) -> Vec<ToolPair> {
                             tool_name.and_then(|tool_name| {
                                 pairs.iter().position(|pair| {
                                     pair.tool_result.is_none()
+                                        && pair.tool_use.as_ref().is_some_and(|tool_use| {
+                                            tool_ids_allow_fallback(tool_use, item)
+                                        })
                                         && pair.tool_use.as_ref().and_then(|message| {
                                             message.message.tool_name.as_deref()
                                         }) == Some(tool_name)
                                 })
                             })
                         })
-                        .or_else(|| pairs.iter().position(|pair| pair.tool_result.is_none()));
+                        .or_else(|| {
+                            pairs.iter().position(|pair| {
+                                pair.tool_result.is_none()
+                                    && pair.tool_use.as_ref().is_some_and(|tool_use| {
+                                        tool_ids_allow_fallback(tool_use, item)
+                                    })
+                            })
+                        });
                 if let Some(index) = matching_index {
                     pairs[index].tool_result = Some(item.clone());
                 } else {
@@ -2096,8 +2113,15 @@ fn render_assistant_group(
         .iter()
         .find_map(|item| item.message.model.clone())
         .unwrap_or_default();
-    let mut body = div().v_flex().gap_2().min_w_0().w_full();
+    let mut sections = Vec::new();
     for pair in pair_tool_messages(&items) {
+        let index = pair
+            .tool_use
+            .as_ref()
+            .or(pair.tool_result.as_ref())
+            .unwrap()
+            .index;
+        let mut body = div().v_flex().gap_2().min_w_0().w_full();
         if let Some(tool_use) = pair.tool_use.as_ref().filter(|item| {
             item.message
                 .reasoning_content
@@ -2139,12 +2163,17 @@ fn render_assistant_group(
                 cx,
             ));
         }
+        sections.push((index, body.into_any_element()));
     }
     for item in items
         .iter()
         .filter(|item| item.message.message_type == MessageType::Assistant)
     {
-        body = body
+        let body = div()
+            .v_flex()
+            .gap_2()
+            .min_w_0()
+            .w_full()
             .child(render_reasoning(
                 turn_index,
                 item,
@@ -2169,7 +2198,24 @@ fn render_assistant_group(
                     ))
                 },
             );
+        sections.push((item.index, body.into_any_element()));
     }
+    // Claude interleaves explanatory text with tool blocks in the same turn.
+    if options.provider == AppType::Claude {
+        sections.sort_by_key(|(index, _)| *index);
+    }
+    let body = div()
+        .v_flex()
+        .gap_2()
+        .min_w_0()
+        .w_full()
+        .children(sections.into_iter().map(|(index, element)| {
+            div()
+                .debug_selector(move || format!("assistant-section-{index}"))
+                .w_full()
+                .min_w_0()
+                .child(element)
+        }));
     div()
         .w_full()
         .flex()
@@ -2541,6 +2587,97 @@ mod tests {
                     .all(|message| message.message.call_id.as_deref() == Some(call_id))
             );
         }
+    }
+
+    #[test]
+    fn unmatched_explicit_ids_remain_orphans_but_missing_ids_can_pair() {
+        for result_name in ["Read", "Bash"] {
+            let items = vec![
+                tool_message(0, MessageType::ToolUse, "Read", "a"),
+                tool_message(1, MessageType::ToolResult, result_name, "b"),
+            ];
+            let pairs = pair_tool_messages(&items);
+            assert_eq!(pairs.len(), 2);
+            assert!(pairs[0].tool_result.is_none());
+            assert!(pairs[1].tool_use.is_none());
+            let messages = items
+                .into_iter()
+                .map(|item| item.message)
+                .collect::<Vec<_>>();
+            let turns = build_turns(&messages, AppType::Claude);
+            assert_eq!(turns.len(), 2);
+        }
+        for missing_use in [false, true] {
+            let mut items = vec![
+                tool_message(0, MessageType::ToolUse, "Read", "a"),
+                tool_message(1, MessageType::ToolResult, "Read", "b"),
+            ];
+            items[usize::from(!missing_use)].message.call_id = None;
+            assert_eq!(pair_tool_messages(&items).len(), 1);
+            let messages = items
+                .into_iter()
+                .map(|item| item.message)
+                .collect::<Vec<_>>();
+            assert_eq!(build_turns(&messages, AppType::Claude).len(), 1);
+        }
+    }
+
+    struct AssistantOrderTestView {
+        owner: gpui_kit::Entity<crate::app::YesSessions>,
+    }
+
+    impl gpui_kit::Render for AssistantOrderTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            let mut intro = tool_message(0, MessageType::Assistant, "", "");
+            intro.message.content = Some("First explain the plan".into());
+            let mut conclusion = tool_message(3, MessageType::Assistant, "", "");
+            conclusion.message.content = Some("Then explain the result".into());
+            super::render_assistant_group(
+                0,
+                vec![
+                    intro,
+                    tool_message(1, MessageType::ToolUse, "Read", "read"),
+                    tool_message(2, MessageType::ToolResult, "Read", "read"),
+                    conclusion,
+                ],
+                super::ConversationOptions {
+                    language: yes_core::Language::En,
+                    provider: AppType::Claude,
+                    show_thinking: false,
+                    chat_bubbles: false,
+                    collapse_tool_blocks: true,
+                },
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                &Default::default(),
+                self.owner.downgrade(),
+                cx,
+            )
+        }
+    }
+
+    #[gpui_kit::test]
+    fn claude_renders_text_before_and_after_its_tool(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(800.), px(600.)), |window, cx| {
+            let owner = cx.new(|cx| crate::app::YesSessions::new(window, cx));
+            AssistantOrderTestView { owner }
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let intro = visual.debug_bounds("assistant-section-0").unwrap();
+        let tool = visual.debug_bounds("assistant-section-1").unwrap();
+        let conclusion = visual.debug_bounds("assistant-section-3").unwrap();
+        assert!(intro.bottom() <= tool.top());
+        assert!(tool.bottom() <= conclusion.top());
+        assert!(visual.debug_bounds("assistant-section-2").is_none());
     }
 
     #[test]
