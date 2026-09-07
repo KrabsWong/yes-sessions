@@ -14,7 +14,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yes_core::mermaid::{ContentSegment, split_mermaid_blocks};
-use yes_core::{AppType, Language, MessageType, SessionDetail, SessionMessage};
+use yes_core::{AppType, Language, MessageType, SessionMessage};
 
 use crate::{app::YesSessions, app_assets::ProviderIcon, i18n::tr, mermaid::MermaidDiagram};
 
@@ -22,6 +22,7 @@ use crate::{app::YesSessions, app_assets::ProviderIcon, i18n::tr, mermaid::Merma
 pub struct ConversationOptions {
     pub language: Language,
     pub provider: AppType,
+    pub is_subagent: bool,
     pub show_thinking: bool,
     pub chat_bubbles: bool,
     pub collapse_tool_blocks: bool,
@@ -721,7 +722,7 @@ fn message_content(
     else {
         return div().into_any_element();
     };
-    message_content_text(&content, item.index, "body", 0, mermaid_views)
+    message_content_text(&content, item.index, "body", 0, mermaid_views, None)
 }
 
 fn message_content_text(
@@ -730,17 +731,30 @@ fn message_content_text(
     part: &str,
     diagram_start: usize,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
+    text_style: Option<gpui_kit::base::TextViewStyle>,
 ) -> AnyElement {
+    let markdown_view = |id: ElementId, markdown: String| -> AnyElement {
+        if let Some(style) = &text_style {
+            gpui_kit::base::TextView::markdown(id, markdown)
+                .style(style.clone())
+                .text_sm()
+                .text_size(px(15.))
+                .into_any_element()
+        } else {
+            conversation_markdown(id, markdown).into_any_element()
+        }
+    };
     let mut body = div().v_flex().gap_2().min_w_0().w_full().text_sm();
     let mut diagram_index = diagram_start;
     for segment in split_mermaid_blocks(content) {
         match segment {
             ContentSegment::Markdown(markdown) => {
-                body = body.child(conversation_markdown(
+                body = body.child(markdown_view(
                     (
                         ElementId::from(("message-content", message_index)),
                         format!("{part}-{diagram_index}"),
-                    ),
+                    )
+                        .into(),
                     markdown,
                 ));
             }
@@ -748,11 +762,12 @@ fn message_content_text(
                 if let Some(diagram) = mermaid_views.get(&(message_index, diagram_index)) {
                     body = body.child(diagram.clone());
                 } else {
-                    body = body.child(conversation_markdown(
+                    body = body.child(markdown_view(
                         (
                             ElementId::from(("mermaid-fallback", message_index)),
                             format!("{part}-{diagram_index}"),
-                        ),
+                        )
+                            .into(),
                         format!("```mermaid\n{source}\n```"),
                     ));
                 }
@@ -837,6 +852,7 @@ fn assistant_content(
                     &format!("xml-{index}"),
                     diagram_start,
                     mermaid_views,
+                    None,
                 ));
                 continue;
             }
@@ -1490,64 +1506,6 @@ fn subagent_string(
         .map(str::to_owned)
 }
 
-pub(crate) fn inline_subagent_scope_base(session_id: &str) -> usize {
-    10_000_000
-        + session_id.bytes().fold(0usize, |hash, byte| {
-            hash.wrapping_mul(31).wrapping_add(byte as usize)
-        }) % 1_000_000
-            * 1_000
-}
-
-fn render_inline_subagent(
-    detail: &SessionDetail,
-    outer_turn_index: usize,
-    options: ConversationOptions,
-    expanded: &HashSet<usize>,
-    expanded_conversations: &HashSet<String>,
-    inline_details: &HashMap<String, Arc<SessionDetail>>,
-    loading_inline: &HashSet<String>,
-    failed_inline: &HashSet<String>,
-    mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
-    owner: WeakEntity<YesSessions>,
-    cx: &App,
-) -> AnyElement {
-    let scope_base = inline_subagent_scope_base(&detail.session.id);
-    let mut turns = build_turns(&detail.messages, detail.session.app_type);
-    for turn in &mut turns {
-        for item in &mut turn.messages {
-            item.index = scope_base.saturating_add(item.index);
-        }
-    }
-    let inline_options = ConversationOptions {
-        provider: detail.session.app_type,
-        collapse_tool_blocks: false,
-        ..options
-    };
-    div()
-        .rounded_md()
-        .bg(cx.theme().background.opacity(0.72))
-        .p_3()
-        .v_flex()
-        .gap_4()
-        .children(turns.into_iter().enumerate().map(|(index, turn)| {
-            render_turn(
-                scope_base.saturating_add(index),
-                outer_turn_index,
-                turn,
-                inline_options,
-                expanded,
-                expanded_conversations,
-                inline_details,
-                loading_inline,
-                failed_inline,
-                mermaid_views,
-                owner.clone(),
-                cx,
-            )
-        }))
-        .into_any_element()
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_subagent(
     turn_index: usize,
@@ -1555,11 +1513,6 @@ fn render_subagent(
     tool_result: Option<&IndexedMessage>,
     options: ConversationOptions,
     expanded: &HashSet<usize>,
-    expanded_conversations: &HashSet<String>,
-    inline_details: &HashMap<String, Arc<SessionDetail>>,
-    loading_inline: &HashSet<String>,
-    failed_inline: &HashSet<String>,
-    mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
     owner: WeakEntity<YesSessions>,
     cx: &App,
 ) -> Option<AnyElement> {
@@ -1578,21 +1531,6 @@ fn render_subagent(
         .or_else(|| subagent_string(input, "prompt"))
         .or_else(|| subagent_string(input, "message"))
         .unwrap_or_else(|| tr(options.language, "sessions.subAgentDefaultDesc").to_owned());
-    let agent_type =
-        subagent_string(input, "subagent_type").or_else(|| subagent_string(input, "type"));
-    let model = subagent_string(input, "model")
-        .or_else(|| tool_use.and_then(|item| item.message.model.clone()))
-        .or_else(|| {
-            tool_result.and_then(|item| {
-                item.message
-                    .metadata
-                    .get("model")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_owned)
-            })
-        })
-        .or_else(|| tool_result.and_then(|item| item.message.model.clone()))
-        .filter(|model| model != "default");
     let child_id = tool_result
         .and_then(|item| item.message.sub_agent_session_id.clone())
         .or_else(|| {
@@ -1605,6 +1543,18 @@ fn render_subagent(
             })
         })
         .or_else(|| tool_use.and_then(|item| item.message.sub_agent_session_id.clone()));
+    let Some(child_id) = child_id else {
+        // Older or incomplete logs may only contain a tool result. Keep it readable.
+        return Some(render_tool(
+            turn_index,
+            tool_use,
+            tool_result,
+            options,
+            expanded,
+            owner,
+            cx,
+        ));
+    };
     let status = tool_result
         .and_then(|item| item.message.metadata.get("subtype"))
         .or_else(|| tool_use.and_then(|item| item.message.metadata.get("subtype")))
@@ -1685,128 +1635,35 @@ fn render_subagent(
             ),
         ),
     };
-    let timestamp = tool_use
-        .map(|item| item.message.timestamp.as_str())
-        .or_else(|| tool_result.map(|item| item.message.timestamp.as_str()))
-        .map(display_datetime)
-        .unwrap_or_default();
-    let output = tool_output_text(tool_result.map(|item| &item.message))
-        .or_else(|| tool_output_text(tool_use.map(|item| &item.message)))
-        .unwrap_or_default();
-    let output_lines = output.lines().collect::<Vec<_>>();
-    let total_output_lines = output_lines.len();
-    let should_collapse_output = total_output_lines > 20;
-    let message_index = item.index;
-    let output_expanded = expanded.contains(&message_index);
-    let display_output = if should_collapse_output && !output_expanded {
-        format!("{}\n\n...", output_lines[..20].join("\n"))
-    } else {
-        output.clone()
-    };
-    let conversation_expanded = child_id
-        .as_ref()
-        .is_some_and(|child_id| expanded_conversations.contains(child_id));
-    let inline_detail = child_id
-        .as_ref()
-        .and_then(|child_id| inline_details.get(child_id));
-    let is_loading = child_id
-        .as_ref()
-        .is_some_and(|child_id| loading_inline.contains(child_id));
-    let has_failed = child_id
-        .as_ref()
-        .is_some_and(|child_id| failed_inline.contains(child_id));
-    let purple = hsla(
-        271. / 360.,
-        0.78,
-        if cx.theme().mode.is_dark() {
-            0.72
-        } else {
-            0.52
-        },
-        1.,
-    );
-    let purple_border = hsla(
-        271. / 360.,
-        0.62,
-        if cx.theme().mode.is_dark() {
-            0.34
-        } else {
-            0.82
-        },
-        0.75,
-    );
-    let purple_surface = hsla(
-        271. / 360.,
-        0.58,
-        if cx.theme().mode.is_dark() {
-            0.16
-        } else {
-            0.97
-        },
-        0.82,
-    );
 
     Some(
         div()
+            .debug_selector(|| "subagent-summary".into())
+            .w_full()
+            .min_w_0()
             .rounded_lg()
             .border_1()
-            .border_color(purple_border)
-            .bg(purple_surface)
-            .overflow_hidden()
+            .border_color(cx.theme().list_active_border)
+            .bg(cx.theme().button)
+            .p_3()
+            .v_flex()
+            .gap_2()
             .child(
                 div()
-                    .px_3()
-                    .py_2()
                     .flex()
+                    .flex_wrap()
                     .items_center()
                     .gap_2()
-                    .border_b_1()
-                    .border_color(purple_border)
-                    .bg(purple_surface)
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(purple)
-                            .child(Icon::new(IconName::Bot).size(px(16.)).text_color(purple))
-                            .child(tr(options.language, "sessions.subAgent")),
+                        Icon::new(IconName::Bot)
+                            .size(px(16.))
+                            .text_color(cx.theme().muted_foreground),
                     )
-                    .when_some(agent_type, |view, agent_type| {
-                        view.child(
-                            div()
-                                .rounded_full()
-                                .bg(purple.opacity(0.13))
-                                .px_2()
-                                .py(px(2.))
-                                .text_size(px(11.))
-                                .text_color(purple)
-                                .child(agent_type),
-                        )
-                    })
-                    .when_some(model, |view, model| {
-                        view.child(
-                            div()
-                                .max_w(px(190.))
-                                .truncate()
-                                .rounded_full()
-                                .bg(cx.theme().primary.opacity(0.10))
-                                .px_2()
-                                .py(px(2.))
-                                .text_size(px(11.))
-                                .text_color(cx.theme().primary)
-                                .child(model),
-                        )
-                    })
                     .child(
                         div()
-                            .ml_auto()
-                            .flex_none()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child(timestamp),
+                            .text_sm()
+                            .text_color(cx.theme().foreground)
+                            .child(tr(options.language, "sessions.subAgent")),
                     )
                     .child(
                         div()
@@ -1819,198 +1676,35 @@ fn render_subagent(
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(status_fg)
                             .child(status_label),
+                    )
+                    .child(
+                        div()
+                            .debug_selector(|| "subagent-open-action".into())
+                            .ml_auto()
+                            .child(
+                                Button::new(("sub-agent-open", item.index))
+                                    .ghost()
+                                    .compact()
+                                    .h(px(26.))
+                                    .text_size(px(12.))
+                                    .text_color(cx.theme().foreground)
+                                    .icon(IconName::ArrowRight)
+                                    .label(tr(options.language, "sessions.viewSubAgentSession"))
+                                    .on_click(move |_, _, cx| {
+                                        let _ = owner.update(cx, |this, cx| {
+                                            this.open_sub_agent(&child_id, cx)
+                                        });
+                                    }),
+                            ),
                     ),
             )
             .child(
                 div()
-                    .p_3()
-                    .v_flex()
-                    .gap_3()
-                    .child(
-                        div()
-                            .v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_size(px(10.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(tr(options.language, "sessions.task")),
-                            )
-                            .child(div().text_sm().line_clamp(3).child(description)),
-                    )
-                    .when(tool_result.is_some() && !output.is_empty(), |view| {
-                        view.child(
-                            div()
-                                .border_t_1()
-                                .border_color(purple_border.opacity(0.65))
-                                .pt_3()
-                                .v_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .text_size(px(10.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(tr(options.language, "sessions.output")),
-                                )
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_w_0()
-                                        .rounded(px(4.))
-                                        .bg(cx.theme().muted.opacity(0.72))
-                                        .p_2()
-                                        .font_family(cx.theme().mono_font_family.clone())
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().foreground.opacity(0.78))
-                                        .whitespace_normal()
-                                        .child(display_output),
-                                )
-                                .when(should_collapse_output, |section| {
-                                    section.child(
-                                        Button::new(("sub-agent-output", message_index))
-                                            .text()
-                                            .compact()
-                                            .h(px(24.))
-                                            .text_size(px(11.))
-                                            .icon(if output_expanded {
-                                                IconName::ChevronUp
-                                            } else {
-                                                IconName::Maximize
-                                            })
-                                            .label(if output_expanded {
-                                                tr(options.language, "message.collapse").to_owned()
-                                            } else {
-                                                format!(
-                                                    "{} ({} {})",
-                                                    tr(options.language, "sessions.expandAll"),
-                                                    total_output_lines,
-                                                    tr(options.language, "sessions.lines")
-                                                )
-                                            })
-                                            .on_click({
-                                                let owner = owner.clone();
-                                                move |_, _, cx| {
-                                                    let _ = owner.update(cx, |this, cx| {
-                                                        this.toggle_message(
-                                                            message_index,
-                                                            turn_index,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                            }),
-                                    )
-                                }),
-                        )
-                    })
-                    .when_some(child_id.clone(), |view, child_id| {
-                        let inline_child_id = child_id.clone();
-                        let navigate_child_id = child_id.clone();
-                        let inline_owner = owner.clone();
-                        let navigate_owner = owner.clone();
-                        view.child(
-                            div()
-                                .grid()
-                                .grid_cols(2)
-                                .gap_2()
-                                .child(
-                                    Button::new(("sub-agent-inline", message_index))
-                                        .ghost()
-                                        .w_full()
-                                        .h(px(30.))
-                                        .bg(purple.opacity(0.10))
-                                        .text_size(px(11.))
-                                        .text_color(purple)
-                                        .icon(if conversation_expanded {
-                                            IconName::ChevronUp
-                                        } else {
-                                            IconName::ChevronDown
-                                        })
-                                        .label(if conversation_expanded {
-                                            tr(options.language, "sessions.collapseSubAgentSession")
-                                        } else {
-                                            tr(options.language, "sessions.expandSubAgentSession")
-                                        })
-                                        .on_click(move |_, _, cx| {
-                                            let _ = inline_owner.update(cx, |this, cx| {
-                                                this.toggle_inline_sub_agent(
-                                                    inline_child_id.clone(),
-                                                    turn_index,
-                                                    cx,
-                                                )
-                                            });
-                                        }),
-                                )
-                                .child(
-                                    Button::new(("sub-agent-open", message_index))
-                                        .ghost()
-                                        .w_full()
-                                        .h(px(30.))
-                                        .bg(cx.theme().muted.opacity(0.72))
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().primary)
-                                        .icon(IconName::ExternalLink)
-                                        .label(tr(options.language, "sessions.viewSubAgentSession"))
-                                        .on_click(move |_, _, cx| {
-                                            let _ = navigate_owner.update(cx, |this, cx| {
-                                                this.open_sub_agent(&navigate_child_id, cx)
-                                            });
-                                        }),
-                                ),
-                        )
-                    })
-                    .when(conversation_expanded, |view| {
-                        view.child(
-                            div()
-                                .border_t_1()
-                                .border_color(purple_border.opacity(0.65))
-                                .pt_3()
-                                .when(is_loading, |section| {
-                                    section.child(
-                                        div()
-                                            .h(px(54.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .gap_2()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(Icon::new(IconName::Loader).size(px(14.)))
-                                            .child(tr(
-                                                options.language,
-                                                "sessions.loadingConversation",
-                                            )),
-                                    )
-                                })
-                                .when(has_failed, |section| {
-                                    section.child(
-                                        div()
-                                            .h(px(54.))
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .text_size(px(11.))
-                                            .text_color(cx.theme().danger)
-                                            .child(tr(options.language, "sessions.error")),
-                                    )
-                                })
-                                .when_some(inline_detail, |section, detail| {
-                                    section.child(render_inline_subagent(
-                                        detail,
-                                        turn_index,
-                                        options,
-                                        expanded,
-                                        expanded_conversations,
-                                        inline_details,
-                                        loading_inline,
-                                        failed_inline,
-                                        mermaid_views,
-                                        owner.clone(),
-                                        cx,
-                                    ))
-                                }),
-                        )
-                    }),
+                    .w_full()
+                    .min_w_0()
+                    .text_sm()
+                    .line_clamp(2)
+                    .child(description),
             )
             .into_any_element(),
     )
@@ -2030,8 +1724,24 @@ fn render_user(
         .text_sm()
         .child(
             div()
-                .font_weight(FontWeight::MEDIUM)
-                .child(tr(options.language, "message.user")),
+                .flex_none()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(cx.theme().foreground)
+                .when(options.is_subagent, |view| {
+                    view.rounded(px(4.))
+                        .px_2()
+                        .py(px(2.))
+                        .bg(hsla(270. / 360., 0.67, 0.42, 1.))
+                        .text_color(rgb(0xffffff))
+                })
+                .child(tr(
+                    options.language,
+                    if options.is_subagent {
+                        "message.mainAgent"
+                    } else {
+                        "message.user"
+                    },
+                )),
         )
         .child(
             div()
@@ -2041,26 +1751,75 @@ fn render_user(
         );
     let bubble = div()
         .rounded_lg()
-        .bg(cx.theme().button)
+        .bg(if options.is_subagent {
+            cx.theme().button
+        } else {
+            cx.theme().primary
+        })
+        .text_color(if options.is_subagent {
+            cx.theme().foreground
+        } else {
+            cx.theme().primary_foreground
+        })
         .p_3()
         .text_sm()
         .when(options.chat_bubbles, |view| {
             view.border_1()
                 .border_color(cx.theme().primary.opacity(0.2))
         })
-        .child(message_content(item, mermaid_views));
+        .child(
+            if crate::large_message::needs_virtual_text(
+                item.message.content.as_deref().unwrap_or_default(),
+            ) {
+                crate::large_message::LargeMessage {
+                    id: item.index,
+                    source: item.message.content.clone().unwrap_or_default().into(),
+                    language: options.language,
+                }
+                .into_any_element()
+            } else if options.is_subagent {
+                message_content(item, mermaid_views)
+            } else {
+                let foreground = cx.theme().primary_foreground;
+                let style = gpui_kit::base::TextViewStyle::default()
+                    .with_foreground(foreground)
+                    .with_muted_foreground(foreground.opacity(0.85))
+                    .with_link(foreground)
+                    .with_border(foreground.opacity(0.3))
+                    .with_selection(foreground.opacity(0.25))
+                    .with_heading_base_font_size(px(15.))
+                    .with_code_background(cx.theme().muted)
+                    .with_code_block(StyleRefinement::default().text_color(cx.theme().foreground))
+                    .with_table_head(
+                        StyleRefinement::default()
+                            .bg(cx.theme().table_head)
+                            .text_color(cx.theme().table_head_foreground),
+                    )
+                    .with_inline_code(HighlightStyle {
+                        color: Some(foreground),
+                        background_color: Some(foreground.opacity(0.12)),
+                        font_weight: Some(FontWeight::BOLD),
+                        ..Default::default()
+                    })
+                    .with_dark(cx.theme().mode.is_dark());
+                message_content_text(
+                    item.message.content.as_deref().unwrap_or_default(),
+                    item.index,
+                    "body",
+                    0,
+                    mermaid_views,
+                    Some(style),
+                )
+            },
+        );
     let user_avatar = avatar(
-        IconName::User,
-        if options.chat_bubbles {
-            cx.theme().primary_foreground
+        if options.is_subagent {
+            Icon::new(ProviderIcon::from(options.provider))
         } else {
-            cx.theme().primary
+            Icon::new(IconName::User)
         },
-        if options.chat_bubbles {
-            cx.theme().primary
-        } else {
-            cx.theme().button
-        },
+        cx.theme().foreground,
+        cx.theme().button,
     );
     if options.chat_bubbles {
         div()
@@ -2097,10 +1856,6 @@ fn render_assistant_group(
     items: Vec<IndexedMessage>,
     options: ConversationOptions,
     expanded: &HashSet<usize>,
-    expanded_conversations: &HashSet<String>,
-    inline_details: &HashMap<String, Arc<SessionDetail>>,
-    loading_inline: &HashSet<String>,
-    failed_inline: &HashSet<String>,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
     owner: WeakEntity<YesSessions>,
     cx: &App,
@@ -2143,11 +1898,6 @@ fn render_assistant_group(
             pair.tool_result.as_ref(),
             options,
             expanded,
-            expanded_conversations,
-            inline_details,
-            loading_inline,
-            failed_inline,
-            mermaid_views,
             owner.clone(),
             cx,
         ) {
@@ -2273,10 +2023,6 @@ fn render_turn(
     turn: ConversationTurn,
     options: ConversationOptions,
     expanded: &HashSet<usize>,
-    expanded_conversations: &HashSet<String>,
-    inline_details: &HashMap<String, Arc<SessionDetail>>,
-    loading_inline: &HashSet<String>,
-    failed_inline: &HashSet<String>,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
     owner: WeakEntity<YesSessions>,
     cx: &App,
@@ -2317,10 +2063,6 @@ fn render_turn(
                 assistant,
                 options,
                 expanded,
-                expanded_conversations,
-                inline_details,
-                loading_inline,
-                failed_inline,
                 mermaid_views,
                 owner,
                 cx,
@@ -2334,14 +2076,23 @@ pub fn conversation_scroller(
     state: Entity<MessageScrollerState>,
     options: ConversationOptions,
     expanded: HashSet<usize>,
-    expanded_conversations: HashSet<String>,
-    inline_details: Arc<HashMap<String, Arc<SessionDetail>>>,
-    loading_inline: HashSet<String>,
-    failed_inline: HashSet<String>,
     mermaid_views: Arc<HashMap<(usize, usize), Entity<MermaidDiagram>>>,
     owner: WeakEntity<YesSessions>,
 ) -> MessageScroller {
     let turns = Arc::new(build_turns(&messages, options.provider));
+    let mut active_message = None;
+    let anchors = turns
+        .iter()
+        .map(|turn| {
+            for item in &turn.messages {
+                if crate::app::is_navigable_user_message(&item.message) {
+                    active_message = Some(item.index);
+                }
+            }
+            active_message
+        })
+        .collect::<Vec<_>>();
+    let scroll_state = state.clone();
     MessageScroller::new("conversation", state, move |index, _window, cx| {
         let Some(turn) = turns.get(index).cloned() else {
             return div().into_any_element();
@@ -2352,17 +2103,42 @@ pub fn conversation_scroller(
             turn,
             options,
             &expanded,
-            &expanded_conversations,
-            &inline_details,
-            &loading_inline,
-            &failed_inline,
             &mermaid_views,
             owner.clone(),
             cx,
         );
+        let anchor = anchors[index];
+        let anchor_owner = owner.clone();
+        let anchor_state = scroll_state.clone();
         div()
+            .relative()
             .w_full()
             .child(content)
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, cx| {
+                        let viewport = window.content_mask().bounds;
+                        let reading_edge = viewport.top() + px(12.);
+                        let active = bounds.top() <= reading_edge && bounds.bottom() > reading_edge;
+                        if active && bounds.intersects(&viewport) {
+                            if let Some(message_index) = anchor {
+                                cx.defer(move |cx| {
+                                    let _ = anchor_owner.update(cx, |this, cx| {
+                                        this.sync_navigator_message(
+                                            message_index,
+                                            &anchor_state,
+                                            cx,
+                                        );
+                                    });
+                                });
+                            }
+                        }
+                    },
+                )
+                .absolute()
+                .inset_0(),
+            )
             .when(index + 1 == turns.len(), |view| {
                 view.child(
                     div()
@@ -2647,14 +2423,11 @@ mod tests {
                 super::ConversationOptions {
                     language: yes_core::Language::En,
                     provider: AppType::Claude,
+                    is_subagent: false,
                     show_thinking: false,
                     chat_bubbles: false,
                     collapse_tool_blocks: true,
                 },
-                &Default::default(),
-                &Default::default(),
-                &Default::default(),
-                &Default::default(),
                 &Default::default(),
                 &Default::default(),
                 self.owner.downgrade(),
@@ -2678,6 +2451,72 @@ mod tests {
         assert!(intro.bottom() <= tool.top());
         assert!(tool.bottom() <= conclusion.top());
         assert!(visual.debug_bounds("assistant-section-2").is_none());
+    }
+
+    struct SubagentSummaryTestView {
+        owner: gpui_kit::Entity<crate::app::YesSessions>,
+        language: yes_core::Language,
+    }
+
+    impl gpui_kit::Render for SubagentSummaryTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::base::StyledExt as _;
+            use gpui_kit::{ParentElement as _, Styled as _};
+            let mut call = tool_message(0, MessageType::ToolUse, "Agent", "task");
+            call.message.sub_agent_session_id = Some("child".into());
+            call.message.tool_input = Some(serde_json::Map::from_iter([(
+                "description".into(),
+                serde_json::json!(
+                    "检查客户端与服务端的会话渲染实现 including_a_very_long_unbroken_identifier_that_should_not_cover_the_navigation_button"
+                ),
+            )]));
+            gpui_kit::div().size_full().v_flex().child(
+                super::render_subagent(
+                    0,
+                    Some(&call),
+                    None,
+                    super::ConversationOptions {
+                        language: self.language,
+                        provider: AppType::Claude,
+                        is_subagent: false,
+                        show_thinking: false,
+                        chat_bubbles: false,
+                        collapse_tool_blocks: true,
+                    },
+                    &Default::default(),
+                    self.owner.downgrade(),
+                    cx,
+                )
+                .unwrap(),
+            )
+        }
+    }
+
+    #[gpui_kit::test]
+    fn subagent_summary_keeps_navigation_visible_in_narrow_panels(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext as _, px, size};
+        cx.update(gpui_kit::init);
+        for language in [yes_core::Language::Zh, yes_core::Language::En] {
+            for width in [360., 900.] {
+                let window = cx.open_window(size(px(width), px(300.)), |window, cx| {
+                    let owner = cx.new(|cx| crate::app::YesSessions::new(window, cx));
+                    SubagentSummaryTestView { owner, language }
+                });
+                let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+                let summary = visual.debug_bounds("subagent-summary").unwrap();
+                let action = visual.debug_bounds("subagent-open-action").unwrap();
+                assert!(summary.size.height < px(150.));
+                assert!(action.left() >= summary.left());
+                assert!(action.right() <= summary.right());
+                assert!(action.bottom() <= summary.bottom());
+            }
+        }
     }
 
     #[test]

@@ -168,7 +168,7 @@ fn navigator_preview(text: &str, max_chars: usize) -> String {
     preview
 }
 
-fn is_navigable_user_message(message: &yes_core::SessionMessage) -> bool {
+pub(crate) fn is_navigable_user_message(message: &yes_core::SessionMessage) -> bool {
     message.message_type == yes_core::MessageType::User
         && message
             .content
@@ -331,13 +331,24 @@ fn append_session_tree(
 use crate::{
     app_assets::ProviderIcon,
     conversation::{
-        ConversationOptions, conversation_scroller, conversation_turn_count,
-        inline_subagent_scope_base, turn_index_for_message,
+        ConversationOptions, conversation_scroller, conversation_turn_count, turn_index_for_message,
     },
     i18n::tr,
     mermaid::{MermaidDiagram, create_mermaid_diagram},
     preview::WorkspacePreview,
 };
+
+// Keep the virtual list itself, including the offset within a message, while visiting children.
+struct ParentConversation {
+    session_id: String,
+    detail: Arc<SessionDetail>,
+    scroll: Entity<MessageScrollerState>,
+    expanded_messages: HashSet<usize>,
+    claude_xml_expanded: HashMap<(usize, usize), bool>,
+    unread: usize,
+    active_message: Option<usize>,
+    source_signature: Option<DetailSourceSignature>,
+}
 
 pub struct YesSessions {
     registry: Arc<ProviderRegistry>,
@@ -348,6 +359,7 @@ pub struct YesSessions {
     selected_session_id: Option<String>,
     detail: Option<Arc<SessionDetail>>,
     conversation_state: Entity<MessageScrollerState>,
+    parent_conversations: Vec<ParentConversation>,
     unread_message_count: usize,
     loading_sessions: bool,
     refreshing_sessions: bool,
@@ -365,10 +377,6 @@ pub struct YesSessions {
     parent_transition: Option<(String, Instant, bool)>,
     expanded_messages: HashSet<usize>,
     pub(crate) claude_xml_expanded: HashMap<(usize, usize), bool>,
-    expanded_subagent_conversations: HashSet<String>,
-    inline_subagent_details: HashMap<String, Arc<SessionDetail>>,
-    loading_inline_subagents: HashSet<String>,
-    failed_inline_subagents: HashSet<String>,
     marquee_session_id: Option<String>,
     sidebar_icon_transition: Option<(Instant, f32)>,
     stats_hovered: bool,
@@ -403,6 +411,7 @@ impl YesSessions {
             selected_session_id: None,
             detail: None,
             conversation_state: cx.new(|cx| MessageScrollerState::new(0, cx)),
+            parent_conversations: Vec::new(),
             unread_message_count: 0,
             loading_sessions: false,
             refreshing_sessions: false,
@@ -420,10 +429,6 @@ impl YesSessions {
             parent_transition: None,
             expanded_messages: HashSet::new(),
             claude_xml_expanded: HashMap::new(),
-            expanded_subagent_conversations: HashSet::new(),
-            inline_subagent_details: HashMap::new(),
-            loading_inline_subagents: HashSet::new(),
-            failed_inline_subagents: HashSet::new(),
             marquee_session_id: None,
             sidebar_icon_transition: None,
             stats_hovered: false,
@@ -457,8 +462,36 @@ impl YesSessions {
             }
         })
         .detach();
+        this.observe_conversation_scroll(cx);
+        crate::commands::update_menus(this.settings.language, cx);
+        this.load_sessions(cx);
+        this.start_live_refresh(cx);
+        this
+    }
+
+    pub(crate) fn sync_navigator_message(
+        &mut self,
+        message_index: usize,
+        state: &Entity<MessageScrollerState>,
+        cx: &mut Context<Self>,
+    ) {
+        if state != &self.conversation_state || self.navigator_active_message == Some(message_index)
+        {
+            return;
+        }
+        self.navigator_active_message = Some(message_index);
+        if self.navigator_focus.is_none() {
+            self.navigator_start = None;
+        }
+        cx.notify();
+    }
+
+    fn observe_conversation_scroll(&mut self, cx: &mut Context<Self>) {
         let mut was_scrolled_up = false;
-        cx.observe(&this.conversation_state, move |this, state, cx| {
+        cx.observe(&self.conversation_state, move |this, state, cx| {
+            if state != this.conversation_state {
+                return;
+            }
             let state = state.read(cx);
             let scrolled_up = state.is_scrolled_up();
             let clear_unread = this.unread_message_count > 0 && state.is_following_tail();
@@ -471,10 +504,6 @@ impl YesSessions {
             }
         })
         .detach();
-        crate::commands::update_menus(this.settings.language, cx);
-        this.load_sessions(cx);
-        this.start_live_refresh(cx);
-        this
     }
 
     fn apply_theme(preference: ThemePreference, window: &mut Window, cx: &mut App) {
@@ -759,6 +788,7 @@ impl YesSessions {
     }
 
     fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        self.parent_conversations.clear();
         self.unread_message_count = 0;
         self.sessions_generation += 1;
         self.detail_generation += 1;
@@ -776,10 +806,6 @@ impl YesSessions {
         self.preview_open = false;
         self.preview_icon_transition = None;
         self.mermaid_views.clear();
-        self.expanded_subagent_conversations.clear();
-        self.inline_subagent_details.clear();
-        self.loading_inline_subagents.clear();
-        self.failed_inline_subagents.clear();
         self.selected_session_id = None;
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
@@ -885,10 +911,6 @@ impl YesSessions {
         self.preview_icon_transition = None;
         self.expanded_messages.clear();
         self.claude_xml_expanded.clear();
-        self.expanded_subagent_conversations.clear();
-        self.inline_subagent_details.clear();
-        self.loading_inline_subagents.clear();
-        self.failed_inline_subagents.clear();
         self.navigator_active_message = None;
         self.navigator_focus = None;
         self.navigator_previous_focus = None;
@@ -901,6 +923,24 @@ impl YesSessions {
     }
 
     fn select_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let ancestors = ancestor_session_ids(&self.sessions, &session_id);
+        if self
+            .parent_conversations
+            .iter()
+            .any(|saved| saved.session_id == session_id || ancestors.contains(&saved.session_id))
+            || self
+                .detail
+                .as_ref()
+                .is_some_and(|detail| ancestors.contains(&detail.session.id))
+        {
+            self.open_sub_agent(&session_id, cx);
+            return;
+        }
+        self.parent_conversations.clear();
+        self.load_session(session_id, cx);
+    }
+
+    fn load_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         let ancestors = ancestor_session_ids(&self.sessions, &session_id);
         for parent_id in &ancestors {
             self.expanded_parents.insert(parent_id.clone());
@@ -1065,7 +1105,58 @@ impl YesSessions {
             .find(|session| session.id == session_id || session.uuid.as_deref() == Some(session_id))
             .map(|session| session.id.clone())
             .unwrap_or_else(|| session_id.to_owned());
-        self.select_session(id, cx);
+        if self.selected_session_id.as_deref() == Some(&id) {
+            return;
+        }
+        if let Some(index) = self
+            .parent_conversations
+            .iter()
+            .rposition(|saved| saved.session_id == id)
+        {
+            let saved = self.parent_conversations.remove(index);
+            self.parent_conversations.truncate(index);
+            self.reset_detail(cx);
+            self.selected_session_id = Some(saved.session_id);
+            self.detail = Some(saved.detail);
+            self.conversation_state = saved.scroll;
+            self.expanded_messages = saved.expanded_messages;
+            self.claude_xml_expanded = saved.claude_xml_expanded;
+            self.unread_message_count = saved.unread;
+            self.navigator_active_message = saved.active_message;
+            self.detail_source_signature = saved.source_signature;
+            // Refresh changed content through the normal anchor-preserving update path.
+            self.refresh_selected_detail(cx);
+            cx.notify();
+            return;
+        }
+        let ancestors = ancestor_session_ids(&self.sessions, &id);
+        if let Some(detail) = self
+            .detail
+            .as_ref()
+            .filter(|detail| ancestors.contains(&detail.session.id))
+        {
+            self.parent_conversations.push(ParentConversation {
+                session_id: detail.session.id.clone(),
+                detail: detail.clone(),
+                scroll: self.conversation_state.clone(),
+                expanded_messages: self.expanded_messages.clone(),
+                claude_xml_expanded: self.claude_xml_expanded.clone(),
+                unread: self.unread_message_count,
+                active_message: self.navigator_active_message,
+                source_signature: self.detail_source_signature.clone(),
+            });
+            self.conversation_state = cx.new(|cx| MessageScrollerState::new(0, cx));
+            self.observe_conversation_scroll(cx);
+            self.load_session(id, cx);
+        } else {
+            let retained = self
+                .parent_conversations
+                .iter()
+                .rposition(|saved| ancestors.contains(&saved.session_id))
+                .map_or(0, |index| index + 1);
+            self.parent_conversations.truncate(retained);
+            self.load_session(id, cx);
+        }
     }
 
     pub(crate) fn toggle_claude_xml(
@@ -1099,74 +1190,6 @@ impl YesSessions {
             let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
         });
         cx.notify();
-    }
-
-    pub fn toggle_inline_sub_agent(
-        &mut self,
-        session_id: String,
-        turn_index: usize,
-        cx: &mut Context<Self>,
-    ) {
-        if !self
-            .expanded_subagent_conversations
-            .insert(session_id.clone())
-        {
-            self.expanded_subagent_conversations.remove(&session_id);
-            self.conversation_state.update(cx, |state, cx| {
-                let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
-            });
-            cx.notify();
-            return;
-        }
-
-        self.conversation_state.update(cx, |state, cx| {
-            let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
-        });
-        cx.notify();
-
-        if self.inline_subagent_details.contains_key(&session_id)
-            || !self.loading_inline_subagents.insert(session_id.clone())
-        {
-            return;
-        }
-        self.failed_inline_subagents.remove(&session_id);
-        let Some(provider) = self.registry.get(self.selected_app) else {
-            self.loading_inline_subagents.remove(&session_id);
-            self.failed_inline_subagents.insert(session_id);
-            return;
-        };
-        let generation = self.detail_generation;
-        let requested_session_id = session_id.clone();
-        let task = cx.background_executor().spawn(async move {
-            provider
-                .session_detail(&requested_session_id)
-                .map_err(|error| error.to_string())
-        });
-        cx.spawn(async move |this, cx| {
-            let result = task.await;
-            let Some(this) = this.upgrade() else { return };
-            this.update(cx, |this, cx| {
-                if this.detail_generation != generation {
-                    return;
-                }
-                this.loading_inline_subagents.remove(&session_id);
-                match result {
-                    Ok(Some(detail)) => {
-                        this.failed_inline_subagents.remove(&session_id);
-                        this.inline_subagent_details
-                            .insert(session_id.clone(), Arc::new(detail));
-                    }
-                    Ok(None) | Err(_) => {
-                        this.failed_inline_subagents.insert(session_id.clone());
-                    }
-                }
-                this.conversation_state.update(cx, |state, cx| {
-                    let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
-                });
-                cx.notify();
-            });
-        })
-        .detach();
     }
 
     fn toggle_settings(&mut self, cx: &mut Context<Self>) {
@@ -2263,13 +2286,6 @@ impl YesSessions {
         let dark = cx.theme().mode == ThemeMode::Dark;
         let mut sources = Vec::new();
         collect_mermaid_sources(&detail.messages, 0, &mut sources);
-        for inline_detail in self.inline_subagent_details.values() {
-            collect_mermaid_sources(
-                &inline_detail.messages,
-                inline_subagent_scope_base(&inline_detail.session.id),
-                &mut sources,
-            );
-        }
         for (key, source) in sources {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.mermaid_views.entry(key)
             {
@@ -2331,6 +2347,17 @@ impl YesSessions {
         });
         let progress = 1. - (1. - progress).powi(3);
         let language = self.settings.language;
+        let sender_label =
+            tr(
+                language,
+                if self.detail.as_ref().is_some_and(|detail| {
+                    detail.session.kind == yes_core::model::SessionKind::Subagent
+                }) {
+                    "message.mainAgent"
+                } else {
+                    "message.user"
+                },
+            );
         let mut rail = div()
             .id("user-message-navigator")
             .debug_selector(|| "user-message-navigator".into())
@@ -2395,11 +2422,7 @@ impl YesSessions {
                             .h(px(10.))
                             .p_0()
                             .justify_end()
-                            .accessibility_label(format!(
-                                "{} {}",
-                                tr(language, "message.user"),
-                                position + 1
-                            ))
+                            .accessibility_label(format!("{} {}", sender_label, position + 1))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.navigator_active_message = Some(message_index);
                                 this.conversation_state.update(cx, |state, cx| {
@@ -2513,12 +2536,7 @@ impl YesSessions {
                             .mt_2()
                             .text_size(px(10.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!(
-                                "{} · {} / {}",
-                                tr(language, "message.user"),
-                                position + 1,
-                                total
-                            )),
+                            .child(format!("{} · {} / {}", sender_label, position + 1, total)),
                     ),
             );
         }
@@ -2676,15 +2694,12 @@ impl YesSessions {
             ConversationOptions {
                 language,
                 provider: self.selected_app,
+                is_subagent: detail.session.kind == yes_core::model::SessionKind::Subagent,
                 show_thinking: self.settings.show_thinking_content,
                 chat_bubbles: self.settings.chat_layout == ChatLayout::Bubble,
                 collapse_tool_blocks: self.settings.collapse_bash_blocks,
             },
             self.expanded_messages.clone(),
-            self.expanded_subagent_conversations.clone(),
-            Arc::new(self.inline_subagent_details.clone()),
-            self.loading_inline_subagents.clone(),
-            self.failed_inline_subagents.clone(),
             mermaid_views,
             cx.weak_entity(),
         );
@@ -3917,13 +3932,91 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use super::{
-        ancestor_session_ids, collect_mermaid_sources, detail_source_signature,
-        directory_group_labels, format_count, mermaid_sources_changed, navigator_preview,
-        navigator_window, selection_after_refresh, session_directory_group_key,
-        unread_after_refresh, update_conversation_scroll,
+        ancestor_session_ids, detail_source_signature, directory_group_labels, format_count,
+        mermaid_sources_changed, navigator_preview, navigator_window, selection_after_refresh,
+        session_directory_group_key, unread_after_refresh, update_conversation_scroll,
     };
-    use crate::conversation::inline_subagent_scope_base;
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
+
+    #[gpui_kit::test]
+    fn returning_from_nested_subagents_restores_parent_scroll_and_expansion(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{px, size};
+        use std::sync::Arc;
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(800.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.selected_app = AppType::Claude;
+            let parent = session("parent", None);
+            let child = session("child", Some("parent"));
+            let grandchild = session("grandchild", Some("child"));
+            app.sessions = Arc::new(vec![
+                parent.clone(),
+                child.clone(),
+                grandchild,
+                session("sibling", Some("parent")),
+            ]);
+            app.selected_session_id = Some(parent.id.clone());
+            let parent_detail = Arc::new(yes_core::SessionDetail {
+                session: parent,
+                messages: Vec::new(),
+            });
+            app.detail = Some(parent_detail.clone());
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(50, cx);
+                state.scroll_to_item(23, cx);
+            });
+            let parent_scroll = app.conversation_state.clone();
+            app.expanded_messages.insert(23);
+            app.claude_xml_expanded.insert((23, 1), true);
+            app.navigator_active_message = Some(23);
+            app.unread_message_count = 4;
+            app.select_session("child".into(), cx);
+            assert_ne!(app.conversation_state, parent_scroll);
+            assert_eq!(parent_scroll.read(cx).item_count(), 50);
+            assert!(!parent_scroll.read(cx).is_following_tail());
+            assert_eq!(app.parent_conversations.len(), 1);
+            // Supply child content before the asynchronous load returns.
+            app.detail = Some(Arc::new(yes_core::SessionDetail {
+                session: child,
+                messages: Vec::new(),
+            }));
+            app.loading_detail = false;
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(12, cx);
+                state.scroll_to_item(7, cx);
+            });
+            let child_scroll = app.conversation_state.clone();
+            app.expanded_messages.insert(7);
+            app.open_sub_agent("grandchild", cx);
+            assert_eq!(app.parent_conversations.len(), 2);
+            app.open_sub_agent("child", cx);
+            assert_eq!(app.conversation_state, child_scroll);
+            assert_eq!(app.conversation_state.read(cx).item_count(), 12);
+            assert!(app.expanded_messages.contains(&7));
+            app.select_session("sibling".into(), cx);
+            assert_eq!(app.parent_conversations.len(), 1);
+            assert_eq!(app.parent_conversations[0].scroll, parent_scroll);
+            app.open_sub_agent("parent", cx);
+            assert_eq!(app.conversation_state, parent_scroll);
+            assert!(Arc::ptr_eq(app.detail.as_ref().unwrap(), &parent_detail));
+            assert!(!app.loading_detail);
+            assert!(app.parent_conversations.is_empty());
+            assert_eq!(app.expanded_messages, std::collections::HashSet::from([23]));
+            assert_eq!(app.claude_xml_expanded.get(&(23, 1)), Some(&true));
+            assert_eq!(app.navigator_active_message, Some(23));
+            assert_eq!(app.unread_message_count, 4);
+            app.open_sub_agent("child", cx);
+            app.select_session("unrelated".into(), cx);
+            assert!(app.parent_conversations.is_empty());
+            // Invalidate outstanding fixture loads; they must not overwrite the restored state.
+            app.detail_generation += 1;
+        });
+    }
 
     #[gpui_kit::test]
     fn claude_xml_cards_expand_and_collapse_in_message(cx: &mut gpui_kit::TestAppContext) {
@@ -4082,6 +4175,37 @@ mod tests {
         );
         visual.simulate_mouse_move(point(px(10.), px(100.)), None, Default::default());
         assert!(visual.debug_bounds("navigator-preview-card").is_none());
+        app.update(cx, |app, cx| {
+            app.conversation_state.update(cx, |state, cx| {
+                state.scroll_to_item(20, cx);
+            });
+            cx.notify();
+        });
+        visual.run_until_parked();
+        assert_eq!(
+            app.read_with(cx, |app, _| app.navigator_active_message),
+            Some(40)
+        );
+        app.update(cx, |app, cx| {
+            app.conversation_state.update(cx, |state, cx| {
+                state.scroll_to_item(5, cx);
+            });
+            cx.notify();
+        });
+        visual.run_until_parked();
+        assert_eq!(
+            app.read_with(cx, |app, _| app.navigator_active_message),
+            Some(10)
+        );
+        visual.simulate_event(ScrollWheelEvent {
+            position: point(px(400.), px(400.)),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-600.))),
+            modifiers: Default::default(),
+            touch_phase: TouchPhase::Started,
+        });
+        visual.run_until_parked();
+        assert!(app.read_with(cx, |app, _| app.navigator_active_message.unwrap()) > 10);
+
         app.update(cx, |app, cx| {
             app.reset_detail(cx);
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
@@ -4451,21 +4575,6 @@ mod tests {
         assert_eq!(navigator_window(20, 0, 8), 0..8);
         assert_eq!(navigator_window(20, 10, 8), 6..14);
         assert_eq!(navigator_window(20, 19, 8), 12..20);
-    }
-
-    #[test]
-    fn inline_mermaid_sources_use_the_subagent_message_scope() {
-        let messages = vec![SessionMessage::text(
-            MessageType::Assistant,
-            "2026-09-05T00:00:00Z",
-            "```mermaid\ngraph TD\nA --> B\n```",
-        )];
-        let scope = inline_subagent_scope_base("child-session");
-        let mut sources = Vec::new();
-
-        collect_mermaid_sources(&messages, scope, &mut sources);
-
-        assert_eq!(sources, vec![((scope, 0), "graph TD\nA --> B".into())]);
     }
 
     #[test]

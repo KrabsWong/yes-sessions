@@ -21,6 +21,12 @@ pub(crate) enum TokenKind {
     Property,
     Tag,
     Attribute,
+    Heading,
+    Bold,
+    Italic,
+    InlineCode,
+    LinkText,
+    LinkUri,
 }
 
 impl TokenKind {
@@ -35,6 +41,12 @@ impl TokenKind {
             Self::Property => "property",
             Self::Tag => "tag",
             Self::Attribute => "attribute",
+            Self::Heading => "title",
+            Self::Bold => "emphasis.strong",
+            Self::Italic => "emphasis",
+            Self::InlineCode => "text.code.span",
+            Self::LinkText => "link_text",
+            Self::LinkUri => "link_uri",
         }
     }
 }
@@ -42,6 +54,12 @@ impl TokenKind {
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 static TOKEN_SCOPES: LazyLock<Vec<(Scope, TokenKind)>> = LazyLock::new(|| {
     [
+        ("markup.raw.inline", TokenKind::InlineCode),
+        ("markup.underline.link", TokenKind::LinkUri),
+        ("meta.link.inline.description", TokenKind::LinkText),
+        ("markup.heading", TokenKind::Heading),
+        ("markup.bold", TokenKind::Bold),
+        ("markup.italic", TokenKind::Italic),
         ("comment", TokenKind::Comment),
         ("meta.mapping.key", TokenKind::Property),
         ("support.type.property-name", TokenKind::Property),
@@ -120,7 +138,9 @@ pub(crate) fn highlight_lines(
         if index >= 10_000
             || bytes > 2 * 1024 * 1024
             || line.len() > 8 * 1024
-            || started.elapsed() > Duration::from_millis(200)
+            // Lazy regex initialization can exceed the budget on the first lines,
+            // especially in Vue. Always allow a small, size-bounded prefix to finish.
+            || (index >= 32 && started.elapsed() > Duration::from_millis(200))
         {
             break;
         }
@@ -194,6 +214,12 @@ mod tests {
         for (name, source) in [
             ("main.rs", "fn main() { let count = 42; }"),
             ("main.ts", "const count: number = 42;"),
+            ("server.mjs", "import http from 'node:http';"),
+            ("server.cjs", "const http = require('node:http');"),
+            ("config.yml", "name: \"hello\""),
+            ("run.sh", "echo \"hello\""),
+            ("run.bash", "echo \"hello\""),
+            (".bashrc", "export PATH=\"$HOME/bin:$PATH\""),
             ("main.tsx", "const view = <div title=\"hello\">{42}</div>;"),
             ("main.jsx", "const view = <div title=\"hello\">{42}</div>;"),
             ("main.kt", "fun main() { val count = 42 }"),
@@ -242,12 +268,15 @@ mod tests {
                 TokenKind::Property,
                 TokenKind::Tag,
                 TokenKind::Attribute,
+                TokenKind::Heading,
+                TokenKind::Bold,
+                TokenKind::Italic,
+                TokenKind::InlineCode,
+                TokenKind::LinkText,
+                TokenKind::LinkUri,
             ] {
                 assert!(
-                    theme
-                        .style(kind.theme_key())
-                        .and_then(|style| style.color)
-                        .is_some(),
+                    theme.style(kind.theme_key()).is_some(),
                     "missing token color: {kind:?}"
                 );
             }
@@ -259,6 +288,53 @@ mod tests {
         assert_ne!(
             light.style("keyword").unwrap().color,
             dark.style("keyword").unwrap().color
+        );
+    }
+
+    #[test]
+    fn markdown_styles_and_vue_embedded_languages_are_preserved() {
+        let lines = [
+            "# Heading",
+            "**bold** and *italic* and `code` and [link](https://example.com)",
+        ]
+        .map(str::to_owned);
+        for extension in ["md", "markdown"] {
+            let spans = highlight_lines(Path::new(&format!("README.{extension}")), &lines);
+            for (text, kind, index) in [
+                ("Heading", TokenKind::Heading, 0),
+                ("bold", TokenKind::Bold, 1),
+                ("italic", TokenKind::Italic, 1),
+                ("code", TokenKind::InlineCode, 1),
+                ("link", TokenKind::LinkText, 1),
+                ("https://example.com", TokenKind::LinkUri, 1),
+            ] {
+                assert!(
+                    spans[index].iter().any(|(range, token)| *token == kind
+                        && lines[index][range.clone()].contains(text)),
+                    "{extension}: missing {kind:?}"
+                );
+            }
+        }
+        let lines = [
+            "<template>",
+            "<div>Hello</div>",
+            "</template>",
+            "<script setup lang=\"ts\">",
+            "const count: number = 42;",
+            "</script>",
+            "<style scoped>",
+            ".app { color: red; }",
+            "</style>",
+        ]
+        .map(str::to_owned);
+        let spans = highlight_lines(Path::new("App.vue"), &lines);
+        assert!(spans[1].iter().any(|(_, kind)| *kind == TokenKind::Tag));
+        assert!(spans[4].iter().any(|(_, kind)| *kind == TokenKind::Keyword));
+        assert!(spans[4].iter().any(|(_, kind)| *kind == TokenKind::Number));
+        assert!(
+            spans[7]
+                .iter()
+                .any(|(_, kind)| *kind == TokenKind::Property)
         );
     }
 

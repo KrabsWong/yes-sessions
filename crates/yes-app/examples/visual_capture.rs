@@ -36,17 +36,14 @@ fn main() -> Result<()> {
         Theme::change(ThemeMode::Light, None, cx);
     });
 
-    let mut app_handle = None;
     let window = cx
         .open_offscreen_window(size(px(WINDOW_WIDTH), px(WINDOW_HEIGHT)), |window, cx| {
             Theme::change(ThemeMode::Light, Some(window), cx);
             let app = cx.new(|cx| YesSessions::new(window, cx));
-            app_handle = Some(app.clone());
             cx.new(|cx| Root::new(app, window, cx))
         })
         .context("open offscreen Yes Sessions window")?;
     let window = AnyWindowHandle::from(window);
-    let app = app_handle.context("capture Yes Sessions entity")?;
 
     settle(&mut cx, window)?;
     save_capture(&mut cx, window, output_dir.join("main-light.png"))?;
@@ -235,15 +232,6 @@ fn main() -> Result<()> {
         &mut cx,
         window,
         output_dir.join("subagent-card-actions-light.png"),
-    )?;
-    cx.update_entity(&app, |app, cx| {
-        app.toggle_inline_sub_agent("visual-child".to_owned(), 4, cx);
-    });
-    settle(&mut cx, window)?;
-    save_capture(
-        &mut cx,
-        window,
-        output_dir.join("subagent-inline-light.png"),
     )?;
     cx.simulate_event(
         window,
