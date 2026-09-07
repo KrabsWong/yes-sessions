@@ -47,13 +47,19 @@ struct CodeRow {
     kind: char,
     syntax: Vec<(Range<usize>, TokenKind)>,
     old_syntax: Vec<(Range<usize>, TokenKind)>,
+    changed: Option<Range<usize>>,
+    folded: Option<Range<usize>>,
 }
 
 pub struct WorkspacePreview {
     root: PathBuf,
     change_count: Option<usize>,
     changes: Vec<Change>,
+    branch: Option<String>,
     count_generation: u64,
+    changes_loaded: bool,
+    changes_loading: bool,
+    changes_error: Option<String>,
     search_generation: u64,
     last_scope: Option<ChangeScope>,
     language: Language,
@@ -71,6 +77,8 @@ pub struct WorkspacePreview {
     change_collapsed: HashSet<(ChangeScope, PathBuf)>,
     selected: Option<(PathBuf, Option<ChangeScope>)>,
     code: Vec<CodeRow>,
+    full_code: Vec<CodeRow>,
+    expanded_context: HashSet<usize>,
     split_rows: Vec<(Option<usize>, Option<usize>)>,
     code_width: f32,
     diff_stats: (usize, usize),
@@ -89,6 +97,7 @@ pub struct WorkspacePreview {
     content_error: Option<String>,
     list_generation: u64,
     content_generation: u64,
+    highlight_generation: u64,
     scroll: UniformListScrollHandle,
     list_scroll: UniformListScrollHandle,
     horizontal_scroll: ScrollHandle,
@@ -126,7 +135,11 @@ impl WorkspacePreview {
             root,
             change_count: None,
             changes: vec![],
+            branch: None,
             count_generation: 0,
+            changes_loaded: false,
+            changes_loading: false,
+            changes_error: None,
             search_generation: 0,
             last_scope: None,
             language,
@@ -144,6 +157,8 @@ impl WorkspacePreview {
             change_collapsed: HashSet::new(),
             selected: None,
             code: vec![],
+            full_code: vec![],
+            expanded_context: HashSet::new(),
             split_rows: vec![],
             code_width: 128.,
             diff_stats: (0, 0),
@@ -162,6 +177,7 @@ impl WorkspacePreview {
             content_error: None,
             list_generation: 0,
             content_generation: 0,
+            highlight_generation: 0,
             scroll: UniformListScrollHandle::new(),
             list_scroll: UniformListScrollHandle::new(),
             horizontal_scroll: ScrollHandle::new(),
@@ -214,25 +230,42 @@ impl WorkspacePreview {
     }
 
     fn load_count(&mut self, cx: &mut Context<Self>) {
+        if self.changes_loaded || self.changes_loading {
+            return;
+        }
+        self.changes_loading = true;
         self.count_generation += 1;
         let generation = self.count_generation;
         self.change_count = None;
         let root = self.root.clone();
-        let task = cx
-            .background_executor()
-            .spawn(async move { workspace::changes(&root).ok() });
+        let task = cx.background_executor().spawn(async move {
+            (
+                workspace::changes(&root).map_err(|error| error.to_string()),
+                workspace::branch_name(&root).ok(),
+            )
+        });
         cx.spawn(async move |this, cx| {
-            let count = task.await;
+            let (count, branch) = task.await;
             let _ = this.update(cx, |this, cx| {
                 if generation == this.count_generation {
-                    this.change_count = count.as_ref().map(|changes| {
+                    this.changes_loaded = true;
+                    this.changes_loading = false;
+                    this.change_count = count.as_ref().ok().map(|changes| {
                         changes
                             .iter()
                             .map(|change| &change.path)
                             .collect::<std::collections::HashSet<_>>()
                             .len()
                     });
+                    let error = count.as_ref().err().cloned();
+                    this.changes_error = error.clone();
                     this.changes = count.unwrap_or_default();
+                    this.branch = branch;
+                    if this.tab == PreviewTab::Changes {
+                        this.loading_list = false;
+                        this.rebuild_changes(cx);
+                        this.list_error = error;
+                    }
                     cx.notify();
                 }
             });
@@ -279,10 +312,38 @@ impl WorkspacePreview {
         }
     }
 
+    fn rebuild_changes(&mut self, cx: &App) {
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        self.change_files = self
+            .changes
+            .iter()
+            .filter(|entry| entry.path.to_string_lossy().to_lowercase().contains(&query))
+            .map(|entry| FileRow {
+                header: false,
+                depth: 0,
+                path: entry.path.clone(),
+                directory: false,
+                ignored: false,
+                scope: Some(entry.scope),
+                status: entry.status.clone(),
+                stats: entry.additions.zip(entry.deletions),
+            })
+            .collect();
+        self.rows = change_tree_rows(&self.change_files, &self.change_collapsed);
+    }
+
     fn load_list(&mut self, cx: &mut Context<Self>) {
         self.list_started = true;
         self.list_generation += 1;
         let generation = self.list_generation;
+        if self.tab == PreviewTab::Changes {
+            self.loading_list = !self.changes_loaded;
+            self.list_error = self.changes_error.clone();
+            self.rebuild_changes(cx);
+            self.load_count(cx);
+            cx.notify();
+            return;
+        }
         if self.tab == PreviewTab::Files && self.search.read(cx).value().trim().is_empty() {
             self.list_error = None;
             self.rebuild_tree();
@@ -294,32 +355,8 @@ impl WorkspacePreview {
         self.list_error = None;
         let root = self.root.clone();
         let query = self.search.read(cx).value().to_string();
-        let tab = self.tab;
         let task = cx.background_executor().spawn(async move {
-            let result = if tab == PreviewTab::Changes {
-                workspace::changes(&root).map(|changes| {
-                    changes
-                        .into_iter()
-                        .filter(|entry| {
-                            entry
-                                .path
-                                .to_string_lossy()
-                                .to_lowercase()
-                                .contains(&query.to_lowercase())
-                        })
-                        .map(|entry| FileRow {
-                            header: false,
-                            depth: 0,
-                            path: entry.path,
-                            directory: false,
-                            ignored: false,
-                            scope: Some(entry.scope),
-                            status: entry.status,
-                            stats: entry.additions.zip(entry.deletions),
-                        })
-                        .collect::<Vec<_>>()
-                })
-            } else {
+            let result = {
                 workspace::search(&root, &query).map(|entries| {
                     entries
                         .into_iter()
@@ -486,6 +523,8 @@ impl WorkspacePreview {
         self.loading_content = true;
         self.content_error = None;
         self.code.clear();
+        self.full_code.clear();
+        self.expanded_context.clear();
         self.split_rows.clear();
         self.diff_stats = (0, 0);
         self.image = None;
@@ -510,7 +549,8 @@ impl WorkspacePreview {
                 }
             }
             let result = if let Some(scope) = scope {
-                workspace::diff(&root, &path, scope)
+                workspace::diff_with_context(&root, &path, scope, 100_000)
+                    .or_else(|_| workspace::diff(&root, &path, scope))
                     .map(|patch| {
                         (
                             parse_diff(&patch)
@@ -538,6 +578,7 @@ impl WorkspacePreview {
                                     kind: ' ',
                                     syntax: Vec::new(),
                                     old_syntax: Vec::new(),
+                                    ..Default::default()
                                 })
                                 .collect(),
                             None,
@@ -560,7 +601,11 @@ impl WorkspacePreview {
                 for row in &mut code {
                     row.text = row.text.replace('\t', "    ");
                 }
-                color_code(&path, &mut code, scope.is_some());
+                if scope.is_some() {
+                    mark_inline_changes(&mut code);
+                } else {
+                    color_code(&path, &mut code, false);
+                }
                 (code, image, None)
             })
         });
@@ -588,8 +633,9 @@ impl WorkspacePreview {
                             })
                             .fold(0., f32::max)
                             + 128.;
-                        this.split_rows = pair_diff_rows(&code);
-                        this.code = code;
+                        this.full_code = code;
+                        this.rebuild_context();
+                        this.highlight_visible(cx);
                         this.image = image;
                         if let Some(line) = line {
                             this.scroll.scroll_to_item(
@@ -606,6 +652,45 @@ impl WorkspacePreview {
         })
         .detach();
         cx.notify();
+    }
+
+    fn highlight_visible(&mut self, cx: &mut Context<Self>) {
+        self.highlight_generation += 1;
+        let highlight_generation = self.highlight_generation;
+        let content_generation = self.content_generation;
+        let Some((path, Some(_))) = self.selected.clone() else {
+            return;
+        };
+        let mut code = self.code.clone();
+        let task = cx.background_executor().spawn(async move {
+            color_code(&path, &mut code, true);
+            code
+        });
+        cx.spawn(async move |this, cx| {
+            let code = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.content_generation == content_generation
+                    && this.highlight_generation == highlight_generation
+                {
+                    this.code = code;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn rebuild_context(&mut self) {
+        self.code = if self
+            .selected
+            .as_ref()
+            .is_some_and(|(_, scope)| scope.is_some())
+        {
+            fold_context(&self.full_code, &self.expanded_context)
+        } else {
+            self.full_code.clone()
+        };
+        self.split_rows = pair_diff_rows(&self.code);
     }
 
     fn toggle_change_directory(
@@ -652,6 +737,31 @@ impl WorkspacePreview {
                             None => Some(index),
                         };
                         let row = row_index.map(|index| &this.code[index]);
+                        if let Some(folded) = row.and_then(|row| row.folded.clone()) {
+                            let start = folded.start;
+                            return div()
+                                .id(("diff-context", index))
+                                .debug_selector(|| "diff-context".into())
+                                .h(px(24.))
+                                .w_full()
+                                .px_3()
+                                .text_size(px(12.))
+                                .bg(cx.theme().muted)
+                                .text_color(cx.theme().muted_foreground)
+                                .hover(|style| style.bg(cx.theme().accent))
+                                .cursor_pointer()
+                                .child(tr(this.language, "preview.expandContext").replace(
+                                    "{count}",
+                                    &folded.len().saturating_sub(6).to_string(),
+                                ))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.expanded_context.insert(start);
+                                    this.rebuild_context();
+                                    this.highlight_visible(cx);
+                                    cx.notify();
+                                }))
+                                .into_any_element();
+                        }
                         let kind = row.map_or(' ', |row| row.kind);
                         let accent = match kind {
                             '+' => hsla(0.40, 0.55, 0.48, 1.),
@@ -718,22 +828,15 @@ impl WorkspacePreview {
                                             } else {
                                                 cx.theme().foreground
                                             })
-                                            .child(
-                                                StyledText::new(text).with_highlights(
-                                                    (if side == Some(true) {
-                                                        &row.old_syntax
-                                                    } else {
-                                                        &row.syntax
-                                                    })
-                                                    .iter()
-                                                    .filter_map(|(range, kind)| {
-                                                        cx.theme()
-                                                            .highlight_theme
-                                                            .style(kind.theme_key())
-                                                            .map(|style| (range.clone(), style))
-                                                    }),
+                                            .child(StyledText::new(text).with_highlights(
+                                                row_highlights(
+                                                    row,
+                                                    side == Some(true),
+                                                    accent,
+                                                    is_diff,
+                                                    cx,
                                                 ),
-                                            ),
+                                            )),
                                     )
                             })
                             .into_any_element()
@@ -843,6 +946,9 @@ impl Render for WorkspacePreview {
                 .ghost()
                 .label(tr(language, "preview.refresh"))
                 .on_click(cx.listener(|this, _, _, cx| {
+                    this.count_generation += 1;
+                    this.changes_loaded = false;
+                    this.changes_loading = false;
                     this.signature_generation += 1;
                     this.change_signature = None;
                     this.checking_changes = false;
@@ -890,6 +996,16 @@ impl Render for WorkspacePreview {
                         .items_center()
                         .gap_2()
                         .child(tr(language, "preview.changesTab"))
+                        .when_some(self.branch.clone(), |view, branch| {
+                            view.child(
+                                div()
+                                    .min_w_0()
+                                    .text_ellipsis()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(branch),
+                            )
+                        })
                         .child(change_stats(added, removed)),
                 );
             }
@@ -932,14 +1048,21 @@ impl Render for WorkspacePreview {
                                             .contains(&(scope, PathBuf::new()));
                                         return div()
                                             .id(("change-scope", index))
+                                            .debug_selector(move || {
+                                                format!("change-scope-header-{index}").into()
+                                            })
+                                            .w_full()
+                                            .bg(cx.theme().muted.opacity(0.45))
+                                            .hover(|style| style.bg(cx.theme().accent))
                                             .h(px(36.))
                                             .px_3()
                                             .flex()
                                             .items_center()
                                             .gap_2()
                                             .cursor_pointer()
-                                            .text_xs()
-                                            .text_color(cx.theme().muted_foreground)
+                                            .text_size(px(14.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().foreground)
                                             .child(
                                                 Icon::new(if collapsed {
                                                     IconName::ChevronRight
@@ -987,33 +1110,44 @@ impl Render for WorkspacePreview {
                                     };
                                     div()
                                         .id(("preview-entry", index))
+                                        .debug_selector(move || {
+                                            format!("preview-entry-{index}").into()
+                                        })
+                                        .w_full()
                                         .h(px(36.))
                                         .px_3()
-                                        .pl(px(12. + row.depth as f32 * 16.))
+                                        .pl(px(12.
+                                            + (row.depth + usize::from(row.scope.is_some()))
+                                                as f32
+                                                * 16.))
                                         .flex()
                                         .items_center()
                                         .gap_2()
                                         .cursor_pointer()
                                         .text_color(foreground)
+                                        .text_size(px(13.))
                                         .hover(|style| style.bg(cx.theme().muted))
                                         .when(
                                             this.selected.as_ref()
                                                 == Some(&(path.clone(), row.scope)),
                                             |view| view.bg(cx.theme().muted),
                                         )
-                                        .child(div().w(px(12.)).flex_none().when(
-                                            row.directory,
-                                            |view| {
-                                                view.child(
-                                                    Icon::new(if expanded {
-                                                        IconName::ChevronDown
-                                                    } else {
-                                                        IconName::ChevronRight
-                                                    })
-                                                    .size(px(12.)),
-                                                )
-                                            },
-                                        ))
+                                        .child(
+                                            div()
+                                                .debug_selector(|| "change-entry-chevron".into())
+                                                .w(px(12.))
+                                                .flex_none()
+                                                .when(row.directory, |view| {
+                                                    view.child(
+                                                        Icon::new(if expanded {
+                                                            IconName::ChevronDown
+                                                        } else {
+                                                            IconName::ChevronRight
+                                                        })
+                                                        .size(px(12.)),
+                                                    )
+                                                }),
+                                        )
                                         .child(
                                             Icon::new(if row.directory {
                                                 IconName::Folder
@@ -1074,6 +1208,8 @@ impl Render for WorkspacePreview {
                                 .collect()
                         }),
                     )
+                    .w_full()
+                    .min_w_0()
                     .track_scroll(&self.list_scroll)
                     .map(|mut list| {
                         list.style().restrict_scroll_to_axis = Some(true);
@@ -1229,6 +1365,21 @@ impl Render for WorkspacePreview {
                             })),
                     );
                     if self.image_diff.is_none() {
+                        if !self.expanded_context.is_empty() {
+                            heading = heading.child(
+                                Button::new("collapse-diff-context")
+                                    .debug_selector(|| "collapse-diff-context".into())
+                                    .ghost()
+                                    .label(tr(language, "preview.collapseContext"))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.expanded_context.clear();
+                                        this.rebuild_context();
+                                        this.highlight_visible(cx);
+                                        this.scroll.scroll_to_item(0, ScrollStrategy::Top);
+                                        cx.notify();
+                                    })),
+                            );
+                        }
                         heading = heading.child(
                             Button::new("preview-diff-layout")
                                 .debug_selector(|| "preview-diff-layout".into())
@@ -1481,7 +1632,10 @@ fn color_code(path: &std::path::Path, code: &mut [CodeRow], diff: bool) {
     // Parse old/new streams separately, so deleted code cannot change the new side's state.
     // Reset at hunk boundaries because the omitted source may contain comment delimiters.
     let started = std::time::Instant::now();
-    for hunk in code.split_mut(|row| row.kind == '@') {
+    for hunk in code.split_mut(|row| matches!(row.kind, '@' | '.')) {
+        if hunk.is_empty() {
+            continue;
+        }
         if started.elapsed() > std::time::Duration::from_millis(400) {
             break;
         }
@@ -1639,6 +1793,118 @@ fn hidden_tree_path(path: &std::path::Path, directory: bool) -> bool {
     }))
 }
 
+// Keep three unchanged lines on each side of an edit. Gaps retain indices into
+// the loaded snapshot so expanding them never mixes in newer working-tree content.
+fn fold_context(rows: &[CodeRow], expanded: &HashSet<usize>) -> Vec<CodeRow> {
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < rows.len() {
+        if rows[index].kind != ' ' || rows[index].old.is_none() {
+            result.push(rows[index].clone());
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < rows.len() && rows[index].kind == ' ' && rows[index].old.is_some() {
+            index += 1;
+        }
+        let end = index;
+        if end - start <= 6 || expanded.contains(&start) {
+            result.extend_from_slice(&rows[start..end]);
+        } else {
+            result.extend_from_slice(&rows[start..start + 3]);
+            result.push(CodeRow {
+                kind: '.',
+                // Include the visible context so the expansion key remains stable.
+                folded: Some(start..end),
+                ..Default::default()
+            });
+            result.extend_from_slice(&rows[end - 3..end]);
+        }
+    }
+    result
+}
+
+fn changed_ranges(old: &str, new: &str) -> (Range<usize>, Range<usize>) {
+    let prefix = old
+        .chars()
+        .zip(new.chars())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum::<usize>();
+    let suffix = old[prefix..]
+        .chars()
+        .rev()
+        .zip(new[prefix..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(c, _)| c.len_utf8())
+        .sum::<usize>();
+    (prefix..old.len() - suffix, prefix..new.len() - suffix)
+}
+
+fn mark_inline_changes(rows: &mut [CodeRow]) {
+    for (old, new) in pair_diff_rows(rows) {
+        if let (Some(old), Some(new)) = (old, new) {
+            if rows[old].kind == '-' && rows[new].kind == '+' {
+                let (a, b) = changed_ranges(&rows[old].text[1..], &rows[new].text[1..]);
+                rows[old].changed = Some(a);
+                rows[new].changed = Some(b);
+            }
+        }
+    }
+}
+
+fn row_highlights(
+    row: &CodeRow,
+    old_side: bool,
+    accent: Hsla,
+    is_diff: bool,
+    cx: &App,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let syntax = if old_side {
+        &row.old_syntax
+    } else {
+        &row.syntax
+    };
+    let mut boundaries = vec![
+        0,
+        row.text.len().saturating_sub(usize::from(
+            is_diff && (row.old.is_some() || row.new.is_some()),
+        )),
+    ];
+    for (range, _) in syntax {
+        boundaries.extend([range.start, range.end]);
+    }
+    if let Some(range) = &row.changed {
+        boundaries.extend([range.start, range.end]);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    let mut syntax_index = 0;
+    boundaries
+        .windows(2)
+        .filter_map(|bounds| {
+            let range = bounds[0]..bounds[1];
+            while syntax_index < syntax.len() && syntax[syntax_index].0.end <= range.start {
+                syntax_index += 1;
+            }
+            let mut style = syntax
+                .get(syntax_index)
+                .filter(|(span, _)| span.contains(&range.start))
+                .and_then(|(_, kind)| cx.theme().highlight_theme.style(kind.theme_key()))
+                .unwrap_or_default();
+            if row
+                .changed
+                .as_ref()
+                .is_some_and(|span| span.contains(&range.start))
+            {
+                style.background_color = Some(accent.opacity(0.32));
+            }
+            (!range.is_empty()).then_some((range, style))
+        })
+        .collect()
+}
+
 // Pair adjacent deletion/addition runs without pairing across hunk boundaries.
 fn pair_diff_rows(rows: &[CodeRow]) -> Vec<(Option<usize>, Option<usize>)> {
     let mut result = Vec::new();
@@ -1740,6 +2006,132 @@ mod tests {
     use super::{PreviewTab, WorkspacePreview, parse_diff};
     use gpui_kit::{TestAppContext, px, size};
 
+    #[test]
+    fn inline_changes_preserve_unicode_and_context_expands_from_snapshot() {
+        let (a, b) = super::changed_ranges("let 名称 = 旧值;", "let 名称 = 新值;");
+        assert_eq!(&"let 名称 = 旧值;"[a], "旧");
+        assert_eq!(&"let 名称 = 新值;"[b], "新");
+        assert_eq!(super::changed_ranges("abc", "abc"), (3..3, 3..3));
+        assert_eq!(super::changed_ranges("ab", "a新b"), (1..1, 1..4));
+        let mut patch = String::from("@@ -1,22 +1,22 @@\n-old\n+new\n");
+        for i in 2..=22 {
+            patch.push_str(&format!(" context {i}\n"));
+        }
+        let mut rows = parse_diff(&patch);
+        super::mark_inline_changes(&mut rows);
+        assert_eq!(rows[1].changed, Some(0..3));
+        let mut expanded = std::collections::HashSet::new();
+        let collapsed = super::fold_context(&rows, &expanded);
+        let gap = collapsed.iter().find_map(|row| row.folded.clone()).unwrap();
+        assert_eq!(gap.len() - 6, 15);
+        expanded.insert(gap.start);
+        let full = super::fold_context(&rows, &expanded);
+        assert_eq!(
+            full.iter().map(|row| &row.text).collect::<Vec<_>>(),
+            rows.iter().map(|row| &row.text).collect::<Vec<_>>()
+        );
+        assert_eq!(full.last().unwrap().new, Some(22));
+        assert!(
+            super::pair_diff_rows(&collapsed)
+                .iter()
+                .any(|(a, b)| a == b && a.is_some_and(|i| collapsed[i].folded.is_some()))
+        );
+    }
+
+    #[gpui_kit::test]
+    fn changes_scope_headers_and_children_fill_a_narrow_panel(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(360.), px(600.)), |window, cx| {
+            WorkspacePreview::new(std::env::temp_dir(), yes_core::Language::Zh, window, cx)
+        });
+        let preview = window.root(cx).unwrap();
+        cx.run_until_parked();
+        preview.update(cx, |preview, cx| {
+            preview.changes = [
+                yes_core::workspace::ChangeScope::Staged,
+                yes_core::workspace::ChangeScope::Unstaged,
+                yes_core::workspace::ChangeScope::Untracked,
+            ]
+            .into_iter()
+            .map(|scope| yes_core::workspace::Change {
+                scope,
+                path: "Business/deep/file.rs".into(),
+                status: "M".into(),
+                additions: Some(2),
+                deletions: Some(1),
+            })
+            .collect();
+            preview.changes_error = None;
+            preview.changes_loaded = true;
+            preview.tab = PreviewTab::Changes;
+            preview.list_error = None;
+            preview.loading_list = false;
+            preview.rebuild_changes(cx);
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let header = visual.debug_bounds("change-scope-header-0").unwrap();
+        let entry = visual.debug_bounds("preview-entry-1").unwrap();
+        let chevron = visual.debug_bounds("change-entry-chevron").unwrap();
+        assert!(header.size.width >= px(340.));
+        assert_eq!(header.size.width, entry.size.width);
+        assert!(chevron.left() >= header.left() + px(28.));
+        visual.simulate_click(header.center(), Default::default());
+        cx.run_until_parked();
+        preview.read_with(cx, |preview, _| {
+            assert_eq!(preview.rows.iter().filter(|row| row.header).count(), 3);
+            assert!(
+                !preview.rows.iter().any(|row| !row.header
+                    && row.scope == Some(yes_core::workspace::ChangeScope::Staged))
+            );
+        });
+    }
+
+    #[gpui_kit::test]
+    fn diff_context_controls_expand_and_collapse_cached_rows(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(900.), px(600.)), |window, cx| {
+            WorkspacePreview::new(std::env::temp_dir(), yes_core::Language::En, window, cx)
+        });
+        let preview = window.root(cx).unwrap();
+        cx.run_until_parked();
+        preview.update(cx, |preview, cx| {
+            preview.selected = Some((
+                "example.rs".into(),
+                Some(yes_core::workspace::ChangeScope::Unstaged),
+            ));
+            preview.list_visible = false;
+            let mut patch = String::from("@@ -1,30 +1,30 @@\n-old\n+new\n");
+            for i in 2..=30 {
+                patch.push_str(&format!(" line {i}\n"));
+            }
+            preview.full_code = parse_diff(&patch);
+            super::mark_inline_changes(&mut preview.full_code);
+            preview.rebuild_context();
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let folded_len = preview.read_with(cx, |preview, _| preview.code.len());
+        let gap = visual.debug_bounds("diff-context").unwrap();
+        visual.simulate_click(gap.center(), Default::default());
+        cx.run_until_parked();
+        preview.read_with(cx, |preview, _| {
+            assert!(preview.code.len() > folded_len);
+            assert_eq!(
+                preview.content_generation, 0,
+                "expansion must not reload content"
+            );
+            assert_eq!(preview.code.last().unwrap().new, Some(30));
+        });
+        let collapse = visual.debug_bounds("collapse-diff-context").unwrap();
+        visual.simulate_click(collapse.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            preview.read_with(cx, |preview, _| preview.code.len()),
+            folded_len
+        );
+    }
+
     #[gpui_kit::test]
     fn change_notice_preserves_preview_and_image_diff_fits_panel(cx: &mut TestAppContext) {
         let root = std::env::temp_dir().join(format!(
@@ -1771,6 +2163,19 @@ mod tests {
             preview.open_path("file.txt".into(), None, cx)
         });
         cx.run_until_parked();
+        let generation = preview.read_with(cx, |preview, _| preview.count_generation);
+        preview.update(cx, |preview, cx| {
+            preview.set_tab(PreviewTab::Changes, cx);
+            preview.set_tab(PreviewTab::Files, cx);
+            preview.load_count(cx);
+            preview.list_visible = false;
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            preview.read_with(cx, |preview, _| preview.count_generation),
+            generation,
+            "switching tabs must reuse the current Git snapshot"
+        );
         std::fs::write(root.join("file.txt"), "new content from agent").unwrap();
         preview.update(cx, |preview, cx| preview.check_for_changes(cx));
         cx.run_until_parked();

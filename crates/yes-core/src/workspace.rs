@@ -313,8 +313,9 @@ fn supported_text(text: &str) -> bool {
         .all(|(index, line)| index < MAX_TEXT_LINES && line.len() <= MAX_LINE_BYTES)
 }
 
-fn git(root: &Path, args: &[OsString]) -> Result<Vec<u8>> {
-    let mut child = Command::new("git")
+fn git_command(root: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_LITERAL_PATHSPECS", "1")
@@ -325,10 +326,13 @@ fn git(root: &Path, args: &[OsString]) -> Result<Vec<u8>> {
             "-c",
             "color.ui=false",
         ])
-        .args(args)
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    command
+}
+
+fn git(root: &Path, args: &[OsString]) -> Result<Vec<u8>> {
+    let mut child = git_command(root).args(args).spawn()?;
     let mut bytes = Vec::new();
     let read = child
         .stdout
@@ -356,14 +360,9 @@ struct Record {
     old_path: Option<PathBuf>,
 }
 
-fn records(root: &Path) -> Result<Vec<Record>> {
-    let root = root.canonicalize()?;
-    let top = git(&root, &args(&["rev-parse", "--show-toplevel"]))?;
-    let top = top.strip_suffix(b"\n").unwrap_or(&top);
-    let top = PathBuf::from(OsString::from_vec(top.to_vec())).canonicalize()?;
-    let prefix = root.strip_prefix(&top)?;
-    let output = git(
-        &root,
+fn status(root: &Path) -> Result<Vec<u8>> {
+    git(
+        root,
         &args(&[
             "status",
             "--porcelain=v1",
@@ -372,7 +371,19 @@ fn records(root: &Path) -> Result<Vec<Record>> {
             "--",
             ".",
         ]),
-    )?;
+    )
+}
+
+fn records(root: &Path) -> Result<Vec<Record>> {
+    records_from_status(root, &status(root)?)
+}
+
+fn records_from_status(root: &Path, output: &[u8]) -> Result<Vec<Record>> {
+    let root = root.canonicalize()?;
+    let top = git(&root, &args(&["rev-parse", "--show-toplevel"]))?;
+    let top = top.strip_suffix(b"\n").unwrap_or(&top);
+    let top = PathBuf::from(OsString::from_vec(top.to_vec())).canonicalize()?;
+    let prefix = root.strip_prefix(&top)?;
     let mut fields = output.split(|byte| *byte == 0);
     let mut result = Vec::new();
     while let Some(field) = fields.next() {
@@ -502,6 +513,61 @@ pub fn changes(root: &Path) -> Result<Vec<Change>> {
     Ok(changes)
 }
 
+// Probe magic bytes before copying a Git blob into memory. Text previews do not
+// need either complete image version; a single cat-file replaces size + show.
+fn revision_image(root: &Path, spec: OsString, path: &Path) -> Result<Option<FileContent>> {
+    let mut child = git_command(root)
+        .args(["cat-file".into(), "blob".into(), spec])
+        .spawn()?;
+    let mut stdout = child.stdout.take().unwrap();
+    let mut bytes = Vec::new();
+    if let Err(error) = stdout.by_ref().take(12).read_to_end(&mut bytes) {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(error.into());
+    }
+    let Some(format) = image_format(path, &bytes) else {
+        // An empty stdout may be a missing revision (e.g. an added/deleted side).
+        if bytes.is_empty() {
+            return Ok(child.wait()?.success().then_some(FileContent::Unsupported));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(Some(FileContent::Unsupported));
+    };
+    let result = stdout
+        .take(MAX_FILE_BYTES + 1 - bytes.len() as u64)
+        .read_to_end(&mut bytes);
+    if result.is_err() || bytes.len() as u64 > MAX_FILE_BYTES {
+        let _ = child.kill();
+        let _ = child.wait();
+        result?;
+        return Ok(Some(FileContent::Unsupported));
+    }
+    if !child.wait()?.success() {
+        return Ok(None);
+    }
+    Ok(Some(FileContent::Image { format, bytes }))
+}
+
+fn worktree_image(root: &Path, relative: &Path) -> Result<Option<FileContent>> {
+    if !root.join(relative).try_exists()? {
+        return Ok(None);
+    }
+    let path = resolve(root, relative)?;
+    if !fs::metadata(&path)?.is_file() {
+        // Gitlinks are directories in the worktree; let the ordinary Git diff
+        // show their commit change without opening a directory or special file.
+        return Ok(Some(FileContent::Unsupported));
+    }
+    let mut prefix = Vec::new();
+    fs::File::open(path)?.take(12).read_to_end(&mut prefix)?;
+    if image_format(relative, &prefix).is_none() {
+        return Ok(Some(FileContent::Unsupported));
+    }
+    Ok(Some(read_file(root, relative)?))
+}
+
 /// Read the two image versions for the selected Git scope. Missing sides represent
 /// additions/deletions; oversized or non-image sides remain unsupported.
 pub fn image_diff(
@@ -511,31 +577,27 @@ pub fn image_diff(
 ) -> Result<Option<(Option<FileContent>, Option<FileContent>)>> {
     let root = root.canonicalize()?;
     valid_relative(relative)?;
-    let old_path = records(&root)?
-        .into_iter()
-        .find(|r| r.change.path == relative && r.change.scope == scope)
-        .and_then(|r| r.old_path)
-        .unwrap_or_else(|| relative.to_path_buf());
-    let prefix = git(&root, &args(&["rev-parse", "--show-prefix"]))?;
+    let old_path = if scope == ChangeScope::Untracked {
+        relative.to_path_buf()
+    } else {
+        records(&root)?
+            .into_iter()
+            .find(|r| r.change.path == relative && r.change.scope == scope)
+            .and_then(|r| r.old_path)
+            .unwrap_or_else(|| relative.to_path_buf())
+    };
+    let prefix = if scope == ChangeScope::Untracked {
+        Vec::new()
+    } else {
+        git(&root, &args(&["rev-parse", "--show-prefix"]))?
+    };
     let prefix = prefix.strip_suffix(b"\n").unwrap_or(&prefix);
     let read_revision = |revision: &str, path: &Path| -> Result<Option<FileContent>> {
         let mut spec = revision.as_bytes().to_vec();
         spec.push(b':');
         spec.extend_from_slice(prefix);
         spec.extend_from_slice(path.as_os_str().as_bytes());
-        let spec = OsString::from_vec(spec);
-        let Ok(size) = git(&root, &["cat-file".into(), "-s".into(), spec.clone()]) else {
-            return Ok(None);
-        };
-        let size: u64 = std::str::from_utf8(&size)?.trim().parse()?;
-        if size > MAX_FILE_BYTES {
-            return Ok(Some(FileContent::Unsupported));
-        }
-        let bytes = git(&root, &["show".into(), spec])?;
-        Ok(Some(match image_format(path, &bytes) {
-            Some(format) => FileContent::Image { format, bytes },
-            None => FileContent::Unsupported,
-        }))
+        revision_image(&root, OsString::from_vec(spec), path)
     };
     let before = match scope {
         ChangeScope::Staged => read_revision("HEAD", &old_path)?,
@@ -544,10 +606,8 @@ pub fn image_diff(
     };
     let after = if scope == ChangeScope::Staged {
         read_revision("", relative)?
-    } else if root.join(relative).try_exists()? {
-        Some(read_file(&root, relative)?)
     } else {
-        None
+        worktree_image(&root, relative)?
     };
     if image_format(relative, &[]).is_none()
         && image_format(&old_path, &[]).is_none()
@@ -564,18 +624,8 @@ pub fn change_signature(root: &Path) -> Result<u64> {
     use std::hash::{Hash, Hasher};
     use std::os::unix::fs::MetadataExt;
     let mut hash = std::collections::hash_map::DefaultHasher::new();
-    git(
-        root,
-        &args(&[
-            "status",
-            "--porcelain=v1",
-            "-z",
-            "--untracked-files=all",
-            "--",
-            ".",
-        ]),
-    )?
-    .hash(&mut hash);
+    let status = status(root)?;
+    status.hash(&mut hash);
     git(root, &args(&["rev-parse", "HEAD"]))
         .ok()
         .hash(&mut hash);
@@ -584,7 +634,11 @@ pub fn change_signature(root: &Path) -> Result<u64> {
         index.strip_suffix(b"\n").unwrap_or(&index).to_vec(),
     ));
     let mut paths = vec![root.join(index)];
-    paths.extend(records(root)?.into_iter().map(|r| root.join(r.change.path)));
+    paths.extend(
+        records_from_status(root, &status)?
+            .into_iter()
+            .map(|r| root.join(r.change.path)),
+    );
     for path in paths {
         path.hash(&mut hash);
         if let Ok(meta) = fs::symlink_metadata(path) {
@@ -601,7 +655,24 @@ pub fn change_signature(root: &Path) -> Result<u64> {
     Ok(hash.finish())
 }
 
+/// Branch label also works for unborn branches and detached HEADs.
+pub fn branch_name(root: &Path) -> Result<String> {
+    let name = git(root, &args(&["symbolic-ref", "--quiet", "--short", "HEAD"]))
+        .or_else(|_| git(root, &args(&["rev-parse", "--short", "HEAD"])))?;
+    Ok(String::from_utf8_lossy(&name).trim().to_owned())
+}
+
 pub fn diff(root: &Path, relative: &Path, scope: ChangeScope) -> Result<String> {
+    diff_with_context(root, relative, scope, 3)
+}
+
+/// Bounded full context lets the UI expand unchanged lines without rereading disk.
+pub fn diff_with_context(
+    root: &Path,
+    relative: &Path,
+    scope: ChangeScope,
+    context: usize,
+) -> Result<String> {
     let canonical_root = root.canonicalize()?;
     let root = canonical_root.as_path();
     valid_relative(relative)?;
@@ -645,6 +716,7 @@ pub fn diff(root: &Path, relative: &Path, scope: ChangeScope) -> Result<String> 
         "--no-color",
         "--find-renames",
     ]);
+    command.push(format!("--unified={}", context.min(MAX_TEXT_LINES)).into());
     if scope == ChangeScope::Staged {
         command.push("--cached".into());
     }
@@ -698,6 +770,32 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn branch_labels_and_expanded_diff_respect_git_scope() {
+        let f = Fixture::new();
+        f.git(&["init", "-q", "-b", "preview-test"]);
+        assert_eq!(branch_name(&f.0).unwrap(), "preview-test");
+        f.git(&["config", "user.email", "test@example.com"]);
+        f.git(&["config", "user.name", "Test"]);
+        let original = (0..30).map(|i| format!("line {i}\n")).collect::<String>();
+        fs::write(f.0.join("file.txt"), &original).unwrap();
+        f.git(&["add", "."]);
+        f.git(&["commit", "-qm", "initial"]);
+        let staged = original.replace("line 15\n", "staged\n");
+        fs::write(f.0.join("file.txt"), &staged).unwrap();
+        f.git(&["add", "."]);
+        fs::write(f.0.join("file.txt"), staged.replace("staged", "working")).unwrap();
+        let patch =
+            diff_with_context(&f.0, Path::new("file.txt"), ChangeScope::Staged, 100_000).unwrap();
+        assert!(patch.contains(" line 0\n") && patch.contains(" line 29\n"));
+        assert!(patch.contains("+staged") && !patch.contains("+working"));
+        let compact = diff(&f.0, Path::new("file.txt"), ChangeScope::Staged).unwrap();
+        assert!(!compact.contains(" line 0\n"));
+        f.git(&["checkout", "--detach", "-q"]);
+        let detached = branch_name(&f.0).unwrap();
+        assert!(detached.len() >= 7 && detached.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
@@ -763,6 +861,110 @@ mod tests {
         assert_eq!(bytes(a), old);
         assert_eq!(bytes(b), old);
         assert!(image_diff(&f.0, Path::new("../outside.svg"), ChangeScope::Staged).is_err());
+    }
+
+    #[test]
+    fn image_probe_handles_text_magic_and_literal_revision_paths() {
+        let f = Fixture::new();
+        f.git(&["init", "-q"]);
+        f.git(&["config", "user.email", "test@example.com"]);
+        f.git(&["config", "user.name", "Test"]);
+        let path = Path::new("asset\nwithout-extension");
+        fs::write(f.0.join(path), "original text").unwrap();
+        fs::write(f.0.join("empty.png"), []).unwrap();
+        f.git(&["add", "."]);
+        f.git(&["commit", "-qm", "initial"]);
+        let png = b"\x89PNG\r\n\x1a\nnew image bytes";
+        fs::write(f.0.join(path), png).unwrap();
+        let (before, after) = image_diff(&f.0, path, ChangeScope::Unstaged)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(before, Some(FileContent::Unsupported)));
+        assert!(matches!(after, Some(FileContent::Image { bytes, .. }) if bytes == png));
+        f.git(&["add", "."]);
+        fs::write(f.0.join(path), "working tree is text again").unwrap();
+        let (before, after) = image_diff(&f.0, path, ChangeScope::Unstaged)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(before, Some(FileContent::Image { bytes, .. }) if bytes == png));
+        assert!(matches!(after, Some(FileContent::Unsupported)));
+        let empty = revision_image(&f.0, "HEAD:empty.png".into(), Path::new("empty.png")).unwrap();
+        assert!(matches!(empty, Some(FileContent::Image { bytes, .. }) if bytes.is_empty()));
+        assert!(
+            revision_image(&f.0, "HEAD:missing.png".into(), Path::new("missing.png"))
+                .unwrap()
+                .is_none()
+        );
+        // A large ordinary text file stays on the text-diff path without loading
+        // either complete version just to decide whether it is an image.
+        fs::write(
+            f.0.join("large.txt"),
+            "x".repeat(MAX_FILE_BYTES as usize + 1),
+        )
+        .unwrap();
+        f.git(&["add", "large.txt"]);
+        assert!(
+            image_diff(&f.0, Path::new("large.txt"), ChangeScope::Staged)
+                .unwrap()
+                .is_none()
+        );
+        std::os::unix::fs::symlink("/etc/passwd", f.0.join("escape.png")).unwrap();
+        assert!(image_diff(&f.0, Path::new("escape.png"), ChangeScope::Untracked).is_err());
+    }
+
+    #[test]
+    fn gitlink_changes_fall_back_to_text_diff_without_opening_the_directory() {
+        let f = Fixture::new();
+        f.git(&["init", "-q"]);
+        f.git(&["config", "user.email", "test@example.com"]);
+        f.git(&["config", "user.name", "Test"]);
+        let module = Fixture(f.0.join("module"));
+        fs::create_dir(&module.0).unwrap();
+        module.git(&["init", "-q"]);
+        module.git(&["config", "user.email", "test@example.com"]);
+        module.git(&["config", "user.name", "Test"]);
+        fs::write(module.0.join("file.txt"), "one").unwrap();
+        module.git(&["add", "."]);
+        module.git(&["commit", "-qm", "initial"]);
+        f.git(&["add", "module"]);
+        f.git(&["commit", "-qm", "track gitlink"]);
+        fs::write(module.0.join("file.txt"), "two").unwrap();
+        module.git(&["commit", "-qam", "update"]);
+        let path = Path::new("module");
+        assert!(
+            image_diff(&f.0, path, ChangeScope::Unstaged)
+                .unwrap()
+                .is_none()
+        );
+        let patch = diff(&f.0, path, ChangeScope::Unstaged).unwrap();
+        assert!(patch.contains("-Subproject commit "));
+        assert!(patch.contains("+Subproject commit "));
+        f.git(&["add", "module"]);
+        assert!(
+            image_diff(&f.0, path, ChangeScope::Staged)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            diff(&f.0, path, ChangeScope::Staged)
+                .unwrap()
+                .contains("+Subproject commit ")
+        );
+    }
+
+    #[test]
+    fn change_signal_uses_subdirectory_paths_from_the_same_status_snapshot() {
+        let f = Fixture::new();
+        f.git(&["init", "-q"]);
+        fs::create_dir(f.0.join("sub")).unwrap();
+        fs::write(f.0.join("sub/file.txt"), "one").unwrap();
+        fs::write(f.0.join("outside.txt"), "one").unwrap();
+        let root = f.0.join("sub");
+        let before = change_signature(&root).unwrap();
+        fs::write(f.0.join("outside.txt"), "outside update").unwrap();
+        assert_eq!(before, change_signature(&root).unwrap());
+        fs::write(root.join("file.txt"), "inside update").unwrap();
+        assert_ne!(before, change_signature(&root).unwrap());
     }
 
     #[test]

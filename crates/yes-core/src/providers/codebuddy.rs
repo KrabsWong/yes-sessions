@@ -20,6 +20,8 @@ use crate::{
     model::{SessionKind, ToolOutput},
 };
 
+const SUMMARY_PREFIX_BYTES: u64 = 256 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct CodeBuddyProvider {
     root: PathBuf,
@@ -68,7 +70,6 @@ impl CodeBuddyProvider {
     }
 
     fn summary_values(path: &Path) -> Vec<Value> {
-        const SUMMARY_PREFIX_BYTES: u64 = 256 * 1024;
         let mut bytes = Vec::with_capacity(SUMMARY_PREFIX_BYTES as usize);
         if fs::File::open(path)
             .and_then(|file| {
@@ -686,6 +687,12 @@ impl CodeBuddyProvider {
         }
         let records = Self::summary_values(&file.path);
         let messages = self.normalize(&records, file.updated_at);
+        // Only discard an empty normalized history when the bounded summary covers
+        // the whole file. Large transcripts may start with a record beyond the cap.
+        if messages.is_empty() && file.size <= SUMMARY_PREFIX_BYTES {
+            return None;
+        }
+
         let (first, last) = Self::previews(&messages);
         let created_at = records
             .first()
@@ -765,6 +772,50 @@ impl SessionProvider for CodeBuddyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_only_sessions_are_hidden_until_real_messages_arrive() {
+        let root =
+            std::env::temp_dir().join(format!("yes-codebuddy-control-only-{}", std::process::id()));
+        let project = root.join("projects/Users-test-project");
+        fs::create_dir_all(&project).unwrap();
+        let path = project.join("control-only.jsonl");
+        let records = [
+            "<system-reminder>CLI instructions</system-reminder>",
+            "<command-name>/help</command-name>",
+            "<local-command-stdout>CLI output</local-command-stdout>",
+        ]
+        .map(|text| {
+            json!({"type":"message", "role":"user", "sessionId":"control-only",
+                "content":[{"type":"input_text","text":text}]})
+            .to_string()
+        })
+        .join("\n");
+        fs::write(&path, &records).unwrap();
+        let provider = CodeBuddyProvider::with_root(root.clone());
+        assert!(provider.sessions().unwrap().is_empty());
+        assert!(provider.session_detail("control-only").unwrap().is_none());
+        let message = json!({"type":"message", "role":"user", "content":"A real question"});
+        fs::write(&path, format!("{records}\n{message}\n")).unwrap();
+        let sessions = provider.sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].first_message, "A real question");
+        assert_eq!(
+            provider
+                .session_detail("control-only")
+                .unwrap()
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        // An oversized first record is absent from the bounded summary but must
+        // not make a real transcript disappear from the list.
+        fs::write(&path, json!({"type":"message", "role":"user", "content":"x".repeat(SUMMARY_PREFIX_BYTES as usize + 1)}).to_string()).unwrap();
+        assert_eq!(provider.sessions().unwrap().len(), 1);
+        assert!(provider.session_detail("control-only").unwrap().is_some());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn idle_session_heartbeat_does_not_override_transcript_recency() {

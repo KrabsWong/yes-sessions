@@ -256,6 +256,17 @@ fn selection_after_refresh(
         .map(|session| session.id.clone())
 }
 
+fn navigator_tick_width(position: usize, focus: Option<usize>, active: bool) -> f32 {
+    let width: f32 = match focus.map(|focus| position.abs_diff(focus)) {
+        Some(0) => 28.,
+        Some(1) => 21.,
+        Some(2) => 15.,
+        Some(3) => 10.,
+        _ => 6.,
+    };
+    if active { width.max(18.) } else { width }
+}
+
 fn navigator_window(total: usize, active: usize, max_visible: usize) -> Range<usize> {
     if total <= max_visible {
         return 0..total;
@@ -359,9 +370,12 @@ pub struct YesSessions {
     marquee_session_id: Option<String>,
     sidebar_icon_transition: Option<(Instant, f32)>,
     stats_hovered: bool,
-    navigator_hovered: bool,
     navigator_active_message: Option<usize>,
-    navigator_list_state: ListState,
+    navigator_focus: Option<usize>,
+    navigator_previous_focus: Option<usize>,
+    navigator_motion: Option<Instant>,
+    navigator_start: Option<usize>,
+    navigator_wheel: f32,
     mermaid_views: HashMap<(usize, usize), Entity<MermaidDiagram>>,
     terminal_info: TerminalInfo,
     sessions_generation: u64,
@@ -409,10 +423,12 @@ impl YesSessions {
             marquee_session_id: None,
             sidebar_icon_transition: None,
             stats_hovered: false,
-            navigator_hovered: false,
             navigator_active_message: None,
-            navigator_list_state: ListState::new(0, ListAlignment::Top, px(60.))
-                .with_uniform_item_height(px(30.)),
+            navigator_focus: None,
+            navigator_previous_focus: None,
+            navigator_motion: None,
+            navigator_start: None,
+            navigator_wheel: 0.,
             mermaid_views: HashMap::new(),
             terminal_info,
             sessions_generation: 0,
@@ -868,10 +884,12 @@ impl YesSessions {
         self.inline_subagent_details.clear();
         self.loading_inline_subagents.clear();
         self.failed_inline_subagents.clear();
-        self.navigator_hovered = false;
         self.navigator_active_message = None;
-        self.navigator_list_state
-            .reset_with_uniform_height(0, px(30.));
+        self.navigator_focus = None;
+        self.navigator_previous_focus = None;
+        self.navigator_start = None;
+        self.navigator_motion = None;
+        self.navigator_wheel = 0.;
         self.mermaid_views.clear();
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
@@ -921,13 +939,6 @@ impl YesSessions {
                     Ok(Some(detail)) => {
                         this.detail_source_signature = source_signature;
                         let count = conversation_turn_count(&detail.messages, this.selected_app);
-                        let navigator_count = detail
-                            .messages
-                            .iter()
-                            .filter(|message| is_navigable_user_message(message))
-                            .count();
-                        this.navigator_list_state
-                            .reset_with_uniform_height(navigator_count, px(30.));
                         this.navigator_active_message =
                             detail.messages.iter().position(is_navigable_user_message);
                         this.detail = Some(Arc::new(detail));
@@ -994,15 +1005,6 @@ impl YesSessions {
                         .unwrap_or_default();
                     let next_count = conversation_turn_count(&detail.messages, this.selected_app);
                     if this.detail.as_deref() != Some(&detail) {
-                        let navigator_count = detail
-                            .messages
-                            .iter()
-                            .filter(|message| is_navigable_user_message(message))
-                            .count();
-                        if navigator_count != this.navigator_list_state.item_count() {
-                            this.navigator_list_state
-                                .reset_with_uniform_height(navigator_count, px(30.));
-                        }
                         if this.detail.as_ref().is_some_and(|previous| {
                             mermaid_sources_changed(&previous.messages, &detail.messages)
                         }) {
@@ -1220,6 +1222,13 @@ impl YesSessions {
     }
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self
+            .navigator_motion
+            .is_some_and(|started| started.elapsed() < Duration::from_millis(140))
+        {
+            window.request_animation_frame();
+        }
+
         if self
             .sidebar_icon_transition
             .is_some_and(|(started, _)| started.elapsed() < Duration::from_millis(200))
@@ -2234,195 +2243,216 @@ impl YesSessions {
             .and_then(|active| {
                 user_messages
                     .iter()
-                    .position(|(message_index, _, _)| *message_index == active)
+                    .position(|(index, _, _)| *index == active)
             })
             .unwrap_or(0);
-        let visible_range = navigator_window(user_messages.len(), active_position, 8);
-        let visible_messages = user_messages[visible_range.clone()].to_vec();
-        let hovered = self.navigator_hovered;
-        let expanded_item_count = user_messages.len().min(8) as f32;
-        let expanded_height = if user_messages.len() > 8 {
-            256.
-        } else {
-            16. + expanded_item_count * 28. + (expanded_item_count - 1.).max(0.) * 2.
-        };
-        let collapsed_item_count = visible_messages.len() as f32;
-        let collapsed_height =
-            12. + collapsed_item_count * 4. + (collapsed_item_count - 1.).max(0.) * 6.;
-        let navigator_list_state = self.navigator_list_state.clone();
-        let navigator_messages = Arc::new(user_messages);
-        let navigator_owner = cx.weak_entity();
-        let navigator_conversation_state = self.conversation_state.clone();
-        let navigator_scroll_owner = navigator_owner.clone();
-        let navigator_scroll_state = navigator_list_state.clone();
-        let background = if cx.theme().mode == ThemeMode::Dark {
-            cx.theme().background.opacity(0.90)
-        } else {
-            cx.theme().background.opacity(0.94)
-        };
-        div()
+        let total = user_messages.len();
+        let count = total.min(32);
+        let start = self
+            .navigator_start
+            .unwrap_or_else(|| navigator_window(total, active_position, 32).start)
+            .min(total - count);
+        let height = count as f32 * 10.;
+        let focus = self
+            .navigator_focus
+            .filter(|index| *index >= start && *index < start + count);
+        let progress = self.navigator_motion.map_or(1., |started| {
+            (started.elapsed().as_secs_f32() / 0.14).min(1.)
+        });
+        let progress = 1. - (1. - progress).powi(3);
+        let language = self.settings.language;
+        let mut rail = div()
             .id("user-message-navigator")
+            .debug_selector(|| "user-message-navigator".into())
             .absolute()
             .right_3()
             .top(relative(0.5))
-            .mt(px(if hovered {
-                -expanded_height / 2.
-            } else {
-                -collapsed_height / 2.
-            }))
+            .mt(px(-height / 2.))
+            .w(px(300.))
+            .h(px(height))
             .v_flex()
-            .items_center()
-            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
-                if this.navigator_hovered != *hovered {
-                    this.navigator_hovered = *hovered;
-                    cx.notify();
+            .items_end()
+            .when(focus.is_some(), |view| view.occlude())
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.navigator_start = Some(start);
+                } else {
+                    this.navigator_previous_focus = this.navigator_focus;
+                    this.navigator_focus = None;
+                    this.navigator_motion = Some(Instant::now());
+                    this.navigator_start = None;
+                    this.navigator_wheel = 0.;
                 }
-            }))
-            .when(!hovered, |view| {
-                view.rounded_full()
-                    .border_1()
-                    .border_color(cx.theme().border.opacity(0.2))
-                    .bg(background)
-                    .px_2()
-                    .py(px(6.))
-                    .gap(px(6.))
-                    .children(visible_messages.into_iter().enumerate().map(
-                        |(visible_position, (message_index, _, turn_index))| {
-                            let state = navigator_conversation_state.clone();
-                            let actual_position = visible_range.start + visible_position;
-                            let active = actual_position == active_position;
-                            Button::new(("jump-user", message_index))
-                                .text()
-                                .compact()
-                                .h(px(4.))
-                                .w(if active { px(20.) } else { px(10.) })
-                                .accessibility_label(format!(
-                                    "{} {}",
-                                    tr(self.settings.language, "message.user"),
-                                    actual_position + 1
-                                ))
-                                .child(div().h(px(4.)).w_full().rounded_full().bg(if active {
-                                    cx.theme().primary
-                                } else {
-                                    cx.theme().muted_foreground.opacity(0.3)
-                                }))
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.navigator_active_message = Some(message_index);
-                                    state.update(cx, |state, cx| {
-                                        let _ = state.scroll_to_item(turn_index, cx);
-                                    });
-                                    cx.notify();
-                                }))
-                        },
-                    ))
-            })
-            .when(hovered, |view| {
-                view.w(px(180.))
-                    .h(px(expanded_height))
-                    .occlude()
-                    .overflow_hidden()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(cx.theme().border.opacity(0.3))
-                    .bg(background)
-                    .shadow_lg()
+                cx.notify();
+            }));
+        for position in start..start + count {
+            let (message_index, _, turn_index) = user_messages[position];
+            let active = position == active_position;
+            let from = navigator_tick_width(position, self.navigator_previous_focus, active);
+            let to = navigator_tick_width(position, focus, active);
+            let width = from + (to - from) * progress;
+            rail = rail.child(
+                div()
+                    .id(("navigator-tick", message_index))
+                    .debug_selector(move || format!("navigator-tick-{position}").into())
+                    .w(px(32.))
+                    .h(px(10.))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_end()
+                    .cursor_pointer()
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered && this.navigator_focus != Some(position) {
+                            this.navigator_previous_focus = this.navigator_focus;
+                            this.navigator_focus = Some(position);
+                            this.navigator_motion = Some(Instant::now());
+                            cx.notify();
+                        }
+                    }))
                     .child(
-                        div()
-                            .relative()
-                            .size_full()
-                            .overflow_hidden()
-                            .child(
-                                list(navigator_list_state.clone(), move |position, _, cx| {
-                                    let (message_index, content, turn_index) =
-                                        navigator_messages[position].clone();
-                                    let state = navigator_conversation_state.clone();
-                                    let owner = navigator_owner.clone();
-                                    let active = position == active_position;
-                                    let preview = navigator_preview(&content, 28);
-                                    div()
-                                        .h(px(30.))
-                                        .px(px(6.))
-                                        .pb(px(2.))
-                                        .child(
-                                            Button::new(("jump-user-preview", message_index))
-                                                .custom(
-                                                    ButtonCustomVariant::new(cx)
-                                                        .color(if active {
-                                                            cx.theme().primary.opacity(0.2)
-                                                        } else {
-                                                            cx.theme().transparent
-                                                        })
-                                                        .foreground(if active {
-                                                            cx.theme().primary
-                                                        } else {
-                                                            cx.theme().muted_foreground
-                                                        })
-                                                        .hover(
-                                                            if cx.theme().mode == ThemeMode::Dark {
-                                                                gpui_kit::white().opacity(0.05)
-                                                            } else {
-                                                                gpui_kit::white().opacity(0.10)
-                                                            },
-                                                        )
-                                                        .active(if active {
-                                                            cx.theme().primary.opacity(0.2)
-                                                        } else {
-                                                            cx.theme().foreground.opacity(0.12)
-                                                        }),
-                                                )
-                                                .compact()
-                                                .w_full()
-                                                .h(px(28.))
-                                                .px(px(10.))
-                                                .text_size(px(12.))
-                                                .selected(active)
-                                                .accessibility_label(preview.clone())
-                                                .tooltip(preview.clone())
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .min_w_0()
-                                                        .text_left()
-                                                        .whitespace_nowrap()
-                                                        .text_ellipsis()
-                                                        .when(active, |view| {
-                                                            view.font_weight(FontWeight::MEDIUM)
-                                                        })
-                                                        .child(preview),
-                                                )
-                                                .on_click(move |_, _, cx| {
-                                                    let _ = owner.update(cx, |this, cx| {
-                                                        this.navigator_active_message =
-                                                            Some(message_index);
-                                                        state.update(cx, |state, cx| {
-                                                            let _ = state
-                                                                .scroll_to_item(turn_index, cx);
-                                                        });
-                                                        cx.notify();
-                                                    });
-                                                }),
-                                        )
-                                        .into_any_element()
-                                })
-                                .size_full()
-                                .py_2(),
+                        Button::new(("navigator-jump", message_index))
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(cx.theme().transparent)
+                                    .foreground(cx.theme().foreground)
+                                    .hover(cx.theme().transparent)
+                                    .active(cx.theme().transparent),
                             )
-                            .child(div().absolute().size_full().on_scroll_wheel(
-                                move |event, window, cx| {
-                                    let mut offset =
-                                        navigator_scroll_state.scroll_px_offset_for_scrollbar();
-                                    let max_offset =
-                                        navigator_scroll_state.max_offset_for_scrollbar().y;
-                                    let delta = event.delta.pixel_delta(window.line_height());
-                                    offset.y = (offset.y + delta.y).clamp(-max_offset, px(0.));
-                                    navigator_scroll_state.set_offset_from_scrollbar(offset);
-                                    let _ = navigator_scroll_owner.update(cx, |_, cx| cx.notify());
-                                    cx.stop_propagation();
+                            .compact()
+                            .rounded_none()
+                            .w_full()
+                            .h(px(10.))
+                            .p_0()
+                            .justify_end()
+                            .accessibility_label(format!(
+                                "{} {}",
+                                tr(language, "message.user"),
+                                position + 1
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.navigator_active_message = Some(message_index);
+                                this.conversation_state.update(cx, |state, cx| {
+                                    state.scroll_to_item(turn_index, cx);
+                                });
+                                cx.notify();
+                            }))
+                            .child(div().w(px(width)).h(px(2.)).rounded_full().bg(
+                                if focus == Some(position) || active {
+                                    cx.theme().foreground.opacity(0.85)
+                                } else {
+                                    cx.theme().muted_foreground.opacity(0.30)
                                 },
                             )),
+                    ),
+            );
+        }
+        rail = rail.child(
+            div()
+                .id("navigator-scroll-mask")
+                .debug_selector(|| "navigator-scroll-mask".into())
+                .absolute()
+                .right_0()
+                .top_0()
+                .w(px(32.))
+                .h(px(height))
+                .on_scroll_wheel(
+                    cx.listener(move |this, event: &ScrollWheelEvent, window, cx| {
+                        if total > count && this.navigator_focus.is_some() {
+                            this.navigator_wheel +=
+                                f32::from(event.delta.pixel_delta(window.line_height()).y);
+                            let steps = (this.navigator_wheel / 24.).trunc() as isize;
+                            if steps != 0 {
+                                this.navigator_wheel -= steps as f32 * 24.;
+                                let previous_start = this.navigator_start.unwrap_or(start);
+                                let next_start = (previous_start as isize - steps)
+                                    .clamp(0, (total - count) as isize)
+                                    as usize;
+                                this.navigator_start = Some(next_start);
+                                this.navigator_focus = this.navigator_focus.map(|position| {
+                                    next_start
+                                        + position.saturating_sub(previous_start).min(count - 1)
+                                });
+                                cx.notify();
+                            }
+                            cx.stop_propagation();
+                        }
+                    }),
+                ),
+        );
+        if let Some(position) = focus {
+            let (message_index, ref content, turn_index) = user_messages[position];
+            let response = messages[message_index + 1..]
+                .iter()
+                .take_while(|message| !is_navigable_user_message(message))
+                .find(|message| {
+                    message.message_type == yes_core::MessageType::Assistant
+                        && message
+                            .content
+                            .as_deref()
+                            .is_some_and(|text| !text.trim().is_empty())
+                })
+                .and_then(|message| message.content.as_deref())
+                .unwrap_or_default();
+            rail = rail.child(
+                div()
+                    .id("navigator-preview-card")
+                    .debug_selector(|| "navigator-preview-card".into())
+                    .absolute()
+                    .right(px(40.))
+                    .top(px(
+                        ((position - start) as f32 * 10. - 40.).clamp(0., (height - 106.).max(0.))
+                    ))
+                    .w(px(260.))
+                    .p_3()
+                    .rounded_lg()
+                    .border_1()
+                    .border_color(cx.theme().border.opacity(0.65))
+                    .bg(cx.theme().background)
+                    .shadow_lg()
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.navigator_active_message = Some(message_index);
+                        this.conversation_state.update(cx, |state, cx| {
+                            state.scroll_to_item(turn_index, cx);
+                        });
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(navigator_preview(content, 80)),
                     )
-            })
-            .into_any_element()
+                    .when(!response.is_empty(), |view| {
+                        view.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .max_h(px(54.))
+                                .overflow_hidden()
+                                .whitespace_normal()
+                                .child(navigator_preview(response, 140)),
+                        )
+                    })
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} · {} / {}",
+                                tr(language, "message.user"),
+                                position + 1,
+                                total
+                            )),
+                    ),
+            );
+        }
+        deferred(rail).with_priority(2).into_any_element()
     }
 
     fn set_preview_open(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -2589,7 +2619,19 @@ impl YesSessions {
             cx.weak_entity(),
         );
         let unread = self.unread_message_count;
-        let scroller = scroller.jump_button(false);
+        let has_navigator = detail
+            .messages
+            .iter()
+            .filter(|message| is_navigable_user_message(message))
+            .take(2)
+            .count()
+            > 1;
+        let mut row_style = StyleRefinement::default();
+        if has_navigator {
+            // Preserve the usual 12px row inset and reserve 44px for navigation.
+            row_style.padding.right = Some(px(56.).into());
+        }
+        let scroller = scroller.jump_button(false).with_row_style(row_style);
         let show_jump = unread > 0 || self.conversation_state.read(cx).is_scrolled_up();
         let navigator = self.render_user_navigator(&detail.messages, cx);
         div()
@@ -2795,7 +2837,7 @@ impl YesSessions {
                                 .absolute()
                                 .bottom_4()
                                 .left_0()
-                                .right_0()
+                                .right(px(if has_navigator { 44. } else { 0. }))
                                 .flex()
                                 .justify_center()
                                 .child(
@@ -3800,6 +3842,119 @@ mod tests {
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
 
     #[gpui_kit::test]
+    fn navigator_keeps_its_rail_stable_and_preview_reachable(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(600.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                session: session("navigator-test", None),
+                messages: (0..50)
+                    .flat_map(|i| {
+                        [
+                            SessionMessage::text(
+                                MessageType::User,
+                                "2026-09-07T00:00:00Z",
+                                format!("Question {i}"),
+                            ),
+                            SessionMessage::text(
+                                MessageType::Assistant,
+                                "2026-09-07T00:00:00Z",
+                                format!("Answer {i}"),
+                            ),
+                        ]
+                    })
+                    .collect(),
+            }));
+            app.conversation_state
+                .update(cx, |state, cx| state.reset(50, cx));
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let before = visual.debug_bounds("user-message-navigator").unwrap();
+        let tick = visual.debug_bounds("navigator-tick-2").unwrap();
+        let content = visual.debug_bounds("conversation-end").unwrap();
+        assert!(
+            content.right() <= tick.left() - px(12.),
+            "content must stop before the navigation gutter"
+        );
+
+        visual.simulate_mouse_move(tick.center(), None, Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            before,
+            visual.debug_bounds("user-message-navigator").unwrap()
+        );
+        let card = visual.debug_bounds("navigator-preview-card").unwrap();
+        assert!(card.left() >= px(0.));
+        visual.simulate_mouse_move(
+            point(tick.left() - px(4.), tick.center().y),
+            None,
+            Default::default(),
+        );
+        assert!(visual.debug_bounds("navigator-preview-card").is_some());
+        visual.simulate_mouse_move(card.center(), None, Default::default());
+        assert!(visual.debug_bounds("navigator-preview-card").is_some());
+        visual.simulate_click(card.center(), Default::default());
+        cx.run_until_parked();
+        assert_eq!(
+            app.read_with(cx, |app, _| app.navigator_active_message),
+            Some(4)
+        );
+        let tick = visual.debug_bounds("navigator-tick-2").unwrap();
+        visual.simulate_mouse_move(tick.center(), None, Default::default());
+        visual.simulate_event(ScrollWheelEvent {
+            position: tick.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            modifiers: Default::default(),
+            touch_phase: TouchPhase::Started,
+        });
+        cx.run_until_parked();
+        assert!(app.read_with(cx, |app, _| app.navigator_start.unwrap_or_default()) > 0);
+        assert_eq!(
+            before,
+            visual.debug_bounds("user-message-navigator").unwrap()
+        );
+        visual.simulate_event(ScrollWheelEvent {
+            position: tick.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(-120.))),
+            modifiers: Default::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        cx.run_until_parked();
+        assert_eq!(app.read_with(cx, |app, _| app.navigator_start), Some(10));
+        assert_eq!(
+            app.read_with(cx, |app, _| app.navigator_active_message),
+            Some(4)
+        );
+        visual.simulate_mouse_move(point(px(10.), px(100.)), None, Default::default());
+        assert!(visual.debug_bounds("navigator-preview-card").is_none());
+        app.update(cx, |app, cx| {
+            app.reset_detail(cx);
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                session: session("single-message", None),
+                messages: vec![SessionMessage::text(
+                    MessageType::User,
+                    "2026-09-07T00:00:00Z",
+                    "One question",
+                )],
+            }));
+            app.conversation_state
+                .update(cx, |state, cx| state.reset(1, cx));
+            cx.notify();
+        });
+        cx.run_until_parked();
+        assert!(visual.debug_bounds("user-message-navigator").is_none());
+        let single_content = visual.debug_bounds("conversation-end").unwrap();
+        assert_eq!(single_content.size.width, content.size.width + px(44.));
+    }
+
+    #[gpui_kit::test]
     fn unread_button_keeps_count_through_layout_and_clears_on_click(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -3832,6 +3987,7 @@ mod tests {
         });
         let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
         visual.debug_bounds("session-detail-title").unwrap();
+        assert!(visual.debug_bounds("conversation-end").is_some());
         // Scroll state alone must update the parent overlay, without unread messages
         // or an explicit notification on the app entity.
         app.update(cx, |app, cx| {
@@ -3841,6 +3997,7 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(visual.debug_bounds("conversation-jump-latest").is_some());
+        assert!(visual.debug_bounds("conversation-end").is_none());
         app.update(cx, |app, cx| {
             app.conversation_state
                 .update(cx, |state, cx| state.scroll_to_end(cx));
@@ -3873,6 +4030,7 @@ mod tests {
         visual.simulate_click(button.center(), Default::default());
         cx.run_until_parked();
         assert_eq!(app.read_with(cx, |app, _| app.unread_message_count), 0);
+        assert!(visual.debug_bounds("conversation-end").is_some());
     }
 
     #[gpui_kit::test]

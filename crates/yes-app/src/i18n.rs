@@ -2,6 +2,19 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "sessions.reachedBottom") => "已到达底部",
+        (_, "sessions.reachedBottom") => "You’ve reached the bottom",
+        (Language::Zh, "message.noFinalNewline") => "片段末尾无换行",
+        (_, "message.noFinalNewline") => "No newline at end of snippet",
+        (Language::Zh, "preview.collapseContext") => "收起上下文",
+        (_, "preview.collapseContext") => "Collapse context",
+        (Language::Zh, "preview.expandContext") => "展开 {count} 行未修改内容",
+        (_, "preview.expandContext") => "Expand {count} unchanged lines",
+        (Language::Zh, "message.editDiff") => "本次修改",
+        (_, "message.editDiff") => "This edit",
+        (Language::Zh, "message.editDiffLimited") => "内容较大，仅显示部分修改",
+        (_, "message.editDiffLimited") => "Large edit: showing a limited preview",
+
         (Language::Zh, "menu.quit") => "退出 Yes Sessions",
         (_, "menu.quit") => "Quit Yes Sessions",
         (Language::Zh, "menu.file") => "文件",

@@ -499,12 +499,140 @@ fn format_tool_value(value: &serde_json::Value) -> String {
 
 fn tool_input_rows(
     input: Option<&serde_json::Map<String, serde_json::Value>>,
+    omit_edit_strings: bool,
 ) -> Vec<(String, String)> {
     input
         .into_iter()
         .flat_map(|input| input.iter())
+        .filter(|(key, _)| {
+            !omit_edit_strings
+                || !matches!(
+                    key.as_str(),
+                    "old_string" | "new_string" | "oldString" | "newString"
+                )
+        })
         .map(|(key, value)| (key.clone(), format_tool_value(value)))
         .collect()
+}
+
+fn edit_strings<'a>(
+    tool_name: &str,
+    input: Option<&'a serde_json::Map<String, serde_json::Value>>,
+) -> Option<(&'a str, &'a str)> {
+    if !tool_name.eq_ignore_ascii_case("edit") && !tool_name.eq_ignore_ascii_case("edit_file") {
+        return None;
+    }
+    let input = input?;
+    let old = input
+        .get("old_string")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| input.get("oldString").and_then(serde_json::Value::as_str))?;
+    let new = input
+        .get("new_string")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| input.get("newString").and_then(serde_json::Value::as_str))?;
+    Some((old, new))
+}
+
+fn render_edit_diff(
+    index: usize,
+    diff: crate::edit_diff::EditDiff,
+    language: Language,
+    cx: &App,
+) -> AnyElement {
+    use crate::edit_diff::Kind;
+    let added = hsla(0.40, 0.55, 0.43, 1.);
+    let removed = hsla(0.96, 0.72, 0.56, 1.);
+    div()
+        .mt_2()
+        .min_w_0()
+        .border_1()
+        .border_color(cx.theme().border)
+        .rounded(px(4.))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_3()
+                .px_2()
+                .py_1()
+                .child(tr(language, "message.editDiff"))
+                .when(diff.complete_input, |header| {
+                    header
+                        .child(div().text_color(added).child(format!("+{}", diff.added)))
+                        .child(
+                            div()
+                                .text_color(removed)
+                                .child(format!("−{}", diff.removed)),
+                        )
+                }),
+        )
+        .when(diff.limited, |view| {
+            view.child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr(language, "message.editDiffLimited")),
+            )
+        })
+        .child(
+            div()
+                .id(("historical-edit-diff", index))
+                .debug_selector(|| "historical-edit-diff".into())
+                .max_h(px(360.))
+                .overflow_y_scroll()
+                .map(|mut view| {
+                    view.style().restrict_scroll_to_axis = Some(true);
+                    view
+                })
+                .font_family(cx.theme().mono_font_family.clone())
+                .children(diff.rows.into_iter().map(|row| {
+                    let (marker, color) = match row.kind {
+                        Kind::Added => ("+", added),
+                        Kind::Removed => ("−", removed),
+                        Kind::Context | Kind::Omitted => (" ", cx.theme().muted_foreground),
+                    };
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .flex()
+                        .items_start()
+                        .px_2()
+                        .gap_2()
+                        .when(matches!(row.kind, Kind::Added | Kind::Removed), |view| {
+                            view.bg(color.opacity(0.12))
+                        })
+                        .child(div().flex_none().text_color(color).child(marker))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .whitespace_normal()
+                                .child(if row.text.is_empty() {
+                                    " ".into()
+                                } else {
+                                    row.text
+                                })
+                                .when(
+                                    row.no_newline
+                                        && matches!(row.kind, Kind::Added | Kind::Removed),
+                                    |view| {
+                                        view.child(
+                                            div()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .text_xs()
+                                                .child(format!(
+                                                    "\\ {}",
+                                                    tr(language, "message.noFinalNewline")
+                                                )),
+                                        )
+                                    },
+                                ),
+                        )
+                })),
+        )
+        .into_any_element()
 }
 
 fn tool_output_text(message: Option<&SessionMessage>) -> Option<String> {
@@ -810,7 +938,15 @@ fn render_tool(
     let preview_owner = owner.clone();
     let chevron_owner = owner.clone();
     let summary = summary.filter(|_| file_target.is_none());
-    let input_rows = tool_input_rows(input);
+    let edit = is_expanded
+        .then(|| edit_strings(&tool_name, input))
+        .flatten();
+    let input_rows = if is_expanded {
+        tool_input_rows(input, edit.is_some())
+    } else {
+        Vec::new()
+    };
+    let edit_diff = edit.map(|(old, new)| crate::edit_diff::compare(old, new));
     let output = tool_output_text(tool_result.map(|item| &item.message))
         .or_else(|| tool_output_text(tool_use.map(|item| &item.message)));
     let message_index = item.index;
@@ -1013,12 +1149,15 @@ fn render_tool(
                             .text_color(cx.theme().muted_foreground)
                             .child(tr(options.language, "message.input")),
                     )
-                    .when(input_rows.is_empty(), |section| {
+                    .when(input_rows.is_empty() && edit_diff.is_none(), |section| {
                         section.child(
                             div()
                                 .text_color(cx.theme().muted_foreground)
                                 .child(tr(options.language, "message.noInput")),
                         )
+                    })
+                    .when_some(edit_diff, |section, diff| {
+                        section.child(render_edit_diff(message_index, diff, options.language, cx))
                     })
                     .children(input_rows.into_iter().map(|(key, value)| {
                         div()
@@ -1897,7 +2036,7 @@ pub fn conversation_scroller(
         let Some(turn) = turns.get(index).cloned() else {
             return div().into_any_element();
         };
-        render_turn(
+        let content = render_turn(
             index,
             index,
             turn,
@@ -1910,7 +2049,23 @@ pub fn conversation_scroller(
             &mermaid_views,
             owner.clone(),
             cx,
-        )
+        );
+        div()
+            .w_full()
+            .child(content)
+            .when(index + 1 == turns.len(), |view| {
+                view.child(
+                    div()
+                        .debug_selector(|| "conversation-end".into())
+                        .w_full()
+                        .py_4()
+                        .text_center()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr(options.language, "sessions.reachedBottom")),
+                )
+            })
+            .into_any_element()
     })
     .with_jump_button_label(tr(options.language, "sessions.jumpLatest"))
 }
@@ -1923,6 +2078,67 @@ mod tests {
     };
     use serde_json::json;
     use yes_core::{AppType, MessageType, SessionMessage};
+
+    struct EditDiffTestView;
+
+    impl gpui_kit::Render for EditDiffTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            super::render_edit_diff(
+                0,
+                crate::edit_diff::compare("let old = 1;\n", "let new = 2;\n"),
+                yes_core::Language::En,
+                cx,
+            )
+        }
+    }
+
+    #[gpui_kit::test]
+    fn historical_edit_diff_renders_in_a_narrow_message(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(300.), px(400.)), |_, _| EditDiffTestView);
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        let bounds = visual.debug_bounds("historical-edit-diff").unwrap();
+        assert!(bounds.size.width > px(0.) && bounds.size.width <= px(300.));
+        assert!(bounds.size.height > px(0.));
+    }
+
+    #[test]
+    fn edit_arguments_require_matching_tool_and_both_strings() {
+        let snake = json!({"old_string":"before", "new_string":"after"});
+        let camel = json!({"oldString":"", "newString":"added"});
+        let mixed =
+            json!({"old_string":null,"oldString":"old","new_string":"","newString":"ignored"});
+        assert_eq!(
+            super::edit_strings("edit", mixed.as_object()),
+            Some(("old", ""))
+        );
+        assert_eq!(
+            super::edit_strings("Edit", snake.as_object()),
+            Some(("before", "after"))
+        );
+        assert_eq!(
+            super::edit_strings("edit_file", camel.as_object()),
+            Some(("", "added"))
+        );
+        assert_eq!(super::edit_strings("read", snake.as_object()), None);
+        assert_eq!(
+            super::edit_strings("edit", json!({"old_string":"old"}).as_object()),
+            None
+        );
+        assert_eq!(
+            super::edit_strings(
+                "edit",
+                json!({"old_string":1,"new_string":"new"}).as_object()
+            ),
+            None
+        );
+    }
 
     #[test]
     fn tool_paths_keep_filename_and_nearest_directories() {
@@ -2147,7 +2363,7 @@ mod tests {
             "path": "/tmp/example.rs",
             "value": null
         });
-        let rows = tool_input_rows(input.as_object());
+        let rows = tool_input_rows(input.as_object(), false);
 
         assert!(rows.contains(&("enabled".into(), "true".into())));
         assert!(rows.contains(&("options".into(), "{\"depth\":2}".into())));
