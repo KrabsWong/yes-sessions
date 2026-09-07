@@ -19,12 +19,15 @@ jobs:
     steps:
       - name: Resolve tag
         id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
-          if [ -n "${{ inputs.tag }}" ]; then
-            echo "value=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "value=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected a stable release tag: vMAJOR.MINOR.PATCH" >&2
+            exit 1
           fi
+          echo "value=$TAG" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v6
         with:
@@ -36,7 +39,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Require distribution credentials
+      - name: Select distribution signing
+        id: signing
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -46,14 +50,27 @@ jobs:
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
           HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD CODESIGN_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD HOMEBREW_TAP_TOKEN; do
-            if [ -z "${!name}" ]; then
-              echo "Required release secret is missing: $name" >&2
-              exit 1
-            fi
+          if [ -z "$HOMEBREW_TAP_TOKEN" ]; then
+            echo "HOMEBREW_TAP_TOKEN is required" >&2
+            exit 1
+          fi
+          configured=0
+          for name in MACOS_CERTIFICATE MACOS_CERTIFICATE_PASSWORD CODESIGN_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            if [ -n "${!name}" ]; then configured=$((configured + 1)); fi
           done
+          if [ "$configured" -eq 0 ]; then
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "notice=Ad-hoc signed, without Apple notarization. On first launch, open System Settings > Privacy & Security > Open Anyway." >> "$GITHUB_OUTPUT"
+          elif [ "$configured" -eq 6 ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "notice=Signed with Developer ID, notarized by Apple, and stapled for Gatekeeper validation." >> "$GITHUB_OUTPUT"
+          else
+            echo "Configure all six Apple signing secrets, or leave all six unset for ad-hoc distribution" >&2
+            exit 1
+          fi
 
       - name: Install Developer ID certificate
+        if: steps.signing.outputs.enabled == 'true'
         env:
           MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
           MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -80,7 +97,10 @@ jobs:
           echo "value=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Test
-        run: cargo test --workspace --locked
+        run: |
+          cargo fmt --all --check
+          cargo check --workspace --locked
+          cargo test --workspace --locked
 
       - name: Build app and DMG
         run: ./scripts/package-macos.sh
@@ -108,7 +128,7 @@ jobs:
 
             SHA256: `${{ steps.sha.outputs.value }}`
 
-            Signed with Developer ID, notarized by Apple, and stapled for Gatekeeper validation.
+            ${{ steps.signing.outputs.notice }}
 
       - name: Publish artifact to Homebrew tap release
         env:
@@ -131,19 +151,19 @@ jobs:
           VERSION: ${{ steps.version.outputs.value }}
           SHA256: ${{ steps.sha.outputs.value }}
         run: |
-          gh repo clone KrabsWong/homebrew-yes-sessions homebrew-tap
+          gh auth setup-git
+          gh repo clone KrabsWong/homebrew-yes-sessions homebrew-tap -- --branch main
+          python3 scripts/render-homebrew-cask.py "$VERSION" "$SHA256" homebrew-tap/Casks/yes-sessions.rb
+          cp packaging/homebrew-README.md homebrew-tap/README.md
+          ruby -c homebrew-tap/Casks/yes-sessions.rb
           cd homebrew-tap
-          sed -i '' "s/version \".*\"/version \"${VERSION}\"/" Casks/yes-sessions.rb
-          sed -i '' "s/sha256 \".*\"/sha256 \"${SHA256}\"/" Casks/yes-sessions.rb
-          sed -i '' "s|url \".*\"|url \"https://github.com/KrabsWong/homebrew-yes-sessions/releases/download/v${VERSION}/Yes-Sessions-${VERSION}-arm64.dmg\"|" Casks/yes-sessions.rb
-          sed -i '' 's/app "Yes[- ]Sessions.app"/app "Yes Sessions.app"/' Casks/yes-sessions.rb
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
-          git add Casks/yes-sessions.rb
+          git add Casks/yes-sessions.rb README.md
           if git diff --cached --quiet; then exit 0; fi
           git commit -m "Update yes-sessions to ${VERSION}" -m "Publish the Rust/GPUI Apple Silicon package and refresh its checksum."
           git push origin main
 
       - name: Remove temporary signing keychain
-        if: always()
+        if: always() && steps.signing.outputs.enabled == 'true'
         run: security delete-keychain "$RUNNER_TEMP/yes-sessions-signing.keychain-db" || true

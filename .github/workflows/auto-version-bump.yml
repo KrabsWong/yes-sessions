@@ -25,6 +25,7 @@ jobs:
 
       - uses: actions/checkout@v6
         with:
+          ref: main
           fetch-depth: 0
           token: ${{ secrets.WORKFLOW_PAT }}
 
@@ -36,8 +37,11 @@ jobs:
           LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
         run: |
           TYPE=patch
-          if [[ "$LABELS" == *'"major"'* ]]; then TYPE=major; fi
-          if [[ "$LABELS" == *'"minor"'* ]]; then TYPE=minor; fi
+          if [[ "$LABELS" == *'"major"'* ]]; then
+            TYPE=major
+          elif [[ "$LABELS" == *'"minor"'* ]]; then
+            TYPE=minor
+          fi
           echo "type=$TYPE" >> "$GITHUB_OUTPUT"
 
       - name: Update Cargo version
@@ -46,6 +50,12 @@ jobs:
           BUMP_TYPE: ${{ steps.bump.outputs.type }}
         run: |
           CURRENT="$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n 1)"
+          # A version deliberately prepared on the PR (such as 10.0.0) is
+          # released as-is. Only increment an already-tagged version.
+          if ! git rev-parse --verify "refs/tags/v$CURRENT" >/dev/null 2>&1; then
+            echo "value=$CURRENT" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           CORE="${CURRENT%%-*}"
           IFS='.' read -r MAJOR MINOR PATCH <<< "$CORE"
           case "$BUMP_TYPE" in
@@ -54,7 +64,8 @@ jobs:
             patch) PATCH=$((PATCH + 1)) ;;
           esac
           NEXT="$MAJOR.$MINOR.$PATCH"
-          sed -i "s/^version = \"$CURRENT\"/version = \"$NEXT\"/" Cargo.toml
+          sed "s/^version = \"$CURRENT\"/version = \"$NEXT\"/" Cargo.toml > Cargo.toml.tmp
+          mv Cargo.toml.tmp Cargo.toml
           cargo update --workspace
           echo "value=$NEXT" >> "$GITHUB_OUTPUT"
 
@@ -65,7 +76,8 @@ jobs:
           git config user.name "GitHub Actions"
           git config user.email "actions@github.com"
           git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): bump version to $VERSION" -m "Update the Rust workspace and lockfile versions after merging the release PR."
-          git push origin main
+          if ! git diff --cached --quiet; then
+            git commit -m "chore(release): bump version to $VERSION" -m "Update the Rust workspace and lockfile versions after merging the release PR."
+          fi
           git tag "v$VERSION"
-          git push origin "v$VERSION"
+          git push --atomic origin HEAD:main "refs/tags/v$VERSION"

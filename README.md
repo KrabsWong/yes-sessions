@@ -46,7 +46,7 @@ cargo test --workspace
 - `target/macos/Yes Sessions.app`
 - `release/Yes-Sessions-<version>-arm64.dmg`
 
-默认使用 ad-hoc 签名，适合本地验证。正式分发使用 GitHub Release 工作流；它会进行 Developer ID 签名、Apple 公证和 stapling。仓库需要配置以下 Actions Secrets：
+本地与 GitHub Release 默认均可使用 ad-hoc 签名，无需 Apple 开发者证书。自动发布需要沿用 `HOMEBREW_TAP_TOKEN` 和 `WORKFLOW_PAT`；下面的六项 Apple 配置为可选，完整配置后启用 Developer ID 签名、Apple 公证和 stapling：
 
 - `MACOS_CERTIFICATE`：Developer ID Application 证书的 Base64 编码 `.p12`
 - `MACOS_CERTIFICATE_PASSWORD`：导出 `.p12` 时使用的密码
@@ -55,7 +55,9 @@ cargo test --workspace
 - `HOMEBREW_TAP_TOKEN`：更新 Homebrew tap 与发布附件
 - `WORKFLOW_PAT`：自动版本工作流推送 release tag，并触发后续 Release 工作流
 
-缺少任意分发凭据时，Release 工作流会立即失败，不会发布未经公证的安装包。本地也可同时设置 `CODESIGN_IDENTITY` 和三项 Apple 公证凭据，让 `./scripts/package-macos.sh` 生成已签名、公证并 stapled 的 `.app` 与 DMG。
+六项 Apple 配置全部留空时正常发布 ad-hoc 安装包；只配置部分时工作流会报错，避免错误的签名配置。本地也可同时设置 `CODESIGN_IDENTITY` 和三项 Apple 公证凭据，让 `./scripts/package-macos.sh` 生成已签名、公证并 stapled 的 `.app` 与 DMG。
+
+发布链路、首次合并检查和 Homebrew 模板维护见 [发布流水线](docs/RELEASE_PIPELINE.md)。
 
 ## 架构
 
@@ -90,11 +92,7 @@ brew tap krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
 
-也可从 GitHub Releases 下载已经签名、公证并 stapled 的 DMG，无需绕过 Gatekeeper。本地生成的 ad-hoc 调试包如果被 macOS 标记为 quarantine，可在首次打开前手工执行：
-
-```bash
-xattr -c ~/Downloads/Yes-Sessions-*.dmg
-```
+也可从 GitHub Releases 下载 DMG，签名状态见发布说明。未公证版本首次启动被 macOS 拦截时，在「系统设置 → 隐私与安全」选择「仍要打开」。受管理的电脑可能限制手动放行。
 
 ## 许可证
 

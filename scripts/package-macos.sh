@@ -36,7 +36,7 @@ fi
 cd "$project_root"
 export MACOSX_DEPLOYMENT_TARGET=13.0
 export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-mmacosx-version-min=13.0"
-cargo build --release --package yes-sessions --target "$build_target"
+cargo build --locked --release --package yes-sessions --target "$build_target"
 
 rm -rf "$bundle_root"
 mkdir -p "$contents/MacOS" "$contents/Resources"
