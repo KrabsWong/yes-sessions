@@ -1,3 +1,6 @@
+#[path = "agent_search.rs"]
+mod agent_search;
+use agent_search::{AgentSearch, AgentSearchLanding};
 #[path = "session_search.rs"]
 mod session_search;
 use session_search::SessionSearch;
@@ -373,6 +376,8 @@ pub struct YesSessions {
     pub(crate) search_landing_scroll_pending: bool,
     pub(crate) search_landing: Option<(usize, Instant)>,
     session_search: SessionSearch,
+    agent_search: AgentSearch,
+    agent_search_landing: Option<AgentSearchLanding>,
     copied_metadata: Option<(&'static str, Instant)>,
     registry: Arc<ProviderRegistry>,
     settings_store: SettingsStore,
@@ -430,6 +435,8 @@ impl YesSessions {
             search_landing: None,
             search_landing_scroll_pending: false,
             session_search: SessionSearch::default(),
+            agent_search: AgentSearch::default(),
+            agent_search_landing: None,
             copied_metadata: None,
             registry: Arc::new(ProviderRegistry::default()),
             settings_store,
@@ -822,6 +829,9 @@ impl YesSessions {
     }
 
     fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        self.agent_search = AgentSearch::default();
+        self.agent_search_landing = None;
+        self.session_search = SessionSearch::default();
         self.parent_conversations.clear();
         self.unread_message_count = 0;
         self.sessions_generation += 1;
@@ -860,6 +870,9 @@ impl YesSessions {
                 match result {
                     Ok(sessions) => {
                         this.sessions = Arc::new(sessions);
+                        if this.agent_search.input.is_some() {
+                            this.sync_agent_search_directories();
+                        }
                         if let Some(first) = this
                             .sessions
                             .iter()
@@ -906,6 +919,7 @@ impl YesSessions {
                 let changed = this.sessions.as_ref() != &sessions;
                 if changed {
                     this.sessions = Arc::new(sessions);
+                    this.sync_agent_search_directories();
                 }
                 if selection != this.selected_session_id {
                     if let Some(id) = selection {
@@ -931,6 +945,7 @@ impl YesSessions {
     }
 
     fn reset_detail(&mut self, cx: &mut Context<Self>) {
+        self.agent_search_landing = None;
         self.copied_metadata = None;
         self.search_landing = None;
         self.search_landing_scroll_pending = false;
@@ -1031,6 +1046,7 @@ impl YesSessions {
                                 let _ = state.scroll_to_item(0, cx);
                             }
                         });
+                        this.finish_agent_search_landing(cx);
                     }
                     Ok(None) => this.error = Some("Session was not found".into()),
                     Err(error) => this.error = Some(error),
@@ -2355,6 +2371,9 @@ impl YesSessions {
         messages: &[yes_core::SessionMessage],
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if self.agent_search.input.is_some() {
+            return div().into_any_element();
+        }
         let user_messages = messages
             .iter()
             .enumerate()
@@ -3979,7 +3998,30 @@ impl Render for YesSessions {
                     this.open_session_search(window, cx)
                 }),
             )
+            .on_action(
+                cx.listener(|this, _: &crate::commands::FindInAgent, window, cx| {
+                    this.open_agent_search(window, cx)
+                }),
+            )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.agent_search.input.is_some() {
+                    match event.keystroke.key.as_str() {
+                        "up" | "down" if this.agent_search_query_focused(window, cx) => {
+                            this.step_agent_search(event.keystroke.key == "up", cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        "escape" => {
+                            if this.agent_search.filter_open() {
+                                return;
+                            }
+                            this.close_agent_search(window, cx);
+                            cx.stop_propagation();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if this.session_search.input.is_some()
                     && matches!(event.keystroke.key.as_str(), "up" | "down")
                 {
@@ -4056,6 +4098,10 @@ impl Render for YesSessions {
             .when(
                 self.session_search.input.is_some() && self.detail.is_some(),
                 |view| view.child(self.render_session_search(cx)),
+            )
+            .when(
+                self.agent_search.input.is_some() && !self.settings_open,
+                |view| view.child(self.render_agent_search(cx)),
             )
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
@@ -4459,6 +4505,8 @@ mod tests {
             app.update(cx, |app, cx| {
                 app.sessions_generation += 1;
                 app.loading_sessions = false;
+                // Advancing the toast clock must not refresh real provider files.
+                app.refreshing_sessions = true;
                 app.error = Some(message.into());
                 cx.notify();
             });
@@ -4567,6 +4615,119 @@ mod tests {
             visual.debug_bounds("conversation-bubble-0").unwrap().top(),
             stopped
         );
+    }
+
+    #[gpui_kit::test]
+    fn fast_upward_scroll_after_jump_latest_preserves_nearby_history(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(600.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        let messages = (0..100)
+            .flat_map(|i| {
+                let user = SessionMessage::text(
+                    MessageType::User,
+                    "",
+                    format!("Question {i}\n{}", "Historical content\n".repeat(25)),
+                );
+                let mut tool = SessionMessage::text(MessageType::ToolUse, "", "");
+                tool.tool_name = Some("Bash".into());
+                tool.call_id = Some(format!("call-{i}"));
+                let mut result = SessionMessage::text(
+                    MessageType::ToolResult,
+                    "",
+                    "Long tool output\n".repeat(100),
+                );
+                result.tool_name = tool.tool_name.clone();
+                result.call_id = tool.call_id.clone();
+                [user, tool, result]
+            })
+            .collect::<Vec<_>>();
+        let detail = yes_core::SessionDetail {
+            session: session("scroll-anchor", None),
+            messages,
+        };
+        let count = super::conversation_turn_count(&detail.messages, AppType::CodeBuddy);
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings.collapse_bash_blocks = true;
+            app.selected_app = AppType::CodeBuddy;
+            app.detail = Some(std::sync::Arc::new(detail));
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(count, cx);
+                state.scroll_to_item(0, cx);
+            });
+            cx.notify();
+        });
+        // The visual-test selector API requires static names; allocate them once per test.
+        let selectors = (0..count)
+            .map(|index| &*Box::leak(format!("conversation-turn-{index}").into_boxed_str()))
+            .collect::<Vec<&'static str>>();
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        let jump = visual.debug_bounds("conversation-jump-latest").unwrap();
+        visual.simulate_click(jump.center(), Default::default());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("conversation-end").is_some());
+        let viewport = visual.debug_bounds("conversation-viewport").unwrap();
+        visual.simulate_event(ScrollWheelEvent {
+            position: viewport.center(),
+            delta: ScrollDelta::Pixels(point(px(0.), px(1500.))),
+            modifiers: Default::default(),
+            touch_phase: TouchPhase::Moved,
+        });
+        visual.run_until_parked();
+        let visible = (0..count)
+            .filter(|index| {
+                visual
+                    .debug_bounds(selectors[*index])
+                    .is_some_and(|bounds| bounds.intersects(&viewport))
+            })
+            .collect::<Vec<_>>();
+        assert!(app.read_with(cx, |app, _| app.expanded_messages.is_empty()));
+        assert!(!visible.is_empty());
+        assert!(
+            visible[0] >= count - 10,
+            "a 1500px gesture jumped across unmeasured history: {visible:?}, count={count}"
+        );
+        for _ in 0..30 {
+            let before = (0..count)
+                .filter_map(|index| {
+                    visual
+                        .debug_bounds(selectors[index])
+                        .filter(|bounds| bounds.intersects(&viewport))
+                        .map(|bounds| (index, bounds))
+                })
+                .collect::<Vec<_>>();
+            visual.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(80.))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Moved,
+            });
+            visual.run_until_parked();
+            let shifts = before
+                .iter()
+                .filter_map(|(index, bounds)| {
+                    visual
+                        .debug_bounds(selectors[*index])
+                        .map(|next| f32::from(next.top() - bounds.top()))
+                })
+                .collect::<Vec<_>>();
+            assert!(
+                !shifts.is_empty(),
+                "small gesture lost every visible anchor"
+            );
+            assert!(
+                shifts.iter().all(|shift| *shift >= -1. && *shift <= 97.),
+                "unexpected jump: {shifts:?}"
+            );
+            assert!(app.read_with(cx, |app, _| app.expanded_messages.is_empty()));
+        }
     }
 
     #[gpui_kit::test]

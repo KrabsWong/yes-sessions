@@ -741,6 +741,27 @@ impl SessionProvider for CodeBuddyProvider {
         Ok(sessions)
     }
 
+    fn session_detail_for_search(&self, session: &Session) -> Result<Option<SessionDetail>> {
+        let path = super::search_path(&self.projects_path(), &session.file_path)?;
+        anyhow::ensure!(
+            path.file_stem().and_then(|stem| stem.to_str()) == Some(session.id.as_str()),
+            "Session path does not match its ID"
+        );
+        let (created_at, updated_at, size) = Self::file_times(&path);
+        Ok(self.detail_for(&SessionFile {
+            path,
+            project_cwd: session.directory.clone().unwrap_or_default(),
+            id: session.id.clone(),
+            internal_id: session.uuid.clone(),
+            parent_id: session.parent_session_id.clone(),
+            agent_type: session.agent_type.clone(),
+            kind: session.kind,
+            size,
+            created_at,
+            updated_at,
+        }))
+    }
+
     fn session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
         let files = self.discover();
         Ok(files

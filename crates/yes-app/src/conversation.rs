@@ -2571,6 +2571,7 @@ fn render_turn(
         .collect::<Vec<_>>();
     div()
         .id(("conversation-turn", turn_index))
+        .debug_selector(move || format!("conversation-turn-{turn_index}"))
         .w_full()
         .v_flex()
         .gap_3()

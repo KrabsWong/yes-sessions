@@ -902,6 +902,29 @@ impl SessionProvider for ClaudeProvider {
         Ok(sessions)
     }
 
+    fn session_detail_for_search(&self, session: &Session) -> Result<Option<SessionDetail>> {
+        let path = super::search_path(&self.root, &session.file_path)?;
+        let detail = if session.id.starts_with("ses_") && !session.id.contains(['/', '\\']) {
+            let expected = self
+                .transcripts_path()
+                .join(format!("{}.jsonl", session.id));
+            anyhow::ensure!(
+                path == super::search_path(&self.root, &expected)?,
+                "Session path does not match its ID"
+            );
+            self.old_detail(&session.id)
+        } else {
+            self.new_detail(&path)
+        };
+        anyhow::ensure!(
+            detail
+                .as_ref()
+                .is_none_or(|detail| detail.session.id == session.id),
+            "Session path does not match its ID"
+        );
+        Ok(detail)
+    }
+
     fn session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
         if let Some((parent, agent)) = session_id.split_once(':') {
             if !Self::valid_session_id(parent) {
