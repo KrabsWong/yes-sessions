@@ -1,21 +1,10 @@
 use super::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
-use yes_core::{MessageType, SessionMessage};
+#[cfg(test)]
+use yes_core::SessionMessage;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum SearchScope {
-    #[default]
-    All,
-    User,
-    Assistant,
-}
-
-#[derive(Clone, Debug)]
-struct SearchHit {
-    message: usize,
-    excerpt: String,
-}
+use yes_core::search::{SearchHit, SearchScope, match_range, search_messages};
 
 #[derive(Default)]
 pub(super) struct SessionSearch {
@@ -29,107 +18,12 @@ pub(super) struct SessionSearch {
     task: Option<Task<()>>,
 }
 
-fn match_range(text: &str, query: &str) -> Option<Range<usize>> {
-    if query.is_empty() {
-        return None;
-    }
-    let offset = text.to_lowercase().find(query)?;
-    let mut folded = 0;
-    let mut start = None;
-    for (index, ch) in text.char_indices() {
-        let next = folded + ch.to_lowercase().map(char::len_utf8).sum::<usize>();
-        if start.is_none() && next > offset {
-            start = Some(index);
-        }
-        if next >= offset + query.len() {
-            return Some(start?..index + ch.len_utf8());
-        }
-        folded = next;
-    }
-    None
-}
-
-// Return a small original-text excerpt, including when lowercasing changes UTF-8 length.
-fn excerpt(text: &str, query: &str) -> Option<String> {
-    let start = match_range(text, query)?.start;
-    let prefix = text[..start]
-        .char_indices()
-        .rev()
-        .nth(40)
-        .map_or(0, |(i, _)| i);
-    let body = text[prefix..]
-        .chars()
-        .take(200)
-        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
-        .collect::<String>();
-    Some(format!(
-        "{}{}{}",
-        if prefix > 0 { "…" } else { "" },
-        body,
-        if text[prefix..].chars().take(201).count() > 200 {
-            "…"
-        } else {
-            ""
-        }
-    ))
-}
-
-fn search_messages(messages: &[SessionMessage], query: &str, scope: SearchScope) -> Vec<SearchHit> {
-    let query = query.trim().to_lowercase();
-    if query.is_empty() {
-        return Vec::new();
-    }
-    messages
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| match scope {
-            SearchScope::All => true,
-            SearchScope::User => item.message_type == MessageType::User,
-            SearchScope::Assistant => item.message_type == MessageType::Assistant,
-        })
-        .filter_map(|(message, item)| {
-            let found = [
-                item.content.as_deref(),
-                item.reasoning_content.as_deref(),
-                item.tool_name.as_deref(),
-                item.tool_output
-                    .as_ref()
-                    .and_then(|out| out.output.as_deref()),
-                item.tool_output
-                    .as_ref()
-                    .and_then(|out| out.preview.as_deref()),
-            ]
-            .into_iter()
-            .flatten()
-            .find_map(|text| excerpt(text, &query))
-            .or_else(|| {
-                item.attachments.iter().find_map(|attachment| {
-                    excerpt(&attachment.name, &query).or_else(|| match &attachment.source {
-                        yes_core::AttachmentSource::LocalPath(path) => {
-                            excerpt(&path.to_string_lossy(), &query)
-                        }
-                        _ => None,
-                    })
-                })
-            })
-            .or_else(|| {
-                item.tool_input.as_ref().and_then(|input| {
-                    excerpt(
-                        &serde_json::to_string_pretty(input).unwrap_or_default(),
-                        &query,
-                    )
-                })
-            });
-            found.map(|excerpt| SearchHit { message, excerpt })
-        })
-        .collect()
-}
-
 impl YesSessions {
     pub(super) fn open_session_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.detail.is_none() || self.settings_open {
             return;
         }
+        self.agent_search = Default::default();
         if self.session_search.input.is_none() {
             let input = cx.new(|cx| {
                 InputState::new(window, cx)
@@ -223,10 +117,14 @@ impl YesSessions {
         let Some(hit) = self.session_search.hits.get(self.session_search.active) else {
             return;
         };
-        let Some(detail) = &self.detail else {
+        self.jump_to_search_message(hit.message, cx);
+    }
+
+    pub(super) fn jump_to_search_message(&mut self, message: usize, cx: &mut Context<Self>) {
+        let Some(detail) = &self.detail else { return };
+        if message >= detail.messages.len() {
             return;
-        };
-        let message = hit.message;
+        }
         let landing = (message, Instant::now());
         self.search_landing = Some(landing);
         self.search_landing_scroll_pending = true;
@@ -534,104 +432,6 @@ impl YesSessions {
                     ),
             )
             .into_any_element()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::prelude::v1::test;
-
-    #[test]
-    fn attachment_names_and_paths_remain_searchable_without_indexing_payloads() {
-        let mut message = SessionMessage::text(MessageType::User, "", "");
-        message.attachments = vec![
-            yes_core::SessionAttachment {
-                name: "diagram.png".into(),
-                embedded_fallback: None,
-                mime_type: Some("image/png".into()),
-                source: yes_core::AttachmentSource::LocalPath("/tmp/project/diagram.png".into()),
-            },
-            yes_core::SessionAttachment {
-                name: "report.pdf".into(),
-                embedded_fallback: None,
-                mime_type: Some("application/pdf".into()),
-                source: yes_core::AttachmentSource::DataUrl(
-                    "data:application/pdf;base64,secretpayload".into(),
-                ),
-            },
-        ];
-        let messages = [message];
-        for query in ["diagram", "project", "report"] {
-            let hits = search_messages(&messages, query, SearchScope::User);
-            assert_eq!(hits.len(), 1);
-            assert_eq!(hits[0].message, 0);
-        }
-        assert!(search_messages(&messages, "secretpayload", SearchScope::All).is_empty());
-    }
-
-    #[test]
-    fn filters_message_sources_and_preserves_jump_indices() {
-        let mut reasoning = SessionMessage::text(MessageType::Assistant, "", "");
-        reasoning.reasoning_content = Some("needle in reasoning".into());
-        let messages = vec![
-            SessionMessage::text(MessageType::System, "", "needle"),
-            SessionMessage::text(MessageType::User, "", "needle"),
-            SessionMessage::text(MessageType::ToolUse, "", "needle"),
-            SessionMessage::text(MessageType::Assistant, "", "needle"),
-            SessionMessage::text(MessageType::ToolResult, "", "needle"),
-            reasoning,
-        ];
-        let indices = |scope| {
-            search_messages(&messages, "needle", scope)
-                .into_iter()
-                .map(|hit| hit.message)
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(indices(SearchScope::All), vec![0, 1, 2, 3, 4, 5]);
-        assert_eq!(indices(SearchScope::User), vec![1]);
-        assert_eq!(indices(SearchScope::Assistant), vec![3, 5]);
-    }
-
-    #[test]
-    fn finds_literal_unicode_text_and_tool_input_once_per_message() {
-        let mut tool = SessionMessage::text(yes_core::MessageType::ToolUse, "", "");
-        tool.tool_input = Some(
-            serde_json::json!({"path": "src/Test.rs"})
-                .as_object()
-                .unwrap()
-                .clone(),
-        );
-        let messages = vec![
-            SessionMessage::text(yes_core::MessageType::User, "", "中文 TEST test"),
-            tool,
-        ];
-        assert_eq!(
-            search_messages(&messages, "test", SearchScope::All).len(),
-            2
-        );
-        assert_eq!(
-            search_messages(&messages, "中文", SearchScope::All)[0].message,
-            0
-        );
-        assert!(search_messages(&messages, "  ", SearchScope::All).is_empty());
-        assert!(search_messages(&messages, "[.*]", SearchScope::All).is_empty());
-        assert!(excerpt("İ Unicode 搜索", "搜索").unwrap().contains("搜索"));
-    }
-    #[test]
-    fn bounds_long_message_excerpt() {
-        let hits = search_messages(
-            &[SessionMessage::text(
-                yes_core::MessageType::User,
-                "",
-                format!("{}keyword{}", "长".repeat(100_000), "x".repeat(100_000)),
-            )],
-            "keyword",
-            SearchScope::All,
-        );
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].excerpt.contains("keyword"));
-        assert!(hits[0].excerpt.chars().count() <= 202);
     }
 }
 

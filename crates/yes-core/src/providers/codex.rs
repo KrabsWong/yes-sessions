@@ -1055,6 +1055,31 @@ impl SessionProvider for CodexProvider {
         Ok(sessions)
     }
 
+    fn session_detail_for_search(&self, session: &Session) -> Result<Option<SessionDetail>> {
+        let path = super::search_path(&self.sessions_path(), &session.file_path)?;
+        let records = Self::read_session_history(&path, &[], None, &mut HashSet::new())?;
+        let metadata = Self::metadata(&records);
+        // Metadata may follow a leading record in older rollouts. Paginated histories
+        // need the regular sibling discovery path to preserve its loading semantics.
+        if metadata.contains_key("history_base") {
+            return self.session_detail(&session.id);
+        }
+        anyhow::ensure!(
+            metadata.get("id").and_then(Value::as_str) == Some(session.id.as_str())
+                || (!metadata.contains_key("id")
+                    && Self::file_id(&path).as_deref() == Some(session.id.as_str())),
+            "Session path does not match its ID"
+        );
+        // Search only consumes messages, so the cached session supplies its metadata.
+        let detail = self
+            .make_session(&path, &records, &HashMap::new(), true)
+            .map(|(_, messages)| SessionDetail {
+                session: session.clone(),
+                messages,
+            });
+        Ok(detail)
+    }
+
     fn session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
         let index = self.load_index();
         // Filename suffixes can identify a segment, not the logical thread.
@@ -1121,7 +1146,7 @@ mod tests {
         let next = root.join("sessions").join(format!(
             "rollout-2026-09-07T22-35-54-{id}_01a07c4c-0e7e-7c43-b4e1-7ca9f719b89c.jsonl"
         ));
-        let message = |ordinal, text| json!({"ordinal":ordinal,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+        let message = |ordinal, text| json!({"timestamp":"2026-09-07T02:24:50Z","ordinal":ordinal,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
         let prefix = [json!({"ordinal":0,"type":"session_meta","payload":{"id":id,"timestamp":"2026-09-07T02:24:50Z","source":"vscode"}}), message(1,"First request"), message(2,"Earlier request")]
             .iter().map(|record| format!("{record}\n")).collect::<String>();
         fs::write(
@@ -1140,6 +1165,14 @@ mod tests {
         assert_eq!(sessions[0].id, id);
         assert_eq!(sessions[0].file_path, next);
         let detail = provider.session_detail(id).unwrap().unwrap();
+        assert_eq!(
+            provider
+                .session_detail_for_search(&sessions[0])
+                .unwrap()
+                .unwrap()
+                .messages,
+            detail.messages
+        );
         assert_eq!(detail.session.created_at, sessions[0].created_at);
         assert_eq!(detail.session.file_path, next);
         assert_eq!(
@@ -1150,6 +1183,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["First request", "Earlier request", "Latest request"]
         );
+        // Preserve the normal loader's fallback behavior if metadata is not first.
+        let source = fs::read_to_string(&next).unwrap();
+        fs::write(&next, format!("{{}}\n{source}")).unwrap();
+        assert_eq!(
+            provider
+                .session_detail_for_search(&sessions[0])
+                .unwrap()
+                .unwrap()
+                .messages,
+            provider.session_detail(id).unwrap().unwrap().messages
+        );
+        fs::write(&next, source).unwrap();
         assert!(
             provider
                 .session_detail("01a07c4c-0e7e-7c43-b4e1-7ca9f719b89c")
