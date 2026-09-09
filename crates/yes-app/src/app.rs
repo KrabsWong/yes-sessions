@@ -12,11 +12,12 @@ use std::{
 use chrono::{Local, TimeZone as _};
 use gpui_kit::base::{Button as BaseButton, Selectable as _, StyledExt};
 use gpui_kit::component::{
-    ActiveTheme as _, Disableable as _, Icon, IconName, Theme, ThemeMode,
+    ActiveTheme as _, Disableable as _, Icon, IconName, Theme, ThemeMode, WindowExt as _,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
     h_resizable,
     menu::{DropdownMenu as _, PopupMenuItem},
     message_scroller::MessageScrollerState,
+    notification::Notification,
     resizable_panel,
     tooltip::Tooltip,
 };
@@ -141,6 +142,19 @@ fn directory_group_labels(path: &str, root: Option<&std::path::Path>) -> (String
     (directory, parent)
 }
 
+fn detail_directory_label(path: &std::path::Path) -> String {
+    let parts = path.iter().collect::<Vec<_>>();
+    let directories = parts
+        .iter()
+        .filter(|part| **part != std::ffi::OsStr::new("/"))
+        .count();
+    if directories <= 3 {
+        return path.display().to_string();
+    }
+    let tail = parts[parts.len() - 3..].iter().collect::<PathBuf>();
+    format!("…/{}", tail.display())
+}
+
 fn session_directory_group_key(session: &Session, no_directory_label: &str) -> String {
     session
         .directory
@@ -173,11 +187,12 @@ fn navigator_preview(text: &str, max_chars: usize) -> String {
 
 pub(crate) fn is_navigable_user_message(message: &yes_core::SessionMessage) -> bool {
     message.message_type == yes_core::MessageType::User
-        && message
-            .content
-            .as_deref()
-            .or(message.redacted_content.as_deref())
-            .is_some_and(|content| !content.trim().is_empty())
+        && (!message.attachments.is_empty()
+            || message
+                .content
+                .as_deref()
+                .or(message.redacted_content.as_deref())
+                .is_some_and(|content| !content.trim().is_empty()))
 }
 
 fn collect_mermaid_sources(
@@ -358,6 +373,7 @@ pub struct YesSessions {
     pub(crate) search_landing_scroll_pending: bool,
     pub(crate) search_landing: Option<(usize, Instant)>,
     session_search: SessionSearch,
+    copied_metadata: Option<(&'static str, Instant)>,
     registry: Arc<ProviderRegistry>,
     settings_store: SettingsStore,
     pub settings: AppSettings,
@@ -414,6 +430,7 @@ impl YesSessions {
             search_landing: None,
             search_landing_scroll_pending: false,
             session_search: SessionSearch::default(),
+            copied_metadata: None,
             registry: Arc::new(ProviderRegistry::default()),
             settings_store,
             settings,
@@ -532,6 +549,11 @@ impl YesSessions {
         theme.mono_font_size = px(12.);
         theme.radius = px(8.);
         theme.radius_lg = px(8.);
+        theme.notification.placement = Anchor::TopCenter;
+        theme.notification.width = px(360.);
+        theme.notification.max_items = 1;
+        theme.overlay =
+            gpui_kit::black().opacity(if mode == ThemeMode::Dark { 0.60 } else { 0.35 });
         if mode == ThemeMode::Dark {
             let background = hsla(222.2 / 360., 0.84, 0.049, 1.);
             let foreground = hsla(210. / 360., 0.40, 0.98, 1.);
@@ -909,6 +931,7 @@ impl YesSessions {
     }
 
     fn reset_detail(&mut self, cx: &mut Context<Self>) {
+        self.copied_metadata = None;
         self.search_landing = None;
         self.search_landing_scroll_pending = false;
         self.session_search = SessionSearch::default();
@@ -1914,24 +1937,25 @@ impl YesSessions {
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(cx.theme().foreground)
                                                 .child(
-                                                    Icon::new(if collapsed {
-                                                        IconName::ChevronRight
-                                                    } else {
-                                                        IconName::ChevronDown
+                                                    Icon::new(match (view_mode, collapsed) {
+                                                        (SessionViewMode::Directory, true) => {
+                                                            IconName::Folder
+                                                        }
+                                                        (SessionViewMode::Directory, false) => {
+                                                            IconName::FolderOpen
+                                                        }
+                                                        (_, true) => IconName::ChevronRight,
+                                                        (_, false) => IconName::ChevronDown,
                                                     })
-                                                    .size(px(16.)),
-                                                )
-                                                .when(
-                                                    view_mode == SessionViewMode::Directory,
-                                                    |view| {
-                                                        view.child(
-                                                            Icon::new(IconName::Folder)
-                                                                .size(px(14.))
-                                                                .text_color(
-                                                                    cx.theme().muted_foreground,
-                                                                ),
-                                                        )
-                                                    },
+                                                    .size(px(16.))
+                                                    .when(
+                                                        view_mode == SessionViewMode::Directory,
+                                                        |icon| {
+                                                            icon.text_color(
+                                                                cx.theme().muted_foreground,
+                                                            )
+                                                        },
+                                                    ),
                                                 )
                                                 .child(
                                                     div().min_w_0().truncate().child(group_label),
@@ -2192,6 +2216,8 @@ impl YesSessions {
                                                 div()
                                                     .flex_1()
                                                     .min_w_0()
+                                                    .line_height(px(20.))
+                                                    .py(px(1.))
                                                     .overflow_hidden()
                                                     .child(title_element),
                                             )
@@ -2288,7 +2314,7 @@ impl YesSessions {
                                     .opacity(reveal)
                                     .w_full()
                                     .h(px(36.))
-                                    .pl(px(8. + (depth.min(4) * 20) as f32))
+                                    .pl(px(16. + (depth.min(4) * 20) as f32))
                                     .pr_2()
                                     .child(row)
                             })
@@ -2340,8 +2366,16 @@ impl YesSessions {
                         .content
                         .as_deref()
                         .or(message.redacted_content.as_deref())
-                        .unwrap_or_default()
-                        .to_owned(),
+                        .filter(|text| !text.trim().is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            message
+                                .attachments
+                                .iter()
+                                .map(|item| item.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }),
                     turn_index_for_message(messages, index, self.selected_app),
                 )
             })
@@ -2650,6 +2684,83 @@ impl YesSessions {
             .into_any_element()
     }
 
+    fn metadata_button(
+        &self,
+        id: &'static str,
+        title_key: &'static str,
+        value: String,
+        icon: Option<Icon>,
+        label: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Button {
+        let copied = self.copied_metadata.is_some_and(|(field, _)| field == id);
+        let language = self.settings.language;
+        let tooltip_value = value.clone();
+        Button::new(id)
+            .debug_selector(move || id.into())
+            .accessibility_label(tr(language, title_key))
+            .ghost()
+            .compact()
+            .h(px(24.))
+            .px_1()
+            .text_size(px(12.))
+            .text_color(cx.theme().muted_foreground)
+            .when_some(icon, |button, icon| {
+                button.icon(
+                    if copied {
+                        Icon::new(IconName::Check)
+                    } else {
+                        icon
+                    }
+                    .size(px(14.)),
+                )
+            })
+            .when_some(label, |button, label| button.label(label))
+            .map(|mut button| {
+                button.interactivity().tooltip(move |window, cx| {
+                    let value = tooltip_value.clone();
+                    Tooltip::element(move |_, cx| {
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(10.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!("{}：", tr(language, title_key))),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .font_family(cx.theme().mono_font_family.clone())
+                                    .child(value.clone()),
+                            )
+                    })
+                    .build(window, cx)
+                });
+                button
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
+                crate::toast::copy_success(language, window, cx);
+                let feedback = (id, Instant::now());
+                this.copied_metadata = Some(feedback);
+                cx.notify();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.copied_metadata == Some(feedback) {
+                            this.copied_metadata = None;
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }))
+    }
+
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         if self.loading_detail {
@@ -2676,10 +2787,10 @@ impl YesSessions {
         };
         self.ensure_workspace_preview(window, cx);
         let session = &detail.session;
-        let updated = Local
+        let updated_date = Local
             .timestamp_millis_opt(session.updated_at)
             .single()
-            .map(|value| value.format("%Y-%m-%d %H:%M").to_string())
+            .map(|value| value.format("%Y.%m.%d").to_string())
             .unwrap_or_default();
         let resume_session_id = session.id.clone();
         let resume_app = session.app_type;
@@ -2687,7 +2798,6 @@ impl YesSessions {
         let terminal = self.settings.preferred_terminal;
         let parent_id = session.parent_session_id.clone();
         let agent_type = session.agent_type.clone();
-        let copy_session_id = session.id.clone();
         let title = if session.first_message.is_empty() {
             session.file_name.clone()
         } else {
@@ -2764,188 +2874,167 @@ impl YesSessions {
                             .flex()
                             .items_start()
                             .gap_2()
-                            .when(
-                                session.kind == yes_core::model::SessionKind::Subagent,
-                                |view| {
-                                    view.child(
-                                        div()
-                                            .flex_none()
-                                            .flex()
-                                            .items_center()
-                                            .gap_1()
-                                            .rounded(px(4.))
-                                            .bg(hsla(270. / 360., 0.67, 0.94, 1.))
-                                            .px_2()
-                                            .py_1()
-                                            .text_size(px(12.))
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(hsla(270. / 360., 0.67, 0.42, 1.))
-                                            .child(Icon::new(IconName::Bot).size(px(14.)))
-                                            .child(tr(language, "sessions.subAgent"))
-                                            .when_some(agent_type, |view, agent_type| {
-                                                view.child(format!(" · {agent_type}"))
-                                            }),
-                                    )
-                                },
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .text_size(px(16.))
-                                    .font_weight(FontWeight::SEMIBOLD)
-                                    .overflow_hidden()
-                                    .child(title_view),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .mt_2()
-                            .v_flex()
-                            .gap_1()
                             .when_some(parent_id, |view, parent_id| {
-                                let (color, hover) = if cx.theme().mode == ThemeMode::Dark {
-                                    (rgb(0xd8b4fe), rgb(0xe9d5ff))
-                                } else {
-                                    (rgb(0x9333ea), rgb(0x7e22ce))
-                                };
                                 view.child(
-                                    div().flex().justify_start().child(
-                                        BaseButton::new("back-to-parent")
-                                            .accessibility_label(tr(
-                                                language,
-                                                "sessions.backToParent",
-                                            ))
-                                            .cursor_pointer()
-                                            .debug_selector(|| "back-to-parent".into())
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.))
-                                            .h(px(20.))
-                                            .text_size(px(12.))
-                                            .text_color(color)
-                                            .hover(move |style| style.text_color(hover))
-                                            .child(Icon::new(IconName::ArrowLeft).size(px(14.)))
-                                            .child(tr(language, "sessions.backToParent"))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.open_sub_agent(&parent_id, cx)
-                                            })),
-                                    ),
+                                    Button::new("back-to-parent")
+                                        .debug_selector(|| "back-to-parent".into())
+                                        .accessibility_label(tr(language, "sessions.backToParent"))
+                                        .tooltip(tr(language, "sessions.backToParent"))
+                                        .ghost()
+                                        .compact()
+                                        .flex_none()
+                                        .size(px(24.))
+                                        .icon(Icon::new(IconName::ArrowLeft).size(px(16.)))
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_sub_agent(&parent_id, cx)
+                                        })),
                                 )
                             })
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .flex()
-                                    .items_center()
-                                    .gap_2()
+                                    .items_start()
+                                    .gap_1()
                                     .child(
+                                        self.metadata_button(
+                                            "copy-session-id",
+                                            "sessions.sessionId",
+                                            session.id.clone(),
+                                            Some(Icon::empty().path("icons/session-id.svg")),
+                                            None,
+                                            cx,
+                                        )
+                                        .flex_none()
+                                        .w(px(16.))
+                                        .px_0(),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_size(px(16.))
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .overflow_hidden()
+                                            .child(title_view),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div().mt_2().v_flex().gap_1().child(
+                            div()
+                                .debug_selector(|| "session-metadata-toolbar".into())
+                                .flex()
+                                .items_center()
+                                .min_w_0()
+                                .gap_1()
+                                .when(
+                                    session.kind == yes_core::model::SessionKind::Subagent,
+                                    |view| {
+                                        view.child(
+                                            div()
+                                                .debug_selector(|| "session-agent-badge".into())
+                                                .flex_none()
+                                                .flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .rounded(px(4.))
+                                                .bg(if cx.theme().mode.is_dark() {
+                                                    rgb(0x292338).into()
+                                                } else {
+                                                    hsla(270. / 360., 0.67, 0.94, 1.)
+                                                })
+                                                .px_2()
+                                                .h(px(24.))
+                                                .text_size(px(12.))
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_color(if cx.theme().mode.is_dark() {
+                                                    rgb(0xc4b5d9).into()
+                                                } else {
+                                                    hsla(270. / 360., 0.67, 0.42, 1.)
+                                                })
+                                                .child(Icon::new(IconName::Bot).size(px(14.)))
+                                                .child(tr(language, "sessions.subAgent"))
+                                                .when_some(agent_type, |view, agent_type| {
+                                                    view.child(format!(" · {agent_type}"))
+                                                }),
+                                        )
+                                    },
+                                )
+                                .when_some(session.directory.as_ref(), |view, directory| {
+                                    let label = detail_directory_label(directory);
+                                    view.child(
+                                        self.metadata_button(
+                                            "copy-session-directory",
+                                            "sessions.work",
+                                            directory.display().to_string(),
+                                            None,
+                                            Some(label),
+                                            cx,
+                                        )
+                                        .min_w_0()
+                                        .flex_shrink_1()
+                                        .max_w(relative(0.65)),
+                                    )
+                                })
+                                .when(session.directory.is_some(), |view| {
+                                    view.child(
                                         div()
                                             .flex_none()
-                                            .text_size(px(10.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(tr(language, "sessions.sessionId")),
-                                    )
-                                    .child(
-                                        Button::new("copy-session-id")
-                                            .text()
-                                            .compact()
-                                            .h(px(20.))
-                                            .max_w(relative(0.72))
                                             .text_size(px(12.))
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .label(session.id.clone())
-                                            .on_click(move |_, _, cx| {
-                                                cx.write_to_clipboard(ClipboardItem::new_string(
-                                                    copy_session_id.clone(),
-                                                ));
-                                            }),
-                                    )
-                                    .when(
-                                        session.kind != yes_core::model::SessionKind::Subagent,
-                                        |view| {
-                                            view.child(
-                                                Button::new("resume-session")
-                                                    .custom(
-                                                        ButtonCustomVariant::new(cx)
-                                                            .color(cx.theme().foreground)
-                                                            .foreground(cx.theme().background)
-                                                            .hover(
-                                                                cx.theme().foreground.opacity(0.9),
-                                                            )
-                                                            .active(
-                                                                cx.theme().foreground.opacity(0.82),
-                                                            ),
-                                                    )
-                                                    .compact()
-                                                    .h(px(24.))
-                                                    .px_2()
-                                                    .text_size(px(10.))
-                                                    .icon(IconName::Play)
-                                                    .label(tr(language, "sessions.resume"))
-                                                    .on_click(cx.listener(
-                                                        move |this, _, _, cx| {
-                                                            if let Err(error) = resume_session(
-                                                                resume_app,
-                                                                &resume_session_id,
-                                                                resume_dir.as_deref(),
-                                                                terminal,
-                                                            ) {
-                                                                this.error =
-                                                                    Some(error.to_string());
-                                                                cx.notify();
-                                                            }
-                                                        },
-                                                    )),
-                                            )
-                                        },
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .text_size(px(10.))
                                             .text_color(cx.theme().muted_foreground)
-                                            .child(tr(language, "sessions.updated")),
+                                            .child("/"),
                                     )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.))
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(updated),
-                                    ),
-                            )
-                            .when_some(session.directory.clone(), |view, directory| {
-                                view.child(
+                                })
+                                .child(
                                     div()
+                                        .debug_selector(|| "session-updated-date".into())
+                                        .flex_none()
                                         .flex()
                                         .items_center()
-                                        .gap_2()
-                                        .min_w_0()
-                                        .child(
-                                            div()
-                                                .flex_none()
-                                                .text_size(px(10.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(tr(language, "sessions.work")),
-                                        )
-                                        .child(
-                                            div()
-                                                .min_w_0()
-                                                .overflow_hidden()
-                                                .whitespace_nowrap()
-                                                .text_ellipsis()
-                                                .text_size(px(12.))
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(directory.display().to_string()),
-                                        ),
+                                        .h(px(24.))
+                                        .text_size(px(12.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(updated_date),
                                 )
-                            }),
+                                .child(div().flex_1())
+                                .when(
+                                    session.kind != yes_core::model::SessionKind::Subagent,
+                                    |view| {
+                                        view.child(
+                                            Button::new("resume-session")
+                                                .flex_none()
+                                                .custom(
+                                                    ButtonCustomVariant::new(cx)
+                                                        .color(cx.theme().foreground)
+                                                        .foreground(cx.theme().background)
+                                                        .hover(cx.theme().foreground.opacity(0.9))
+                                                        .active(
+                                                            cx.theme().foreground.opacity(0.82),
+                                                        ),
+                                                )
+                                                .compact()
+                                                .h(px(24.))
+                                                .px_2()
+                                                .text_size(px(10.))
+                                                .icon(IconName::Play)
+                                                .label(tr(language, "sessions.resume"))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    if let Err(error) = resume_session(
+                                                        resume_app,
+                                                        &resume_session_id,
+                                                        resume_dir.as_deref(),
+                                                        terminal,
+                                                    ) {
+                                                        this.error = Some(error.to_string());
+                                                        cx.notify();
+                                                    }
+                                                })),
+                                        )
+                                    },
+                                ),
+                        ),
                     ),
             )
             .child(
@@ -2953,6 +3042,7 @@ impl YesSessions {
                     .relative()
                     .flex_1()
                     .min_h_0()
+                    .debug_selector(|| "conversation-viewport".into())
                     .child(scroller.size_full())
                     .child(navigator)
                     .when(show_jump, |view| {
@@ -3005,7 +3095,7 @@ impl YesSessions {
                                                                     "new-messages-indicator".into()
                                                                 })
                                                                 .relative()
-                                                                .size(px(8.))
+                                                                .size(px(16.))
                                                                 .flex_none()
                                                                 .child(
                                                                     div()
@@ -3031,11 +3121,11 @@ impl YesSessions {
                                                                                     8. + phase * 8.
                                                                                 ))
                                                                                 .left(px(
-                                                                                    -phase * 4.
+                                                                                    4. - phase * 4.
                                                                                 ))
-                                                                                .top(
-                                                                                    px(-phase * 4.),
-                                                                                )
+                                                                                .top(px(
+                                                                                    4. - phase * 4.
+                                                                                ))
                                                                                 .opacity(
                                                                                     0.75 * (1.
                                                                                         - phase),
@@ -3045,7 +3135,9 @@ impl YesSessions {
                                                                 )
                                                                 .child(
                                                                     div()
-                                                                        .relative()
+                                                                        .absolute()
+                                                                        .left(px(4.))
+                                                                        .top(px(4.))
                                                                         .size(px(8.))
                                                                         .rounded_full()
                                                                         .bg(cx
@@ -3869,11 +3961,18 @@ impl YesSessions {
 
 impl Render for YesSessions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(error) = self.error.take() {
+            // Root owns the notification layer; update it after this render completes.
+            window.defer(cx, move |window, cx| {
+                window.push_notification(Notification::error(error).id::<YesSessions>(), cx);
+            });
+        }
         if window.focused(cx).is_none() {
             self.root_focus.focus(window, cx);
         }
         div()
             .id("yes-sessions-root")
+            .debug_selector(|| "yes-sessions-root".into())
             .track_focus(&self.root_focus)
             .on_action(
                 cx.listener(|this, _: &crate::commands::FindInSession, window, cx| {
@@ -3954,21 +4053,6 @@ impl Render for YesSessions {
                     sessions
                 }
             }))
-            .when_some(self.error.clone(), |view, error| {
-                view.child(
-                    div()
-                        .absolute()
-                        .bottom_4()
-                        .right_4()
-                        .max_w(px(420.))
-                        .rounded_lg()
-                        .bg(cx.theme().danger)
-                        .text_color(cx.theme().danger_foreground)
-                        .px_4()
-                        .py_3()
-                        .child(error),
-                )
-            })
             .when(
                 self.session_search.input.is_some() && self.detail.is_some(),
                 |view| view.child(self.render_session_search(cx)),
@@ -3976,6 +4060,10 @@ impl Render for YesSessions {
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
             })
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            .children(gpui_kit::component::Root::render_notification_layer(
+                window, cx,
+            ))
     }
 }
 
@@ -4279,6 +4367,209 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn tool_activity_collapses_expands_and_reveals_search_results(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(600.), px(600.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            app.selected_app = AppType::Codex;
+            app.settings.collapse_bash_blocks = true;
+            let messages = (0..6)
+                .map(|index| {
+                    let mut message = SessionMessage::text(
+                        if index % 2 == 0 {
+                            MessageType::ToolUse
+                        } else {
+                            MessageType::ToolResult
+                        },
+                        "2026-09-09T08:05:00Z",
+                        "",
+                    );
+                    message.tool_name = Some("Exec".into());
+                    message.call_id = Some(format!("call-{}", index / 2));
+                    message
+                })
+                .collect();
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                session: session("tools", None),
+                messages,
+            }));
+            app.conversation_state
+                .update(cx, |state, cx| state.reset(1, cx));
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let group = visual.debug_bounds("tool-activity-0").unwrap();
+        let preview = visual.debug_bounds("tool-activity-preview-0").unwrap();
+        assert_eq!(preview.size.height, px(76.));
+        assert!(visual.debug_bounds("tool-card-0").is_some());
+        assert!(visual.debug_bounds("tool-card-4").is_none());
+        visual.simulate_click(group.center(), Default::default());
+        assert!(visual.debug_bounds("tool-card-4").is_some());
+        assert!(
+            visual
+                .debug_bounds("tool-activity-preview-0")
+                .unwrap()
+                .size
+                .height
+                > preview.size.height
+        );
+        let collapse = visual.debug_bounds("tool-activity-0").unwrap();
+        visual.simulate_click(collapse.center(), Default::default());
+        assert!(visual.debug_bounds("tool-card-4").is_none());
+        visual.simulate_click(preview.center(), Default::default());
+        assert!(visual.debug_bounds("tool-card-4").is_some());
+        let collapse = visual.debug_bounds("tool-activity-0").unwrap();
+        visual.simulate_click(collapse.center(), Default::default());
+        assert!(visual.debug_bounds("tool-card-4").is_none());
+        app.update(cx, |app, cx| {
+            app.search_landing = Some((5, std::time::Instant::now()));
+            cx.notify();
+        });
+        assert!(visual.debug_bounds("tool-card-4").is_some());
+        visual.simulate_resize(size(px(440.), px(600.)));
+        assert!(visual.debug_bounds("tool-activity-0").unwrap().right() <= px(440.));
+    }
+
+    #[gpui_kit::test]
+    fn action_errors_use_a_single_dismissible_toast(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(800.), px(600.)), |window, cx| {
+            let app = cx.new(|cx| super::YesSessions::new(window, cx));
+            gpui_kit::component::Root::new(app, window, cx)
+        });
+        let root = window.root(cx).unwrap();
+        let app = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<super::YesSessions>()
+                .unwrap()
+        });
+        let notifications = root.read_with(cx, |root, _| root.notification.clone());
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        for message in ["First failure", "Next failure"] {
+            app.update(cx, |app, cx| {
+                app.sessions_generation += 1;
+                app.loading_sessions = false;
+                app.error = Some(message.into());
+                cx.notify();
+            });
+            visual.debug_bounds("yes-sessions-root").unwrap();
+            cx.run_until_parked();
+            assert!(app.read_with(cx, |app, _| app.error.is_none()));
+            assert_eq!(
+                notifications.read_with(cx, |list, _| list.notifications().len()),
+                1
+            );
+        }
+        app.update(cx, |_, cx| cx.notify());
+        visual.debug_bounds("yes-sessions-root").unwrap();
+        cx.run_until_parked();
+        assert_eq!(
+            notifications.read_with(cx, |list, _| list.notifications().len()),
+            1
+        );
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(6));
+        cx.run_until_parked();
+        cx.background_executor
+            .advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(notifications.read_with(cx, |list, _| list.notifications().is_empty()));
+    }
+
+    #[gpui_kit::test]
+    fn released_text_selection_does_not_scroll_on_pointer_motion(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::{AppContext as _, MouseButton, point, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(600.)), |window, cx| {
+            let app = cx.new(|cx| super::YesSessions::new(window, cx));
+            gpui_kit::component::Root::new(app, window, cx)
+        });
+        let app = window.root(cx).unwrap().read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<super::YesSessions>()
+                .unwrap()
+        });
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                session: session("selection-child", Some("parent")),
+                messages: vec![SessionMessage::text(
+                    MessageType::User,
+                    "",
+                    "Selectable message content for a scrolling regression.\n\n".repeat(80),
+                )],
+            }));
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(1, cx);
+                state.scroll_to_item(0, cx);
+            });
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        app.update(cx, |app, cx| {
+            app.conversation_state.update(cx, |state, cx| {
+                state.scroll_to_item(0, cx);
+            });
+        });
+        visual.run_until_parked();
+        let viewport = visual.debug_bounds("conversation-viewport").unwrap();
+        let bubble = visual.debug_bounds("conversation-bubble-0").unwrap();
+        let start = point(bubble.left() + px(24.), bubble.top() + px(36.));
+        let edge = point(start.x, viewport.bottom() - px(2.));
+        visual.simulate_click(start, Default::default());
+        visual.simulate_mouse_move(edge, None, Default::default());
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        visual.run_until_parked();
+        assert_eq!(
+            visual.debug_bounds("conversation-bubble-0").unwrap().top(),
+            bubble.top(),
+            "a released click must not start edge autoscroll"
+        );
+
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(edge, Some(MouseButton::Left), Default::default());
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        visual.run_until_parked();
+        assert!(
+            visual.debug_bounds("conversation-bubble-0").unwrap().top() < bubble.top(),
+            "dragging a text selection must still scroll at the edge"
+        );
+        visual.simulate_mouse_up(edge, MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        let stopped = visual.debug_bounds("conversation-bubble-0").unwrap().top();
+        visual.simulate_mouse_move(edge, None, Default::default());
+        visual
+            .executor()
+            .advance_clock(std::time::Duration::from_millis(64));
+        visual.run_until_parked();
+        assert_eq!(
+            visual.debug_bounds("conversation-bubble-0").unwrap().top(),
+            stopped
+        );
+    }
+
+    #[gpui_kit::test]
     fn unread_button_keeps_count_through_layout_and_clears_on_click(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -4480,18 +4771,49 @@ mod tests {
         assert_eq!(ancestor_session_ids(&sessions, "first"), vec!["second"]);
     }
 
+    #[test]
+    fn detail_directory_keeps_last_three_levels() {
+        for (path, expected) in [
+            (
+                "/Users/krabswang/Workspaces/gc-homepage",
+                "…/krabswang/Workspaces/gc-homepage",
+            ),
+            ("/a/b/c", "/a/b/c"),
+            ("a/b/c/d", "…/b/c/d"),
+            ("/项目/工作区/会话/", "/项目/工作区/会话/"),
+            ("/", "/"),
+        ] {
+            assert_eq!(
+                super::detail_directory_label(std::path::Path::new(path)),
+                expected
+            );
+        }
+    }
+
     #[gpui_kit::test]
     fn detail_title_wraps_as_available_width_shrinks(cx: &mut gpui_kit::TestAppContext) {
-        use gpui_kit::{px, size};
+        use gpui_kit::{AppContext as _, px, size};
         cx.update(gpui_kit::init);
-        let window = cx.open_window(size(px(1200.), px(700.)), super::YesSessions::new);
-        let app = window.root(cx).unwrap();
+        let window = cx.open_window(size(px(1200.), px(700.)), |window, cx| {
+            let app = cx.new(|cx| super::YesSessions::new(window, cx));
+            gpui_kit::component::Root::new(app, window, cx)
+        });
+        let root = window.root(cx).unwrap();
+        let notifications = root.read_with(cx, |root, _| root.notification.clone());
+        let app = root.read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<super::YesSessions>()
+                .unwrap()
+        });
         app.update(cx, |app, cx| {
             app.sessions_generation += 1;
             app.loading_sessions = false;
             app.settings.sidebar_collapsed = true;
             app.settings_open = false;
             let mut item = session("title-wrap", Some("parent"));
+            item.agent_type = Some("Plan".into());
+            item.directory = Some(PathBuf::from("/tmp/a-long-workspace-directory-for-header-layout"));
             item.first_message = "检查文件预览和差异对比面板的布局，确保缩小会话区域后标题能够自动换行并完整显示。 Review the workspace preview layout and preserve the full session title.".into();
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail { session: item, messages: vec![] }));
             cx.notify();
@@ -4504,8 +4826,61 @@ mod tests {
         assert!(narrow.right() <= px(440.));
         let back = visual.debug_bounds("back-to-parent").unwrap();
         assert_eq!(back.left(), px(440.) - narrow.right());
-        assert!(back.top() >= narrow.bottom());
-        assert!(back.size.width < px(200.));
+        assert_eq!(back.top(), narrow.top());
+        assert_eq!(back.size.width, px(24.));
+        assert!(back.right() < narrow.left());
+        let toolbar = visual.debug_bounds("session-metadata-toolbar").unwrap();
+        assert_eq!(toolbar.size.height, px(24.));
+        assert!(toolbar.right() <= px(440.));
+        let badge = visual.debug_bounds("session-agent-badge").unwrap();
+        let directory = visual.debug_bounds("copy-session-directory").unwrap();
+        let date = visual.debug_bounds("session-updated-date").unwrap();
+        assert!(toolbar.top() >= narrow.bottom());
+        assert_eq!(badge.top(), toolbar.top());
+        assert!(directory.left() >= badge.right());
+        assert!(date.left() >= directory.right());
+        assert!(date.right() <= toolbar.right());
+        cx.update(|cx| {
+            cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("unchanged".into()))
+        });
+        visual.simulate_click(date.center(), Default::default());
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            "unchanged"
+        );
+        assert!(app.read_with(cx, |app, _| app.copied_metadata.is_none()));
+        assert!(notifications.read_with(cx, |list, _| list.notifications().is_empty()));
+        for (id, expected) in [
+            ("copy-session-id", "title-wrap".to_owned()),
+            (
+                "copy-session-directory",
+                "/tmp/a-long-workspace-directory-for-header-layout".to_owned(),
+            ),
+        ] {
+            let button = visual.debug_bounds(id).unwrap();
+            assert!(button.right() <= toolbar.right());
+            if id == "copy-session-id" {
+                assert_eq!(button.top(), narrow.top());
+                assert!(((narrow.left() - button.right()) - px(4.)).abs() <= px(1.));
+                assert!(button.left() >= back.right());
+            } else {
+                assert_eq!(button.top(), toolbar.top());
+            }
+            visual.simulate_click(button.center(), Default::default());
+            assert_eq!(
+                cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+                expected
+            );
+            assert_eq!(
+                app.read_with(cx, |app, _| app.copied_metadata.map(|(id, _)| id)),
+                Some(id)
+            );
+            assert_eq!(visual.debug_bounds(id).unwrap().size, button.size);
+            assert_eq!(
+                notifications.read_with(cx, |list, _| list.notifications().len()),
+                1
+            );
+        }
     }
 
     #[gpui_kit::test]

@@ -6,7 +6,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, Utc};
 use rayon::prelude::*;
@@ -50,15 +50,6 @@ impl CodexProvider {
         self.root.join("sessions")
     }
 
-    fn read_jsonl(path: &Path) -> Result<Vec<Value>> {
-        let source =
-            fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
-        Ok(source
-            .lines()
-            .filter_map(|line| serde_json::from_str(line).ok())
-            .collect())
-    }
-
     fn read_summary_prefix(path: &Path) -> Option<String> {
         const SUMMARY_PREFIX_BYTES: u64 = 256 * 1024;
         let mut bytes = Vec::with_capacity(SUMMARY_PREFIX_BYTES as usize);
@@ -93,6 +84,90 @@ impl CodexProvider {
             .collect()
     }
 
+    fn file_metadata(path: &Path) -> Option<Value> {
+        let file = fs::File::open(path).ok()?;
+        let mut line = String::new();
+        BufReader::new(file.take(256 * 1024))
+            .read_line(&mut line)
+            .ok()?;
+        let record: Value = serde_json::from_str(&line).ok()?;
+        (record.get("type").and_then(Value::as_str) == Some("session_meta")).then_some(record)
+    }
+
+    fn read_session_history(
+        path: &Path,
+        files: &[(PathBuf, Value)],
+        byte_limit: Option<u64>,
+        visited: &mut HashSet<PathBuf>,
+    ) -> Result<Vec<Value>> {
+        anyhow::ensure!(
+            visited.insert(path.to_path_buf()),
+            "Cyclic Codex history reference"
+        );
+        let mut source = String::new();
+        fs::File::open(path)?
+            .take(byte_limit.unwrap_or(u64::MAX))
+            .read_to_string(&mut source)?;
+        let records = source
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .collect::<Vec<_>>();
+        let meta = Self::metadata(&records);
+        let base = meta.get("history_base");
+        let base_id = base
+            .and_then(|base| base.get("thread_id"))
+            .and_then(Value::as_str);
+        let end = base
+            .and_then(|base| base.get("end_ordinal_exclusive"))
+            .and_then(Value::as_u64);
+        // A continuation references an earlier segment of this same logical session.
+        let parent = base_id
+            .filter(|id| Some(*id) == meta.get("id").and_then(Value::as_str))
+            .zip(end)
+            .and_then(|(id, end)| {
+                files
+                    .iter()
+                    .filter(|(candidate, record)| {
+                        candidate != path
+                            && record.pointer("/payload/id").and_then(Value::as_str) == Some(id)
+                            && record.get("ordinal").and_then(Value::as_u64).unwrap_or(0) < end
+                            && !visited.contains(candidate)
+                    })
+                    .max_by_key(|(_, record)| {
+                        (
+                            record.get("ordinal").and_then(Value::as_u64).unwrap_or(0),
+                            record.pointer("/payload/timestamp").and_then(Value::as_str),
+                        )
+                    })
+            });
+        let Some((parent_path, _)) = parent else {
+            return Ok(records);
+        };
+        let byte_limit = base
+            .and_then(|base| base.get("end_byte_offset"))
+            .and_then(Value::as_u64);
+        let mut inherited = Self::read_session_history(parent_path, files, byte_limit, visited)?;
+        inherited.retain(|record| {
+            record.get("type").and_then(Value::as_str) != Some("session_meta")
+                && record
+                    .get("ordinal")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|ordinal| Some(ordinal) < end)
+        });
+        let mut combined = records
+            .iter()
+            .filter(|record| record.get("type").and_then(Value::as_str) == Some("session_meta"))
+            .cloned()
+            .collect::<Vec<_>>();
+        combined.extend(inherited);
+        combined.extend(
+            records.into_iter().filter(|record| {
+                record.get("type").and_then(Value::as_str) != Some("session_meta")
+            }),
+        );
+        Ok(combined)
+    }
+
     fn metadata(records: &[Value]) -> Map<String, Value> {
         records
             .iter()
@@ -122,35 +197,29 @@ impl CodexProvider {
         Some((SessionKind::Subagent, Some(parent), label))
     }
 
-    fn subagent_content_preview(
-        meta: &Map<String, Value>,
-        records: &[Value],
-        tail: bool,
-    ) -> String {
-        let start = if tail {
-            0
-        } else {
-            meta.get("subagent_history_start_ordinal")
-                .and_then(Value::as_u64)
-                .unwrap_or(0) as usize
-        };
-        let created = Self::timestamp_ms(meta.get("timestamp").and_then(Value::as_str));
+    fn subagent_content_preview(meta: &Map<String, Value>, records: &[Value]) -> String {
+        // Forked records may be stamped with the child's creation time, so only
+        // the explicit history boundary can distinguish inherited messages.
+        let start = meta
+            .get("subagent_history_start_ordinal")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
         let own = records
             .iter()
-            .skip(start)
-            .filter(|record| {
-                record.get("type").and_then(Value::as_str) == Some("response_item")
-                    && match (
-                        created,
-                        Self::timestamp_ms(record.get("timestamp").and_then(Value::as_str)),
-                    ) {
-                        (Some(created), Some(time)) => time >= created,
-                        (Some(_), None) if tail => false,
-                        _ => true,
-                    }
+            .enumerate()
+            .filter(|(index, record)| {
+                record
+                    .get("ordinal")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(*index as u64)
+                    >= start as u64
             })
+            .map(|(_, record)| record)
             .collect::<Vec<_>>();
         for record in &own {
+            if record.get("type").and_then(Value::as_str) != Some("response_item") {
+                continue;
+            }
             let text = Self::value_text(record.pointer("/payload/content"));
             let preview = match record.pointer("/payload/type").and_then(Value::as_str) {
                 Some("agent_message") if text.contains("Message Type: NEW_TASK") => text
@@ -160,7 +229,7 @@ impl CodexProvider {
                 Some("message")
                     if record.pointer("/payload/role").and_then(Value::as_str) == Some("user") =>
                 {
-                    Self::normalize_user(&text)
+                    crate::attachments::user_preview(&Self::normalize_user(&text))
                 }
                 _ => String::new(),
             };
@@ -176,7 +245,8 @@ impl CodexProvider {
                     return None;
                 }
                 let text = Self::value_text(record.pointer("/payload/content"));
-                (!text.trim().is_empty()).then(|| Self::truncate(text.trim(), 200))
+                let title = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+                Some(Self::truncate(title, 200))
             })
             .unwrap_or_default()
     }
@@ -187,27 +257,28 @@ impl CodexProvider {
         meta: &Map<String, Value>,
         records: &[Value],
     ) -> String {
-        let preview = Self::subagent_content_preview(meta, records, false);
+        let preview = Self::subagent_content_preview(meta, records);
         if !preview.is_empty() {
             return preview;
         }
-        // Forked histories can fill the prefix before the child's own messages.
-        // A bounded tail finds readable replies without scanning inherited history.
+        // Tail reads remain bounded. Only explicit ordinals can establish that
+        // these records belong to the child rather than its inherited history.
         let read_tail = || -> Option<String> {
             let mut file = fs::File::open(path).ok()?;
-            let offset = file.metadata().ok()?.len().saturating_sub(256 * 1024);
-            if offset == 0 {
-                return None;
-            }
+            let offset = file.metadata().ok()?.len().saturating_sub(64 * 1024);
             file.seek(SeekFrom::Start(offset)).ok()?;
-            let mut bytes = Vec::new();
-            file.take(256 * 1024).read_to_end(&mut bytes).ok()?;
-            let start = bytes.iter().position(|b| *b == b'\n')? + 1;
-            let records = bytes[start..]
-                .split(|b| *b == b'\n')
-                .filter_map(|line| serde_json::from_slice::<Value>(line).ok())
+            let mut reader = BufReader::new(file);
+            if offset > 0 {
+                reader.read_line(&mut String::new()).ok()?;
+            }
+            let mut tail = String::new();
+            reader.take(64 * 1024).read_to_string(&mut tail).ok()?;
+            let records = tail
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .filter(|record| record.get("ordinal").and_then(Value::as_u64).is_some())
                 .collect::<Vec<_>>();
-            Some(Self::subagent_content_preview(meta, &records, true))
+            Some(Self::subagent_content_preview(meta, &records))
         };
         read_tail().unwrap_or_default()
     }
@@ -222,8 +293,9 @@ impl CodexProvider {
                 {
                     return None;
                 }
-                let text =
-                    Self::normalize_user(&Self::value_text(record.pointer("/payload/content")));
+                let text = crate::attachments::user_preview(&Self::normalize_user(
+                    &Self::value_text(record.pointer("/payload/content")),
+                ));
                 (!text.trim().is_empty()).then(|| Self::truncate(&text, 200))
             })
             .unwrap_or_default()
@@ -465,9 +537,6 @@ impl CodexProvider {
                     } else {
                         self.embed_images(&raw, cwd)
                     };
-                    if content.is_empty() {
-                        continue;
-                    }
                     let mut message = SessionMessage::text(
                         if role == "user" {
                             MessageType::User
@@ -477,6 +546,12 @@ impl CodexProvider {
                         timestamp,
                         content,
                     );
+                    crate::attachments::normalize(&mut message, payload.get("content"));
+                    if message.content.as_deref().unwrap_or_default().is_empty()
+                        && message.attachments.is_empty()
+                    {
+                        continue;
+                    }
                     message.model = current_model.clone();
                     messages.push(message);
                 }
@@ -684,7 +759,7 @@ impl CodexProvider {
                     } else {
                         let text = Self::value_text(payload.get("content"));
                         if role == Some("user") {
-                            Self::normalize_user(&text)
+                            crate::attachments::user_preview(&Self::normalize_user(&text))
                         } else {
                             text
                         }
@@ -839,7 +914,29 @@ impl CodexProvider {
             .map(str::to_owned)
             .or_else(|| Self::file_id(path))?;
         let cwd = meta.get("cwd").and_then(Value::as_str).map(PathBuf::from);
-        let mut messages = include_messages.then(|| self.parse_messages(records, cwd.as_deref()));
+        let mut messages = include_messages.then(|| {
+            let own_records = (kind == SessionKind::Subagent)
+                .then(|| {
+                    meta.get("subagent_history_start_ordinal")
+                        .and_then(Value::as_u64)
+                })
+                .flatten()
+                .map(|boundary| {
+                    records
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, record)| {
+                            record
+                                .get("ordinal")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(*index as u64)
+                                >= boundary
+                        })
+                        .map(|(_, record)| record.clone())
+                        .collect::<Vec<_>>()
+                });
+            self.parse_messages(own_records.as_deref().unwrap_or(records), cwd.as_deref())
+        });
         if let Some(messages) = messages.as_mut() {
             self.link_subagents(&id, messages);
         }
@@ -934,52 +1031,133 @@ impl SessionProvider for CodexProvider {
 
     fn sessions(&self) -> Result<Vec<Session>> {
         let index = self.load_index();
-        let mut sessions = self
+        let mut records = self
             .session_files()
             .into_par_iter()
             .filter_map(|path| self.make_session_summary(&path, &index))
             .collect::<Vec<_>>();
+        // The same session can have multiple paginated rollout files. The latest
+        // segment supplies current metadata; retain the original creation time.
+        records.sort_by(|a, b| (a.created_at, &a.file_path).cmp(&(b.created_at, &b.file_path)));
+        let mut unique = HashMap::<String, Session>::new();
+        for mut session in records {
+            if let Some(previous) = unique.remove(&session.id) {
+                session.created_at = previous.created_at.min(session.created_at);
+                session.updated_at = previous.updated_at.max(session.updated_at);
+                if !previous.first_message.is_empty() {
+                    session.first_message = previous.first_message;
+                }
+            }
+            unique.insert(session.id.clone(), session);
+        }
+        let mut sessions = unique.into_values().collect::<Vec<_>>();
         sessions.sort_by_key(|session| std::cmp::Reverse(session.updated_at));
         Ok(sessions)
     }
 
     fn session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
         let index = self.load_index();
-        let files = self.session_files();
-        if let Some(path) = files
+        // Filename suffixes can identify a segment, not the logical thread.
+        let files = self
+            .session_files()
+            .into_par_iter()
+            .filter_map(|path| {
+                Self::file_metadata(&path)
+                    .or_else(|| {
+                        Self::file_id(&path)
+                            .map(|id| json!({"type":"session_meta","payload":{"id":id}}))
+                    })
+                    .map(|record| (path, record))
+            })
+            .collect::<Vec<_>>();
+        let matches = files
             .iter()
-            .find(|path| Self::file_id(path).as_deref() == Some(session_id))
-        {
-            let records = Self::read_jsonl(path)?;
-            return Ok(self
-                .make_session(path, &records, &index, true)
-                .map(|(session, messages)| SessionDetail { session, messages }));
-        }
-        for path in files {
-            let first = fs::read_to_string(&path)
-                .ok()
-                .and_then(|source| source.lines().next().map(str::to_owned))
-                .and_then(|line| serde_json::from_str::<Value>(&line).ok());
-            let meta_id = first
-                .as_ref()
-                .and_then(|record| record.get("payload"))
-                .and_then(|payload| payload.get("id"))
-                .and_then(Value::as_str);
-            if meta_id != Some(session_id) {
-                continue;
-            }
-            let records = Self::read_jsonl(&path)?;
-            return Ok(self
-                .make_session(&path, &records, &index, true)
-                .map(|(session, messages)| SessionDetail { session, messages }));
-        }
-        Ok(None)
+            .filter(|(_, record)| {
+                record.pointer("/payload/id").and_then(Value::as_str) == Some(session_id)
+            })
+            .collect::<Vec<_>>();
+        let Some((path, _)) = matches.iter().copied().max_by_key(|(path, record)| {
+            (
+                record.pointer("/payload/timestamp").and_then(Value::as_str),
+                path,
+            )
+        }) else {
+            return Ok(None);
+        };
+        let records = Self::read_session_history(path, &files, None, &mut HashSet::new())?;
+        Ok(self
+            .make_session(path, &records, &index, true)
+            .map(|(mut session, messages)| {
+                if let Some(created) = matches
+                    .iter()
+                    .filter_map(|(_, record)| {
+                        Self::timestamp_ms(
+                            record.pointer("/payload/timestamp").and_then(Value::as_str),
+                        )
+                    })
+                    .min()
+                {
+                    session.created_at = created;
+                }
+                SessionDetail { session, messages }
+            }))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paginated_rollouts_list_once_and_load_both_history_segments() {
+        let root =
+            std::env::temp_dir().join(format!("yes-codex-pagination-{}", std::process::id()));
+        fs::create_dir_all(root.join("sessions")).unwrap();
+        let provider = CodexProvider::with_root(root.clone());
+        let id = "01a079ae-c038-7dc3-8ef6-4b8a95d22112";
+        let old = root
+            .join("sessions")
+            .join(format!("rollout-2026-09-07T10-24-50-{id}.jsonl"));
+        let next = root.join("sessions").join(format!(
+            "rollout-2026-09-07T22-35-54-{id}_01a07c4c-0e7e-7c43-b4e1-7ca9f719b89c.jsonl"
+        ));
+        let message = |ordinal, text| json!({"ordinal":ordinal,"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":text}]}});
+        let prefix = [json!({"ordinal":0,"type":"session_meta","payload":{"id":id,"timestamp":"2026-09-07T02:24:50Z","source":"vscode"}}), message(1,"First request"), message(2,"Earlier request")]
+            .iter().map(|record| format!("{record}\n")).collect::<String>();
+        fs::write(
+            &old,
+            format!("{prefix}{}\n", message(3, "Discarded branch")),
+        )
+        .unwrap();
+        let latest = json!({"ordinal":3,"type":"session_meta","payload":{"id":id,"timestamp":"2026-09-07T14:35:54Z","source":"vscode","history_mode":"paginated","history_base":{"thread_id":id,"end_ordinal_exclusive":3,"end_byte_offset":prefix.len()}}});
+        fs::write(
+            &next,
+            format!("{latest}\n{}\n", message(4, "Latest request")),
+        )
+        .unwrap();
+        let sessions = provider.sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, id);
+        assert_eq!(sessions[0].file_path, next);
+        let detail = provider.session_detail(id).unwrap().unwrap();
+        assert_eq!(detail.session.created_at, sessions[0].created_at);
+        assert_eq!(detail.session.file_path, next);
+        assert_eq!(
+            detail
+                .messages
+                .iter()
+                .filter_map(|message| message.content.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["First request", "Earlier request", "Latest request"]
+        );
+        assert!(
+            provider
+                .session_detail("01a07c4c-0e7e-7c43-b4e1-7ca9f719b89c")
+                .unwrap()
+                .is_none()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn sidebar_classifies_workers_and_uses_real_user_titles() {
@@ -1126,7 +1304,44 @@ mod tests {
     }
 
     #[test]
-    fn child_titles_skip_inherited_history_and_use_readable_own_content() {
+    fn child_detail_excludes_inherited_history_but_keeps_own_delegation() {
+        let provider = CodexProvider::with_root(std::env::temp_dir());
+        for explicit_ordinals in [false, true] {
+            let boundary = if explicit_ordinals { 103 } else { 3 };
+            let mut records = vec![
+                json!({"type":"session_meta","payload":{"id":"child","subagent_history_start_ordinal":boundary,"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent"}}}}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":"Parent question"}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":"Parent answer"}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"user","content":"Child task"}}),
+                json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":"Child result"}}),
+            ];
+            if explicit_ordinals {
+                for (index, record) in records.iter_mut().enumerate() {
+                    record["ordinal"] = json!(100 + index);
+                }
+                // Paginated history places the latest metadata before inherited records.
+                records[0]["ordinal"] = json!(200);
+            }
+            let (_, messages) = provider
+                .make_session(Path::new("child.jsonl"), &records, &HashMap::new(), true)
+                .unwrap();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter_map(|message| message.content.as_deref())
+                    .collect::<Vec<_>>(),
+                vec!["Child task", "Child result"]
+            );
+            records[0]["payload"]["source"] = json!("vscode");
+            let (_, main_messages) = provider
+                .make_session(Path::new("main.jsonl"), &records, &HashMap::new(), true)
+                .unwrap();
+            assert_eq!(main_messages.len(), 4);
+        }
+    }
+
+    #[test]
+    fn child_titles_prefer_own_tasks_then_use_reply_summaries() {
         let meta = json!({"subagent_history_start_ordinal":1});
         let message = |role: &str, text: &str| json!({"type":"response_item","payload":{"type":"message","role":role,"content":[{"type":"input_text","text":text}]}});
         let inherited = message("user", "Unrelated parent request");
@@ -1134,8 +1349,7 @@ mod tests {
         assert_eq!(
             CodexProvider::subagent_content_preview(
                 meta.as_object().unwrap(),
-                &[inherited.clone(), task],
-                false
+                &[inherited.clone(), task]
             ),
             "Review sidebar layout"
         );
@@ -1147,24 +1361,42 @@ mod tests {
                     inherited,
                     encrypted,
                     message("assistant", "Verified sidebar colors and spacing")
-                ],
-                false
+                ]
             ),
             "Verified sidebar colors and spacing"
         );
     }
 
     #[test]
-    fn child_title_reads_only_bounded_tail_after_large_forked_history() {
+    fn child_title_uses_agent_name_when_task_is_beyond_bounded_prefix() {
         let root =
             std::env::temp_dir().join(format!("yes-codex-title-tail-{}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("child.jsonl");
-        let meta = json!({"type":"session_meta","payload":{"id":"child","timestamp":"2026-09-07T10:00:00Z","subagent_history_start_ordinal":2,"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","agent_path":"/root/check_colors"}}}}});
-        let inherited = json!({"type":"response_item","timestamp":"2026-09-07T09:00:00Z","payload":{"type":"message","role":"user","content":"x".repeat(300*1024)}});
+        let meta = json!({"type":"session_meta","payload":{"id":"child","timestamp":"2026-09-07T10:00:00Z","subagent_history_start_ordinal":3,"source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","agent_path":"/root/check_colors"}}}}});
+        let inherited = json!({"type":"response_item","timestamp":"2026-09-07T10:00:00Z","payload":{"type":"message","role":"user","content":"x".repeat(300*1024)}});
+        let inherited_request = json!({"type":"response_item","timestamp":"2026-09-07T10:00:00Z","payload":{"type":"message","role":"user","content":"Start the parent app"}});
         let reply = json!({"type":"response_item","timestamp":"2026-09-07T10:01:00Z","payload":{"type":"message","role":"assistant","content":"Checked sidebar colors"}});
-        fs::write(&path, format!("{meta}\n{inherited}\n{reply}\n")).unwrap();
+        fs::write(
+            &path,
+            format!("{meta}\n{inherited}\n{inherited_request}\n{reply}\n"),
+        )
+        .unwrap();
         let provider = CodexProvider::with_root(root.clone());
+        let summary = provider
+            .make_session_summary(&path, &HashMap::new())
+            .unwrap();
+        assert_eq!(summary.first_message, "check_colors");
+        // Without ordinals the tail must not guess from copied timestamps.
+        let mut inherited_request = inherited_request;
+        inherited_request["ordinal"] = json!(2);
+        let mut reply = reply;
+        reply["ordinal"] = json!(3);
+        fs::write(
+            &path,
+            format!("{meta}\n{inherited}\n{inherited_request}\n{reply}\n"),
+        )
+        .unwrap();
         let summary = provider
             .make_session_summary(&path, &HashMap::new())
             .unwrap();
@@ -1198,5 +1430,12 @@ mod tests {
             CodexProvider::parse_arguments(Some(&json!("raw"))).get("arguments"),
             Some(&json!("raw"))
         );
+    }
+    #[test]
+    fn user_image_only_is_preserved_as_attachment() {
+        let provider = CodexProvider::with_root(std::path::PathBuf::from("/tmp/absent"));
+        let messages = provider.parse_messages(&[json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,YQ=="}]}})], None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 1);
     }
 }

@@ -1,3 +1,4 @@
+pub mod attachments;
 pub mod claude_xml;
 pub mod git;
 pub mod mermaid;
@@ -7,7 +8,10 @@ pub mod settings;
 pub mod terminal;
 pub mod workspace;
 
-pub use model::{AppType, MessageType, Session, SessionDetail, SessionMessage, SessionStats};
+pub use model::{
+    AppType, AttachmentSource, MessageType, Session, SessionAttachment, SessionDetail,
+    SessionMessage, SessionStats,
+};
 pub use providers::{ProviderRegistry, SessionProvider};
 pub use settings::{
     AccentColor, AppSettings, ChatLayout, Language, PreferredTerminal, SettingsStore,

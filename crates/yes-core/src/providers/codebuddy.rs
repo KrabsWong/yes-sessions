@@ -7,7 +7,6 @@ use std::{
 };
 
 use anyhow::Result;
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chrono::{DateTime, TimeZone as _, Utc};
 use rayon::prelude::*;
 use regex::Regex;
@@ -112,13 +111,6 @@ impl CodeBuddyProvider {
             .single()
             .unwrap_or_else(Utc::now)
             .to_rfc3339()
-    }
-
-    fn content_items(value: Option<&Value>) -> &[Value] {
-        value
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default()
     }
 
     fn text(value: Option<&Value>, accepted: &[&str]) -> String {
@@ -250,39 +242,6 @@ impl CodeBuddyProvider {
         Self::string(record.pointer("/providerData/toolResult/subAgent/sessionId"))
     }
 
-    fn mime(path: &Path) -> Option<&'static str> {
-        match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
-            "png" => Some("image/png"),
-            "jpg" | "jpeg" => Some("image/jpeg"),
-            "gif" => Some("image/gif"),
-            "webp" => Some("image/webp"),
-            "svg" => Some("image/svg+xml"),
-            "bmp" => Some("image/bmp"),
-            "ico" => Some("image/x-icon"),
-            "avif" => Some("image/avif"),
-            _ => None,
-        }
-    }
-
-    fn image_markdown(&self, item: &Value) -> Option<String> {
-        const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
-        let path = PathBuf::from(item.get("blob_path")?.as_str()?);
-        let name = path.file_name()?.to_string_lossy();
-        let canonical = path.canonicalize().ok()?;
-        let root = self.root.canonicalize().ok()?;
-        if !canonical.starts_with(root) || fs::metadata(&canonical).ok()?.len() > MAX_IMAGE_BYTES {
-            return Some(format!("📎 {name}"));
-        }
-        let mime = item
-            .get("mime")
-            .and_then(Value::as_str)
-            .or_else(|| Self::mime(&canonical))?;
-        Some(format!(
-            "![{name}](data:{mime};base64,{})",
-            STANDARD.encode(fs::read(canonical).ok()?)
-        ))
-    }
-
     fn normalize(&self, records: &[Value], fallback: i64) -> Vec<SessionMessage> {
         let mut messages = Vec::new();
         let mut pending_agents: HashMap<String, Map<String, Value>> = HashMap::new();
@@ -326,22 +285,8 @@ impl CodeBuddyProvider {
                 let mut text = Self::message_text(record);
                 if role == "user" {
                     text = Self::clean_user_text(&text);
-                    let images = Self::content_items(record.get("content"))
-                        .iter()
-                        .filter(|item| {
-                            item.get("type").and_then(Value::as_str) == Some("image_blob_ref")
-                        })
-                        .filter_map(|item| self.image_markdown(item))
-                        .collect::<Vec<_>>();
-                    text = std::iter::once(text)
-                        .chain(images)
-                        .filter(|value| !value.is_empty())
-                        .collect::<Vec<_>>()
-                        .join("\n\n");
                 }
-                if text.is_empty() {
-                    continue;
-                }
+
                 let mut message = SessionMessage::text(
                     if role == "system" {
                         MessageType::System
@@ -351,6 +296,17 @@ impl CodeBuddyProvider {
                     timestamp,
                     text,
                 );
+                crate::attachments::normalize(
+                    &mut message,
+                    record
+                        .get("content")
+                        .or_else(|| record.pointer("/message/content")),
+                );
+                if message.content.as_deref().unwrap_or_default().is_empty()
+                    && message.attachments.is_empty()
+                {
+                    continue;
+                }
                 if let Some(status) = Self::string(record.get("status")) {
                     message.metadata.insert("subtype".into(), json!(status));
                 }
@@ -364,8 +320,20 @@ impl CodeBuddyProvider {
                 || kind == "assistant"
             {
                 let text = Self::message_text(record);
-                if !text.is_empty() || !pending_reasoning.is_empty() {
+                {
                     let mut message = SessionMessage::text(MessageType::Assistant, timestamp, text);
+                    crate::attachments::normalize(
+                        &mut message,
+                        record
+                            .get("content")
+                            .or_else(|| record.pointer("/message/content")),
+                    );
+                    if message.content.as_deref().unwrap_or_default().is_empty()
+                        && pending_reasoning.is_empty()
+                        && message.attachments.is_empty()
+                    {
+                        continue;
+                    }
                     message.reasoning_content = (!pending_reasoning.is_empty())
                         .then(|| std::mem::take(&mut pending_reasoning));
                     if let Some(status) = Self::string(record.get("status")) {
@@ -609,6 +577,20 @@ impl CodeBuddyProvider {
 
     fn previews(messages: &[SessionMessage]) -> (String, String) {
         let clean = |message: &SessionMessage| {
+            if message
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .trim()
+                .is_empty()
+            {
+                return message
+                    .attachments
+                    .iter()
+                    .map(|item| item.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+            }
             message
                 .content
                 .as_deref()
@@ -901,5 +883,12 @@ mod tests {
             }))),
             Some("agent-child-1".into())
         );
+    }
+    #[test]
+    fn blob_references_are_preserved_without_loading_files() {
+        let provider = CodeBuddyProvider::with_root(std::path::PathBuf::from("/tmp/absent"));
+        let messages = provider.normalize(&[json!({"type":"message","role":"user","content":[{"type":"image_blob_ref","blob_path":"/tmp/missing-image.png","mime":"image/png"},{"type":"file","path":"/tmp/missing.pdf"}]})], 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 2);
     }
 }

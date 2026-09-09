@@ -157,6 +157,12 @@ impl OpenCodeProvider {
                         }
                     }
                     message.model = model.clone();
+                    if index == 0 {
+                        crate::attachments::normalize(
+                            &mut message,
+                            Some(&Value::Array(parts.to_vec())),
+                        );
+                    }
                     message
                 })
                 .collect();
@@ -173,6 +179,7 @@ impl OpenCodeProvider {
         );
         message.reasoning_content = (!reasoning.is_empty()).then(|| reasoning.join("\n\n"));
         message.model = model;
+        crate::attachments::normalize(&mut message, Some(&Value::Array(parts.to_vec())));
         vec![message]
     }
 
@@ -478,5 +485,33 @@ mod tests {
                 .as_deref(),
             Some("gpt-5")
         );
+    }
+    #[test]
+    fn file_parts_preserve_images_and_other_resources() {
+        let messages = OpenCodeProvider::parse_message(
+            &json!({"role":"user"}),
+            &[
+                json!({"type":"file","mime":"image/png","filename":"image.png","url":"file:///tmp/image.png"}),
+                json!({"type":"file","mime":"application/pdf","filename":"doc.pdf","url":"file:///tmp/doc.pdf"}),
+            ],
+            0,
+            None,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 2);
+    }
+    #[test]
+    fn tool_messages_keep_file_parts_even_with_source_metadata() {
+        let messages = OpenCodeProvider::parse_message(
+            &json!({"role":"assistant"}),
+            &[
+                json!({"type":"tool","tool":"read","state":{"status":"completed"}}),
+                json!({"type":"file","mime":"application/pdf","filename":"doc.pdf","url":"file:///tmp/doc.pdf","source":{"type":"file","path":"doc.pdf"}}),
+            ],
+            0,
+            None,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 1);
     }
 }

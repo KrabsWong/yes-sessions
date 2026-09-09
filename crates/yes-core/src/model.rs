@@ -76,8 +76,54 @@ pub struct ToolOutput {
     pub extra: Map<String, Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttachmentSource {
+    LocalPath(PathBuf),
+    DataUrl(String),
+    RemoteUrl(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionAttachment {
+    pub name: String,
+    pub mime_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedded_fallback: Option<String>,
+    pub source: AttachmentSource,
+}
+
+impl SessionAttachment {
+    pub fn is_image(&self) -> bool {
+        self.mime_type
+            .as_deref()
+            .is_some_and(|mime| mime.starts_with("image/"))
+            || std::path::Path::new(&self.name)
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext.to_ascii_lowercase().as_str(),
+                        "png"
+                            | "jpg"
+                            | "jpeg"
+                            | "gif"
+                            | "webp"
+                            | "bmp"
+                            | "ico"
+                            | "avif"
+                            | "heic"
+                            | "tiff"
+                            | "tif"
+                            | "svg"
+                    )
+                })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessage {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<SessionAttachment>,
     pub message_type: MessageType,
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +155,7 @@ impl SessionMessage {
         content: impl Into<String>,
     ) -> Self {
         Self {
+            attachments: Vec::new(),
             message_type,
             timestamp: timestamp.into(),
             content: Some(content.into()),
