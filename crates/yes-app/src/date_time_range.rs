@@ -6,7 +6,6 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     calendar::{Calendar, CalendarState, Date},
     select::{Select, SelectEvent, SelectState},
-    switch::Switch,
 };
 use gpui_kit::*;
 use yes_core::Language;
@@ -20,8 +19,7 @@ pub(crate) enum DateTimeRangeEvent {
 
 pub(crate) struct DateTimeRangePicker {
     language: Language,
-    calendar: Entity<CalendarState>,
-    time_enabled: bool,
+    calendars: [Entity<CalendarState>; 2],
     times: [[Entity<TimeSelect>; 3]; 2],
     preset: Option<usize>,
     pub(crate) custom_open: bool,
@@ -112,10 +110,12 @@ impl DateTimeRangePicker {
         } else {
             "en"
         });
-        let calendar = cx.new(|cx| {
-            let mut state = CalendarState::new(window, cx);
-            state.set_date(Date::Range(None, None), window, cx);
-            state
+        let calendars = std::array::from_fn(|_| {
+            cx.new(|cx| {
+                let mut state = CalendarState::new(window, cx);
+                state.set_date(Date::Single(None), window, cx);
+                state
+            })
         });
         let times = std::array::from_fn(|end| {
             std::array::from_fn(|part| {
@@ -131,9 +131,11 @@ impl DateTimeRangePicker {
             })
         });
         let mut subscriptions = Vec::new();
-        subscriptions.push(cx.observe(&calendar, |this, _, cx| {
-            this.selection_changed(cx);
-        }));
+        for calendar in &calendars {
+            subscriptions.push(cx.observe(calendar, |this, _, cx| {
+                this.selection_changed(cx);
+            }));
+        }
         for endpoint in &times {
             for time in endpoint {
                 subscriptions.push(
@@ -145,8 +147,7 @@ impl DateTimeRangePicker {
         }
         Self {
             language,
-            calendar,
-            time_enabled: false,
+            calendars,
             times,
             preset: None,
             custom_open: false,
@@ -171,8 +172,7 @@ impl DateTimeRangePicker {
     }
 
     fn endpoint(&self, end: usize, cx: &App) -> Option<NaiveDateTime> {
-        let range = self.calendar.read(cx).date();
-        let date = if end == 0 { range.start() } else { range.end() }?;
+        let date = self.calendars[end].read(cx).date().start()?;
         let time: Vec<u32> = self.times[end]
             .iter()
             .map(|state| {
@@ -246,16 +246,10 @@ impl DateTimeRangePicker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.calendar.update(cx, |state, cx| {
-            state.set_date(
-                Date::Range(from.map(|v| v.date()), until.map(|v| v.date())),
-                window,
-                cx,
-            );
-        });
-        self.time_enabled = from.is_some_and(|v| v.time() != NaiveTime::MIN)
-            || until.is_some_and(|v| v.time() != NaiveTime::from_hms_opt(23, 59, 59).unwrap());
         for (end, value) in [from, until].into_iter().enumerate() {
+            self.calendars[end].update(cx, |state, cx| {
+                state.set_date(Date::Single(value.map(|v| v.date())), window, cx);
+            });
             let time = value
                 .map(|v| [v.hour(), v.minute(), v.second()])
                 .unwrap_or(if end == 0 { [0, 0, 0] } else { [23, 59, 59] });
@@ -266,23 +260,6 @@ impl DateTimeRangePicker {
             }
         }
         self.changed(cx);
-    }
-
-    fn set_time_enabled(&mut self, enabled: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if self.time_enabled == enabled {
-            return;
-        }
-        if !enabled {
-            let from = self
-                .endpoint(0, cx)
-                .map(|v| v.date().and_time(NaiveTime::MIN));
-            let until = self
-                .endpoint(1, cx)
-                .map(|v| v.date().and_hms_opt(23, 59, 59).unwrap());
-            self.set_range(from, until, window, cx);
-        }
-        self.time_enabled = enabled;
-        cx.notify();
     }
 
     fn apply_preset(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -308,78 +285,179 @@ impl DateTimeRangePicker {
 impl Render for DateTimeRangePicker {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language;
+        let tabs = div()
+            .h_flex()
+            .w(px(264.))
+            .gap_1()
+            .p_1()
+            .rounded_md()
+            .bg(cx.theme().muted)
+            .child(
+                Button::new("time-back")
+                    .small()
+                    .ghost()
+                    .flex_1()
+                    .debug_selector(|| "time-range-back".into())
+                    .label(tr(language, "timeRange.presets"))
+                    .selected(!self.custom_open)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.custom_open = false;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("time-custom")
+                    .small()
+                    .ghost()
+                    .flex_1()
+                    .debug_selector(|| "time-custom".into())
+                    .label(tr(language, "timeRange.custom"))
+                    .selected(self.custom_open)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.custom_open = true;
+                        cx.notify();
+                    })),
+            );
+        let panel = div()
+            .v_flex()
+            .gap_3()
+            .w(px(if self.custom_open { 480. } else { 264. }))
+            .child(tabs);
         if !self.custom_open {
-            return div()
-                .w(px(232.))
-                .v_flex()
-                .gap_1()
+            return panel
                 .child(
                     div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .pb_2()
-                        .child(tr(language, "timeRange.basis")),
-                )
-                .child(
-                    Button::new("time-any")
-                        .small()
-                        .ghost()
-                        .w_full()
-                        .text_color(cx.theme().foreground)
-                        .accessibility_label(tr(language, "agentSearch.unlimited"))
-                        .child(div().w_full().child(tr(language, "agentSearch.unlimited")))
-                        .selected(!self.has_value(cx))
-                        .on_click(cx.listener(|this, _, window, cx| this.clear(window, cx))),
-                )
-                .children(PRESETS.iter().enumerate().map(|(index, (key, _))| {
-                    Button::new(("time-preset", index))
-                        .small()
-                        .ghost()
-                        .w_full()
-                        .debug_selector(move || format!("time-preset-{index}").into())
-                        .text_color(cx.theme().foreground)
-                        .accessibility_label(tr(language, key))
-                        .child(div().w_full().child(tr(language, key)))
-                        .selected(self.preset == Some(index))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.apply_preset(index, window, cx)
-                        }))
-                }))
-                .child(
-                    Button::new("time-custom")
-                        .small()
-                        .ghost()
-                        .w_full()
-                        .debug_selector(|| "time-custom".into())
-                        .text_color(cx.theme().foreground)
-                        .accessibility_label(tr(language, "timeRange.custom"))
-                        .child(div().w_full().child(tr(language, "timeRange.custom")))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.custom_open = true;
-                            cx.notify();
+                        .v_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("time-any")
+                                .small()
+                                .ghost()
+                                .w_full()
+                                .text_color(cx.theme().foreground)
+                                .accessibility_label(tr(language, "agentSearch.unlimited"))
+                                .child(div().w_full().child(tr(language, "agentSearch.unlimited")))
+                                .selected(!self.has_value(cx))
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.clear(window, cx)),
+                                ),
+                        )
+                        .children(PRESETS.iter().enumerate().map(|(index, (key, _))| {
+                            Button::new(("time-preset", index))
+                                .small()
+                                .ghost()
+                                .w_full()
+                                .debug_selector(move || format!("time-preset-{index}").into())
+                                .text_color(cx.theme().foreground)
+                                .accessibility_label(tr(language, key))
+                                .child(div().w_full().child(tr(language, key)))
+                                .selected(self.preset == Some(index))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.apply_preset(index, window, cx)
+                                }))
                         })),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr(language, "timeRange.basis")),
                 )
                 .into_any_element();
         }
-        div()
-            .v_flex()
-            .gap_2()
-            .w(px(288.))
+        panel
             .debug_selector(|| "time-range-custom-panel".into())
             .child(
                 div()
                     .h_flex()
+                    .items_start()
+                    .gap_4()
+                    .debug_selector(|| "time-range-calendar".into())
+                    .children((0..2).map(|end| {
+                        div()
+                            .v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_2()
+                            .debug_selector(move || format!("time-range-endpoint-{end}").into())
+                            .child(div().text_sm().font_weight(FontWeight::MEDIUM).child(tr(
+                                language,
+                                if end == 0 {
+                                    "timeRange.from"
+                                } else {
+                                    "timeRange.until"
+                                },
+                            )))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        self.endpoint(end, cx)
+                                            .map(|value| value.format("%Y-%m-%d").to_string())
+                                            .unwrap_or_else(|| {
+                                                tr(language, "timeRange.date").to_owned()
+                                            }),
+                                    ),
+                            )
+                            .child(
+                                div().flex().justify_center().child(
+                                    Calendar::new(&self.calendars[end])
+                                        .small()
+                                        .border_0()
+                                        .p_0()
+                                        .w(px(196.)),
+                                ),
+                            )
+                            .child(div().h_flex().gap_1().children((0..3).map(|part| {
+                                div()
+                                    .debug_selector(move || {
+                                        format!("time-range-time-{end}-{part}").into()
+                                    })
+                                    .h_flex()
+                                    .gap_1()
+                                    .children((part > 0).then_some(div().child(":")))
+                                    .child(
+                                        Select::new(&self.times[end][part])
+                                            .small()
+                                            .w(px(64.))
+                                            .menu_max_h(px(200.))
+                                            .disabled(self.endpoint(end, cx).is_none())
+                                            .accessibility_label(format!(
+                                                "{} {}",
+                                                tr(
+                                                    language,
+                                                    if end == 0 {
+                                                        "timeRange.from"
+                                                    } else {
+                                                        "timeRange.until"
+                                                    }
+                                                ),
+                                                tr(
+                                                    language,
+                                                    [
+                                                        "timeRange.hour",
+                                                        "timeRange.minute",
+                                                        "timeRange.second"
+                                                    ][part]
+                                                )
+                                            )),
+                                    )
+                            })))
+                    })),
+            )
+            .child(
+                div()
+                    .h_flex()
                     .justify_between()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .pt_2()
                     .child(
-                        Button::new("time-back")
-                            .small()
-                            .ghost()
-                            .debug_selector(|| "time-range-back".into())
-                            .label(tr(language, "timeRange.presets"))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.custom_open = false;
-                                cx.notify();
-                            })),
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr(language, "timeRange.basis")),
                     )
                     .child(
                         Button::new("clear-time-range")
@@ -391,88 +469,6 @@ impl Render for DateTimeRangePicker {
                             .on_click(cx.listener(|this, _, window, cx| this.clear(window, cx))),
                     ),
             )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr(language, "timeRange.chooseRange")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .justify_center()
-                    .debug_selector(|| "time-range-calendar".into())
-                    .child(
-                        Calendar::new(&self.calendar)
-                            .small()
-                            .border_0()
-                            .p_0()
-                            .w(px(196.)),
-                    ),
-            )
-            .child(div().text_sm().child(self.summary(cx)))
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(tr(language, "timeRange.basis")),
-            )
-            .child(
-                div().debug_selector(|| "time-range-set-time".into()).child(
-                    Switch::new("set-time")
-                        .small()
-                        .checked(self.time_enabled)
-                        .label(tr(language, "timeRange.setTime"))
-                        .on_click(cx.listener(|this, enabled, window, cx| {
-                            this.set_time_enabled(*enabled, window, cx)
-                        })),
-                ),
-            )
-            .children(self.time_enabled.then(|| {
-                div().v_flex().gap_1().children((0..2).map(|end| {
-                    div()
-                        .h_flex()
-                        .gap_1()
-                        .child(
-                            div()
-                                .w(px(34.))
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground)
-                                .child(tr(
-                                    language,
-                                    if end == 0 {
-                                        "timeRange.from"
-                                    } else {
-                                        "timeRange.until"
-                                    },
-                                )),
-                        )
-                        .children((0..3).map(|part| {
-                            div()
-                                .debug_selector(move || {
-                                    format!("time-range-time-{end}-{part}").into()
-                                })
-                                .h_flex()
-                                .gap_1()
-                                .children((part > 0).then_some(div().child(":")))
-                                .child(
-                                    Select::new(&self.times[end][part])
-                                        .small()
-                                        .w(px(64.))
-                                        .menu_max_h(px(200.))
-                                        .disabled(self.endpoint(end, cx).is_none())
-                                        .accessibility_label(tr(
-                                            language,
-                                            [
-                                                "timeRange.hour",
-                                                "timeRange.minute",
-                                                "timeRange.second",
-                                            ][part],
-                                        )),
-                                )
-                        }))
-                }))
-            }))
             .into_any_element()
     }
 }
@@ -506,7 +502,7 @@ mod tests {
         visual.run_until_parked();
         let calendar = visual.debug_bounds("time-range-calendar").unwrap();
         assert!(calendar.right() <= px(560.));
-        assert!(visual.debug_bounds("time-range-time-1-2").is_none());
+        assert!(visual.debug_bounds("time-range-time-1-2").is_some());
 
         let time = NaiveDate::from_ymd_opt(2024, 2, 29)
             .unwrap()
@@ -566,75 +562,71 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn custom_calendar_defaults_to_days_and_time_is_optional(cx: &mut TestAppContext) {
+    fn custom_calendars_edit_independent_endpoints_and_show_time(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let window = cx.open_window(size(px(320.), px(500.)), |window, cx| {
-            let mut picker = DateTimeRangePicker::new(Language::En, window, cx);
-            picker.custom_open = true;
-            picker
+        let window = cx.open_window(size(px(560.), px(500.)), |window, cx| {
+            DateTimeRangePicker::new(Language::En, window, cx)
         });
         let picker = window.root(cx).unwrap();
-        let start = NaiveDate::from_ymd_opt(2024, 2, 28).unwrap();
-        let end = NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
-        window
-            .update(cx, |picker, _, cx| {
-                picker.calendar.update(cx, |calendar, cx| {
-                    calendar.activate_date(start, cx);
-                });
-            })
-            .unwrap();
-        cx.run_until_parked();
-        picker.read_with(cx, |picker, cx| {
-            assert_eq!(picker.endpoint(0, cx), start.and_hms_opt(0, 0, 0))
-        });
-        window
-            .update(cx, |picker, _, cx| {
-                picker.calendar.update(cx, |calendar, cx| {
-                    calendar.activate_date(end, cx);
-                });
-            })
-            .unwrap();
-        cx.run_until_parked();
-        picker.read_with(cx, |picker, cx| {
-            assert_eq!(picker.endpoint(1, cx), end.and_hms_opt(23, 59, 59));
-            assert!(!picker.time_enabled);
-        });
         let mut visual = VisualTestContext::from_window(*window, cx);
         visual.run_until_parked();
-        assert!(visual.debug_bounds("time-range-time-0-0").is_none());
-        let toggle = visual.debug_bounds("time-range-set-time").unwrap();
-        visual.simulate_click(
-            point(toggle.left() + px(8.), toggle.center().y),
-            Default::default(),
-        );
-        visual.run_until_parked();
-        assert!(picker.read_with(cx, |picker, _| picker.time_enabled));
-        assert!(visual.debug_bounds("time-range-time-0-0").is_some());
-        let panel = visual.debug_bounds("time-range-custom-panel").unwrap();
-        let last = visual.debug_bounds("time-range-time-1-2").unwrap();
+        let custom = visual.debug_bounds("time-custom").unwrap();
+        let first_preset = visual.debug_bounds("time-preset-0").unwrap();
         assert!(
-            last.bottom() - panel.top() < px(420.),
-            "expanded custom content height {:?}",
-            last.bottom() - panel.top()
+            custom.bottom() < first_preset.top(),
+            "custom must be visible above the preset list"
         );
-        assert!(panel.right() <= px(320.));
-        window
-            .update(cx, |picker, window, cx| {
-                picker.set_range(
-                    start.and_hms_opt(12, 30, 40),
-                    end.and_hms_opt(15, 20, 30),
-                    window,
-                    cx,
-                );
-                assert!(picker.time_enabled);
-                picker.set_time_enabled(false, window, cx);
-            })
-            .unwrap();
-        cx.run_until_parked();
+        visual.simulate_click(custom.center(), Default::default());
+        visual.run_until_parked();
+        let start = NaiveDate::from_ymd_opt(2024, 2, 28).unwrap();
+        let end = NaiveDate::from_ymd_opt(2024, 3, 2).unwrap();
+        for (index, date) in [(0, start), (1, end)] {
+            picker.update(cx, |picker, cx| {
+                picker.calendars[index].update(cx, |calendar, cx| {
+                    calendar.activate_date(date, cx);
+                });
+            });
+            visual.run_until_parked();
+        }
         picker.read_with(cx, |picker, cx| {
             assert_eq!(picker.endpoint(0, cx), start.and_hms_opt(0, 0, 0));
             assert_eq!(picker.endpoint(1, cx), end.and_hms_opt(23, 59, 59));
-            assert!(!picker.time_enabled);
+        });
+        for language in [Language::Zh, Language::En] {
+            picker.update(cx, |picker, cx| picker.set_language(language, cx));
+            visual.run_until_parked();
+            let from = visual.debug_bounds("time-range-endpoint-0").unwrap();
+            let until = visual.debug_bounds("time-range-endpoint-1").unwrap();
+            let panel = visual.debug_bounds("time-range-custom-panel").unwrap();
+            assert_eq!(from.top(), until.top());
+            assert!(from.right() < until.left());
+            assert!(until.right() <= panel.right());
+            for selector in ["time-range-time-0-2", "time-range-time-1-2"] {
+                let time = visual.debug_bounds(selector).unwrap();
+                assert!(time.right() <= panel.right() && time.bottom() <= panel.bottom());
+            }
+            let clear = visual.debug_bounds("time-range-clear").unwrap();
+            assert!(panel.right() <= px(560.) && clear.bottom() - panel.top() < px(420.));
+        }
+        // Changing the start independently must preserve the end and report invalid order.
+        picker.update(cx, |picker, cx| {
+            picker.calendars[0].update(cx, |calendar, cx| {
+                calendar.activate_date(end.succ_opt().unwrap(), cx);
+            });
+        });
+        visual.run_until_parked();
+        picker.read_with(cx, |picker, cx| {
+            assert_eq!(picker.endpoint(1, cx), end.and_hms_opt(23, 59, 59));
+            assert_eq!(picker.bounds(cx), Err("timeRange.invalidOrder"));
+        });
+        let clear = visual.debug_bounds("time-range-clear").unwrap();
+        visual.simulate_click(clear.center(), Default::default());
+        visual.run_until_parked();
+        picker.read_with(cx, |picker, cx| {
+            assert_eq!(picker.bounds(cx), Ok((None, None)));
+            assert_eq!(picker.times[0][0].read(cx).selected_value().unwrap(), "00");
+            assert_eq!(picker.times[1][0].read(cx).selected_value().unwrap(), "23");
+            assert!(picker.custom_open);
         });
     }
 
