@@ -8,7 +8,7 @@ cask "yes-sessions" do
   homepage "https://github.com/KrabsWong/yes-sessions"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :ventura"
+  depends_on macos: :ventura
 
   app "Yes Sessions.app"
 
