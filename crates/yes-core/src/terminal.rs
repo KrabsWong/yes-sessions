@@ -110,7 +110,14 @@ pub fn resume_session(
     preference: PreferredTerminal,
 ) -> io::Result<()> {
     let terminal = terminal_info(preference).preferred;
-    let (command, args) = resume_command(app_type, session_id);
+    let (mut command, args) = resume_command(app_type, session_id);
+    if app_type == AppType::OpenCode
+        && crate::providers::OpenCodeProvider::default()
+            .is_v2_session(session_id)
+            .map_err(io::Error::other)?
+    {
+        command = "opencode2";
+    }
     let command_line = std::iter::once(shell_quote(command))
         .chain(args.iter().map(|arg| shell_quote(arg)))
         .collect::<Vec<_>>()

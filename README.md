@@ -78,7 +78,7 @@ scripts/package-macos.sh
 | --- | --- |
 | CodeBuddy | `~/.codebuddy/projects/<project>/*.jsonl` |
 | Claude Code | `~/.claude/projects/<project>/*.jsonl` |
-| OpenCode | `~/.local/share/opencode/opencode.db`（兼容文件存储） |
+| OpenCode | `~/.local/share/opencode/opencode.db`（兼容 OpenCode 1 / OpenCode 2 beta，迁移会话自动去重） |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/session_index.jsonl` |
 
 大型 JSONL 会话采用轻量摘要扫描；只有打开具体会话时才解析完整内容，避免启动时读取数 GB 历史记录。
