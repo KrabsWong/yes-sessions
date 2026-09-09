@@ -310,7 +310,7 @@ fn display_time(timestamp: &str) -> String {
         .unwrap_or_else(|_| timestamp.chars().take(16).collect())
 }
 
-fn display_datetime(timestamp: &str) -> String {
+pub(crate) fn display_datetime(timestamp: &str) -> String {
     chrono::DateTime::parse_from_rfc3339(timestamp)
         .map(|value| {
             value
@@ -2253,8 +2253,8 @@ pub fn conversation_scroller(
 #[cfg(test)]
 mod tests {
     use super::{
-        IndexedMessage, ToolType, build_turns, display_time, pair_tool_messages, tool_display_name,
-        tool_input_rows, tool_summary, tool_type,
+        IndexedMessage, ToolType, build_turns, display_datetime, display_time, pair_tool_messages,
+        tool_display_name, tool_input_rows, tool_summary, tool_type,
     };
     use serde_json::json;
     use yes_core::{AppType, MessageType, SessionMessage};
@@ -2623,6 +2623,17 @@ mod tests {
             .to_string();
 
         assert_eq!(display_time(timestamp), expected);
+
+        let expected_datetime = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap()
+            .with_timezone(&chrono::Local)
+            .format("%Y/%m/%d %H:%M")
+            .to_string();
+        assert_eq!(display_datetime(timestamp), expected_datetime);
+        assert_eq!(
+            display_datetime("2026-09-03T21:35:00+08:00"),
+            expected_datetime
+        );
     }
 
     #[test]

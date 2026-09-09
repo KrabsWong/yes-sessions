@@ -1,6 +1,15 @@
 use super::*;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use yes_core::SessionMessage;
+use gpui_kit::component::scroll::{Scrollbar, ScrollbarMode};
+use yes_core::{MessageType, SessionMessage};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum SearchScope {
+    #[default]
+    All,
+    User,
+    Assistant,
+}
 
 #[derive(Clone, Debug)]
 struct SearchHit {
@@ -14,6 +23,7 @@ pub(super) struct SessionSearch {
     source: Option<Arc<SessionDetail>>,
     hits: Vec<SearchHit>,
     active: usize,
+    scope: SearchScope,
     scroll: UniformListScrollHandle,
     pending: bool,
     task: Option<Task<()>>,
@@ -64,7 +74,7 @@ fn excerpt(text: &str, query: &str) -> Option<String> {
     ))
 }
 
-fn search_messages(messages: &[SessionMessage], query: &str) -> Vec<SearchHit> {
+fn search_messages(messages: &[SessionMessage], query: &str, scope: SearchScope) -> Vec<SearchHit> {
     let query = query.trim().to_lowercase();
     if query.is_empty() {
         return Vec::new();
@@ -72,6 +82,11 @@ fn search_messages(messages: &[SessionMessage], query: &str) -> Vec<SearchHit> {
     messages
         .iter()
         .enumerate()
+        .filter(|(_, item)| match scope {
+            SearchScope::All => true,
+            SearchScope::User => item.message_type == MessageType::User,
+            SearchScope::Assistant => item.message_type == MessageType::Assistant,
+        })
         .filter_map(|(message, item)| {
             let found = [
                 item.content.as_deref(),
@@ -136,6 +151,7 @@ impl YesSessions {
         self.session_search.task = None;
         self.session_search.hits.clear();
         self.session_search.active = 0;
+        self.session_search.scroll = UniformListScrollHandle::new();
         self.session_search.pending = false;
         self.session_search.source = self.detail.clone();
         let Some(input) = &self.session_search.input else {
@@ -147,13 +163,14 @@ impl YesSessions {
             return;
         };
         self.session_search.pending = true;
+        let scope = self.session_search.scope;
         self.session_search.task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
                 .timer(Duration::from_millis(180))
                 .await;
             let hits = cx
                 .background_executor()
-                .spawn(async move { search_messages(&detail.messages, &query) })
+                .spawn(async move { search_messages(&detail.messages, &query, scope) })
                 .await;
             let _ = this.update(cx, |this, cx| {
                 this.session_search.hits = hits;
@@ -162,6 +179,21 @@ impl YesSessions {
             });
         }));
         cx.notify();
+    }
+
+    fn set_session_search_scope(
+        &mut self,
+        scope: SearchScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session_search.scope != scope {
+            self.session_search.scope = scope;
+            self.schedule_session_search(cx);
+        }
+        if let Some(input) = &self.session_search.input {
+            input.read(cx).focus_handle(cx).focus(window, cx);
+        }
     }
 
     pub(super) fn step_session_search(&mut self, previous: bool, cx: &mut Context<Self>) {
@@ -239,7 +271,15 @@ impl YesSessions {
         let status = if self.session_search.pending {
             tr(lang, "search.searching").to_owned()
         } else if input.read(cx).value().trim().is_empty() {
-            tr(lang, "search.scope").to_owned()
+            tr(
+                lang,
+                match self.session_search.scope {
+                    SearchScope::All => "search.scope",
+                    SearchScope::User => "search.scopeUser",
+                    SearchScope::Assistant => "search.scopeAssistant",
+                },
+            )
+            .to_owned()
         } else if count == 0 {
             tr(lang, "search.empty").to_owned()
         } else {
@@ -308,8 +348,10 @@ impl YesSessions {
                                     .justify_between()
                                     .text_size(px(11.))
                                     .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{} · #{}", role, hit.message + 1))
-                                    .child(message.timestamp.clone()),
+                                    .child(role.to_owned())
+                                    .child(crate::conversation::display_datetime(
+                                        &message.timestamp,
+                                    )),
                             )
                             .child(div().text_size(px(13.)).line_clamp(2).child(
                                 StyledText::new(hit.excerpt.clone()).with_highlights(highlights),
@@ -324,8 +366,14 @@ impl YesSessions {
             }),
         )
         .track_scroll(&self.session_search.scroll)
-        .h(px((count.min(5) * 96) as f32))
-        .w_full();
+        .size_full();
+        let results = div()
+            .relative()
+            .min_h_0()
+            .h(px((count.min(5) * 96) as f32))
+            .w_full()
+            .child(results)
+            .child(Scrollbar::vertical(&self.session_search.scroll).mode(ScrollbarMode::Always));
         div()
             .id("search-backdrop")
             .occlude()
@@ -426,6 +474,27 @@ impl YesSessions {
                             .child(div().flex_1().min_w_0().child(Input::new(input))),
                     )
                     .child(
+                        div().flex_none().flex().gap_1().px_4().pb_3().children(
+                            [
+                                (SearchScope::All, "search.filterAll"),
+                                (SearchScope::User, "search.filterUser"),
+                                (SearchScope::Assistant, "search.filterAssistant"),
+                            ]
+                            .into_iter()
+                            .map(|(scope, key)| {
+                                Button::new(key)
+                                    .debug_selector(move || key.into())
+                                    .ghost()
+                                    .compact()
+                                    .label(tr(lang, key))
+                                    .selected(self.session_search.scope == scope)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.set_session_search_scope(scope, window, cx);
+                                    }))
+                            }),
+                        ),
+                    )
+                    .child(
                         div()
                             .px_4()
                             .pb_3()
@@ -454,6 +523,30 @@ impl YesSessions {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn filters_message_sources_and_preserves_jump_indices() {
+        let mut reasoning = SessionMessage::text(MessageType::Assistant, "", "");
+        reasoning.reasoning_content = Some("needle in reasoning".into());
+        let messages = vec![
+            SessionMessage::text(MessageType::System, "", "needle"),
+            SessionMessage::text(MessageType::User, "", "needle"),
+            SessionMessage::text(MessageType::ToolUse, "", "needle"),
+            SessionMessage::text(MessageType::Assistant, "", "needle"),
+            SessionMessage::text(MessageType::ToolResult, "", "needle"),
+            reasoning,
+        ];
+        let indices = |scope| {
+            search_messages(&messages, "needle", scope)
+                .into_iter()
+                .map(|hit| hit.message)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indices(SearchScope::All), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(indices(SearchScope::User), vec![1]);
+        assert_eq!(indices(SearchScope::Assistant), vec![3, 5]);
+    }
+
     #[test]
     fn finds_literal_unicode_text_and_tool_input_once_per_message() {
         let mut tool = SessionMessage::text(yes_core::MessageType::ToolUse, "", "");
@@ -467,10 +560,16 @@ mod tests {
             SessionMessage::text(yes_core::MessageType::User, "", "中文 TEST test"),
             tool,
         ];
-        assert_eq!(search_messages(&messages, "test").len(), 2);
-        assert_eq!(search_messages(&messages, "中文")[0].message, 0);
-        assert!(search_messages(&messages, "  ").is_empty());
-        assert!(search_messages(&messages, "[.*]").is_empty());
+        assert_eq!(
+            search_messages(&messages, "test", SearchScope::All).len(),
+            2
+        );
+        assert_eq!(
+            search_messages(&messages, "中文", SearchScope::All)[0].message,
+            0
+        );
+        assert!(search_messages(&messages, "  ", SearchScope::All).is_empty());
+        assert!(search_messages(&messages, "[.*]", SearchScope::All).is_empty());
         assert!(excerpt("İ Unicode 搜索", "搜索").unwrap().contains("搜索"));
     }
     #[test]
@@ -482,6 +581,7 @@ mod tests {
                 format!("{}keyword{}", "长".repeat(100_000), "x".repeat(100_000)),
             )],
             "keyword",
+            SearchScope::All,
         );
         assert_eq!(hits.len(), 1);
         assert!(hits[0].excerpt.contains("keyword"));
@@ -538,7 +638,11 @@ mod ui_tests {
                     .as_ref()
                     .unwrap()
                     .update(cx, |input, cx| input.set_value("needle", window, cx));
-                let hits = search_messages(&app.detail.as_ref().unwrap().messages, "needle");
+                let hits = search_messages(
+                    &app.detail.as_ref().unwrap().messages,
+                    "needle",
+                    SearchScope::All,
+                );
                 app.session_search.hits = hits;
                 app.step_session_search(false, cx);
                 assert_eq!(app.session_search.active, 1);
@@ -556,6 +660,29 @@ mod ui_tests {
         let bounds = visual.debug_bounds("session-search").unwrap();
         assert!(bounds.size.width > px(200.));
         assert!(bounds.right() <= px(900.));
+        for (key, scope, count) in [
+            ("search.filterAssistant", SearchScope::Assistant, 0),
+            ("search.filterUser", SearchScope::User, 2),
+            ("search.filterAll", SearchScope::All, 2),
+        ] {
+            let filter = visual.debug_bounds(key).unwrap();
+            assert!(filter.right() <= bounds.right());
+            visual.simulate_click(filter.center(), Default::default());
+            visual.run_until_parked();
+            cx.executor().advance_clock(Duration::from_millis(200));
+            visual.run_until_parked();
+            app.read_with(cx, |app, cx| {
+                assert_eq!(app.session_search.scope, scope);
+                assert_eq!(app.session_search.hits.len(), count);
+                assert_eq!(app.session_search.active, 0);
+                assert!(!app.session_search.pending);
+                assert_eq!(
+                    app.session_search.input.as_ref().unwrap().read(cx).value(),
+                    "needle"
+                );
+            });
+        }
+        app.update(cx, |app, cx| app.step_session_search(true, cx));
         visual.simulate_keystrokes("down");
         assert_eq!(app.read_with(cx, |app, _| app.session_search.active), 0);
         visual.simulate_keystrokes("enter");
@@ -568,8 +695,11 @@ mod ui_tests {
         assert!(app.read_with(cx, |app, _| app.session_search.input.is_some()));
         app.update(cx, |app, cx| {
             app.session_search.source = app.detail.clone();
-            app.session_search.hits =
-                search_messages(&app.detail.as_ref().unwrap().messages, "needle");
+            app.session_search.hits = search_messages(
+                &app.detail.as_ref().unwrap().messages,
+                "needle",
+                SearchScope::All,
+            );
             cx.notify();
         });
         visual.run_until_parked();
@@ -587,8 +717,11 @@ mod ui_tests {
             let detail = Arc::make_mut(app.detail.as_mut().unwrap());
             detail.messages[0].content = Some("Long prelude paragraph.\n\n".repeat(80));
             app.session_search.source = app.detail.clone();
-            app.session_search.hits =
-                search_messages(&app.detail.as_ref().unwrap().messages, "Answer");
+            app.session_search.hits = search_messages(
+                &app.detail.as_ref().unwrap().messages,
+                "Answer",
+                SearchScope::All,
+            );
             app.session_search.active = 0;
             app.conversation_state
                 .update(cx, |state, cx| state.remeasure(cx));
@@ -602,6 +735,28 @@ mod ui_tests {
             landing.top() >= px(0.) && landing.top() < px(650.),
             "{landing:?}"
         );
+        visual.simulate_keystrokes("cmd-f");
+        app.update(cx, |app, cx| {
+            let detail = Arc::make_mut(app.detail.as_mut().unwrap());
+            detail.messages = (0..30)
+                .map(|_| SessionMessage::text(yes_core::MessageType::User, "", "needle"))
+                .collect();
+            app.session_search.hits = search_messages(&detail.messages, "needle", SearchScope::All);
+            app.session_search.source = app.detail.clone();
+            app.session_search.active = 0;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        app.update(cx, |app, cx| app.step_session_search(true, cx));
+        visual.run_until_parked();
+        app.read_with(cx, |app, _| {
+            use gpui_kit::component::scroll::ScrollbarHandle;
+            let scroll = &app.session_search.scroll;
+            assert!(scroll.content_size().height > scroll.viewport_bounds().size.height);
+            assert!(scroll.offset().y < px(0.));
+        });
+        let last = visual.debug_bounds("search-result-29").unwrap();
+        assert!(last.bottom() <= visual.debug_bounds("session-search").unwrap().bottom());
         app.update(cx, |app, cx| {
             app.reset_detail(cx);
             assert!(app.session_search.input.is_none());
