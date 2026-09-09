@@ -59,7 +59,7 @@
 
      app "Yes Sessions.app"
 
-     depends_on macos: ">= :ventura"
+     depends_on macos: :ventura
 
      zap trash: [
        "~/Library/Application Support/yes-sessions",
