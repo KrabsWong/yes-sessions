@@ -2,6 +2,7 @@
 
 pub mod app;
 pub mod app_assets;
+mod attachments;
 pub mod commands;
 pub mod conversation;
 mod edit_diff;

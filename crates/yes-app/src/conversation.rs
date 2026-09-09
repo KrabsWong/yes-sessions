@@ -226,10 +226,11 @@ fn build_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversati
 }
 
 fn has_prose(message: &SessionMessage) -> bool {
-    message
-        .content
-        .as_deref()
-        .is_some_and(|text| !text.trim().is_empty())
+    !message.attachments.is_empty()
+        || message
+            .content
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
         || message
             .reasoning_content
             .as_deref()
@@ -254,6 +255,7 @@ fn groupable_tool(message: &SessionMessage, show_thinking: bool) -> bool {
         message.message_type,
         MessageType::ToolUse | MessageType::ToolResult
     ) && !is_subagent_message(message)
+        && message.attachments.is_empty()
         && (message.message_type == MessageType::ToolResult
             || (!message
                 .content
@@ -271,6 +273,7 @@ fn display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversa
     let mergeable = |item: &IndexedMessage| {
         groupable_tool(&item.message, false)
             || (item.message.message_type == MessageType::Assistant
+                && item.message.attachments.is_empty()
                 && !item
                     .message
                     .content
@@ -347,11 +350,12 @@ fn activity_keys(items: &[IndexedMessage], show_thinking: bool) -> HashMap<usize
             .filter(|item| {
                 item.message.message_type == MessageType::System
                     || (item.message.message_type == MessageType::Assistant
-                        && (item
-                            .message
-                            .content
-                            .as_deref()
-                            .is_some_and(|text| !text.trim().is_empty())
+                        && (!item.message.attachments.is_empty()
+                            || item
+                                .message
+                                .content
+                                .as_deref()
+                                .is_some_and(|text| !text.trim().is_empty())
                             || (show_thinking && has_prose(&item.message))))
             })
             .map(|item| (item.index, false, vec![])),
@@ -1241,6 +1245,13 @@ fn render_system(item: &IndexedMessage, options: ConversationOptions, cx: &App) 
                 .pb_2()
                 .text_sm()
                 .opacity(0.8)
+                .when(!item.message.attachments.is_empty(), |view| {
+                    view.child(crate::attachments::Attachments {
+                        id: item.index,
+                        items: item.message.attachments.clone(),
+                        language: options.language,
+                    })
+                })
                 .child(message_content(item, &HashMap::new())),
         )
         .into_any_element()
@@ -1670,8 +1681,26 @@ fn subagent_string(
     input?
         .get(key)?
         .as_str()
+        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn subagent_description(
+    input: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    ["description", "task", "prompt", "message", "task_name"]
+        .into_iter()
+        .filter_map(|key| subagent_string(input, key))
+        .find(|value| {
+            // Codex can persist the delegated message as an opaque URL-safe token.
+            // Only suppress a whole token, not readable text mentioning one.
+            !(value.starts_with("gAAAA")
+                && value.len() >= 100
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_=".contains(&byte)))
+        })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1694,10 +1723,7 @@ fn render_subagent(
     }
 
     let input = tool_use.and_then(|item| item.message.tool_input.as_ref());
-    let description = subagent_string(input, "description")
-        .or_else(|| subagent_string(input, "task"))
-        .or_else(|| subagent_string(input, "prompt"))
-        .or_else(|| subagent_string(input, "message"))
+    let description = subagent_description(input)
         .unwrap_or_else(|| tr(options.language, "sessions.subAgentDefaultDesc").to_owned());
     let child_id = tool_result
         .and_then(|item| item.message.sub_agent_session_id.clone())
@@ -1942,10 +1968,19 @@ fn render_user(
             cx.theme().primary_foreground
         })
         .p_3()
+        .v_flex()
+        .gap_2()
         .text_sm()
         .when(options.chat_bubbles, |view| {
             view.border_1()
                 .border_color(cx.theme().primary.opacity(0.2))
+        })
+        .when(!item.message.attachments.is_empty(), |view| {
+            view.child(crate::attachments::Attachments {
+                id: item.index,
+                items: item.message.attachments.clone(),
+                language: options.language,
+            })
         })
         .child(
             if crate::large_message::needs_virtual_text(
@@ -2172,6 +2207,15 @@ fn render_assistant_group(
             }
         }
         let mut body = div().v_flex().gap_2().min_w_0().w_full();
+        for item in pair.tool_use.iter().chain(pair.tool_result.iter()) {
+            if !item.message.attachments.is_empty() {
+                body = body.child(crate::attachments::Attachments {
+                    id: item.index,
+                    items: item.message.attachments.clone(),
+                    language: options.language,
+                });
+            }
+        }
         if let Some(tool_use) = pair.tool_use.as_ref().filter(|item| {
             item.message
                 .content
@@ -2239,11 +2283,12 @@ fn render_assistant_group(
     }
     for item in items.iter().filter(|item| {
         item.message.message_type == MessageType::Assistant
-            && (item
-                .message
-                .content
-                .as_deref()
-                .is_some_and(|text| !text.trim().is_empty())
+            && (!item.message.attachments.is_empty()
+                || item
+                    .message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty())
                 || (options.show_thinking
                     && item
                         .message
@@ -2256,6 +2301,13 @@ fn render_assistant_group(
             .gap_2()
             .min_w_0()
             .w_full()
+            .when(!item.message.attachments.is_empty(), |view| {
+                view.child(crate::attachments::Attachments {
+                    id: item.index,
+                    items: item.message.attachments.clone(),
+                    language: options.language,
+                })
+            })
             .child(render_reasoning(
                 turn_index,
                 item,
@@ -2641,6 +2693,37 @@ mod tests {
     use serde_json::json;
     use yes_core::{AppType, MessageType, SessionMessage};
 
+    #[test]
+    fn subagent_description_skips_opaque_tokens_and_uses_task_name() {
+        let token = format!("gAAAA{}-_==", "A".repeat(120));
+        for key in ["description", "task", "prompt", "message"] {
+            let input = json!({key: token, "task_name": "review_git"});
+            assert_eq!(
+                super::subagent_description(input.as_object()).as_deref(),
+                Some("review_git")
+            );
+        }
+        let input = json!({"message": token});
+        assert_eq!(super::subagent_description(input.as_object()), None);
+        assert_eq!(super::subagent_description(None), None);
+    }
+
+    #[test]
+    fn subagent_description_preserves_readable_provider_fields() {
+        for key in ["description", "task", "prompt", "message"] {
+            let input = json!({key: " Review changes ", "task_name": "review_git"});
+            assert_eq!(
+                super::subagent_description(input.as_object()).as_deref(),
+                Some("Review changes")
+            );
+        }
+        let input = json!({"description": " ", "message": "Explain gAAAA tokens"});
+        assert_eq!(
+            super::subagent_description(input.as_object()).as_deref(),
+            Some("Explain gAAAA tokens")
+        );
+    }
+
     struct EditDiffTestView;
 
     impl gpui_kit::Render for EditDiffTestView {
@@ -2824,6 +2907,38 @@ mod tests {
         let mut item = tool_message(index, kind, name, id);
         item.message.content = None;
         item
+    }
+
+    #[test]
+    fn attachment_only_messages_stay_visible_and_break_tool_groups() {
+        for provider in AppType::ALL {
+            let mut attachment = SessionMessage::text(MessageType::Assistant, "", "");
+            attachment.attachments.push(yes_core::SessionAttachment {
+                name: "diagram.png".into(),
+                embedded_fallback: None,
+                mime_type: Some("image/png".into()),
+                source: yes_core::AttachmentSource::LocalPath("/tmp/diagram.png".into()),
+            });
+            let messages = vec![
+                activity_message(0, MessageType::ToolUse, "Read", "a").message,
+                attachment.clone(),
+                activity_message(2, MessageType::ToolUse, "Read", "b").message,
+            ];
+            let turns = super::display_turns(&messages, provider);
+            assert!(
+                turns
+                    .iter()
+                    .any(|turn| turn.messages.iter().any(|item| item.index == 1))
+            );
+            let items = messages
+                .into_iter()
+                .enumerate()
+                .map(|(index, message)| IndexedMessage { index, message })
+                .collect::<Vec<_>>();
+            assert!(super::activity_keys(&items, false).is_empty());
+            attachment.message_type = MessageType::User;
+            assert!(crate::app::is_navigable_user_message(&attachment));
+        }
     }
 
     #[test]

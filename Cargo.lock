@@ -10106,6 +10106,7 @@ name = "yes-sessions"
 version = "11.0.3"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "gpui-kit",
  "gpui-pre-platform",

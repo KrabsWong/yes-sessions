@@ -187,11 +187,12 @@ fn navigator_preview(text: &str, max_chars: usize) -> String {
 
 pub(crate) fn is_navigable_user_message(message: &yes_core::SessionMessage) -> bool {
     message.message_type == yes_core::MessageType::User
-        && message
-            .content
-            .as_deref()
-            .or(message.redacted_content.as_deref())
-            .is_some_and(|content| !content.trim().is_empty())
+        && (!message.attachments.is_empty()
+            || message
+                .content
+                .as_deref()
+                .or(message.redacted_content.as_deref())
+                .is_some_and(|content| !content.trim().is_empty()))
 }
 
 fn collect_mermaid_sources(
@@ -551,6 +552,8 @@ impl YesSessions {
         theme.notification.placement = Anchor::TopCenter;
         theme.notification.width = px(360.);
         theme.notification.max_items = 1;
+        theme.overlay =
+            gpui_kit::black().opacity(if mode == ThemeMode::Dark { 0.60 } else { 0.35 });
         if mode == ThemeMode::Dark {
             let background = hsla(222.2 / 360., 0.84, 0.049, 1.);
             let foreground = hsla(210. / 360., 0.40, 0.98, 1.);
@@ -2363,8 +2366,16 @@ impl YesSessions {
                         .content
                         .as_deref()
                         .or(message.redacted_content.as_deref())
-                        .unwrap_or_default()
-                        .to_owned(),
+                        .filter(|text| !text.trim().is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            message
+                                .attachments
+                                .iter()
+                                .map(|item| item.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        }),
                     turn_index_for_message(messages, index, self.selected_app),
                 )
             })
@@ -4049,6 +4060,10 @@ impl Render for YesSessions {
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
             })
+            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            .children(gpui_kit::component::Root::render_notification_layer(
+                window, cx,
+            ))
     }
 }
 

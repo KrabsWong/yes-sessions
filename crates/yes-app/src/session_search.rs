@@ -103,6 +103,16 @@ fn search_messages(messages: &[SessionMessage], query: &str, scope: SearchScope)
             .flatten()
             .find_map(|text| excerpt(text, &query))
             .or_else(|| {
+                item.attachments.iter().find_map(|attachment| {
+                    excerpt(&attachment.name, &query).or_else(|| match &attachment.source {
+                        yes_core::AttachmentSource::LocalPath(path) => {
+                            excerpt(&path.to_string_lossy(), &query)
+                        }
+                        _ => None,
+                    })
+                })
+            })
+            .or_else(|| {
                 item.tool_input.as_ref().and_then(|input| {
                     excerpt(
                         &serde_json::to_string_pretty(input).unwrap_or_default(),
@@ -531,6 +541,34 @@ impl YesSessions {
 mod tests {
     use super::*;
     use core::prelude::v1::test;
+
+    #[test]
+    fn attachment_names_and_paths_remain_searchable_without_indexing_payloads() {
+        let mut message = SessionMessage::text(MessageType::User, "", "");
+        message.attachments = vec![
+            yes_core::SessionAttachment {
+                name: "diagram.png".into(),
+                embedded_fallback: None,
+                mime_type: Some("image/png".into()),
+                source: yes_core::AttachmentSource::LocalPath("/tmp/project/diagram.png".into()),
+            },
+            yes_core::SessionAttachment {
+                name: "report.pdf".into(),
+                embedded_fallback: None,
+                mime_type: Some("application/pdf".into()),
+                source: yes_core::AttachmentSource::DataUrl(
+                    "data:application/pdf;base64,secretpayload".into(),
+                ),
+            },
+        ];
+        let messages = [message];
+        for query in ["diagram", "project", "report"] {
+            let hits = search_messages(&messages, query, SearchScope::User);
+            assert_eq!(hits.len(), 1);
+            assert_eq!(hits[0].message, 0);
+        }
+        assert!(search_messages(&messages, "secretpayload", SearchScope::All).is_empty());
+    }
 
     #[test]
     fn filters_message_sources_and_preserves_jump_indices() {

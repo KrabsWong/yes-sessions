@@ -217,10 +217,39 @@ impl ClaudeProvider {
                         message.metadata.insert("subtype".into(), json!("error"));
                     }
                 }
+                "image" | "document" | "file" => {
+                    if let Some(attachment) = crate::attachments::structured(&block) {
+                        message.attachments.push(attachment);
+                    } else {
+                        continue;
+                    }
+                }
                 _ => continue,
             }
             message.model = model.clone();
-            messages.push(message);
+            // Adjacent text and attachments belong to one user bubble, but tool results stay separate.
+            if message.message_type == MessageType::User
+                && messages.last().is_some_and(|previous: &SessionMessage| {
+                    previous.message_type == MessageType::User
+                })
+            {
+                let previous = messages.last_mut().unwrap();
+                for attachment in message.attachments {
+                    crate::attachments::add_unique(&mut previous.attachments, attachment);
+                }
+                if let Some(text) = message.content.filter(|text| !text.is_empty()) {
+                    let content = previous.content.get_or_insert_with(String::new);
+                    if !content.is_empty() {
+                        content.push_str("\n\n");
+                    }
+                    content.push_str(&text);
+                }
+            } else {
+                messages.push(message);
+            }
+        }
+        for message in &mut messages {
+            crate::attachments::normalize(message, None);
         }
         messages
     }
@@ -436,7 +465,19 @@ impl ClaudeProvider {
                             .starts_with(prefix)
                     })
             })
-            .and_then(|message| message.content)
+            .map(|message| {
+                let text = message.content.unwrap_or_default();
+                if text.is_empty() {
+                    message
+                        .attachments
+                        .iter()
+                        .map(|item| item.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    text
+                }
+            })
             .unwrap_or_default();
         let directory = records
             .iter()
@@ -543,6 +584,11 @@ impl ClaudeProvider {
                     .or_else(|| record.get("content")),
                 &["text"],
             );
+            let text = if kind == Some("user") {
+                crate::attachments::user_preview(&text)
+            } else {
+                text
+            };
             if !text.trim().is_empty() {
                 let preview = text.chars().take(100).collect::<String>();
                 if first.is_empty() {
@@ -743,13 +789,10 @@ impl ClaudeProvider {
                 Some("system") => MessageType::System,
                 _ => continue,
             };
-            let content = record
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            if kind == MessageType::User && content.is_empty() {
-                continue;
-            }
+            let content = Self::text(
+                record.get("content"),
+                &["text", "input_text", "output_text"],
+            );
             let mut message = SessionMessage::text(
                 kind,
                 record
@@ -775,6 +818,13 @@ impl ClaudeProvider {
                 .and_then(Value::as_str)
                 .map(str::to_owned);
             message.model = Self::model(record.get("model"));
+            crate::attachments::normalize(&mut message, record.get("content"));
+            if kind == MessageType::User
+                && message.content.as_deref().unwrap_or_default().is_empty()
+                && message.attachments.is_empty()
+            {
+                continue;
+            }
             messages.push(message);
         }
         let (created_at, updated_at) = Self::file_times(&file_path);
@@ -1130,5 +1180,15 @@ mod tests {
         assert_eq!(detail.session.first_message, list[0].first_message);
         assert!(provider.session_detail("../../escape").unwrap().is_none());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn user_image_and_document_blocks_join_their_text_bubble() {
+        let messages = ClaudeProvider::parse_new_message(
+            &json!({"type":"user","message":{"content":[{"type":"text","text":"Compare these"},{"type":"image","source":{"type":"base64","media_type":"image/png","data":"YQ=="}},{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"YQ=="}}]}}),
+            None,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 2);
+        assert_eq!(messages[0].content.as_deref(), Some("Compare these"));
     }
 }

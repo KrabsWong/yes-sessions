@@ -229,7 +229,7 @@ impl CodexProvider {
                 Some("message")
                     if record.pointer("/payload/role").and_then(Value::as_str) == Some("user") =>
                 {
-                    Self::normalize_user(&text)
+                    crate::attachments::user_preview(&Self::normalize_user(&text))
                 }
                 _ => String::new(),
             };
@@ -293,8 +293,9 @@ impl CodexProvider {
                 {
                     return None;
                 }
-                let text =
-                    Self::normalize_user(&Self::value_text(record.pointer("/payload/content")));
+                let text = crate::attachments::user_preview(&Self::normalize_user(
+                    &Self::value_text(record.pointer("/payload/content")),
+                ));
                 (!text.trim().is_empty()).then(|| Self::truncate(&text, 200))
             })
             .unwrap_or_default()
@@ -536,9 +537,6 @@ impl CodexProvider {
                     } else {
                         self.embed_images(&raw, cwd)
                     };
-                    if content.is_empty() {
-                        continue;
-                    }
                     let mut message = SessionMessage::text(
                         if role == "user" {
                             MessageType::User
@@ -548,6 +546,12 @@ impl CodexProvider {
                         timestamp,
                         content,
                     );
+                    crate::attachments::normalize(&mut message, payload.get("content"));
+                    if message.content.as_deref().unwrap_or_default().is_empty()
+                        && message.attachments.is_empty()
+                    {
+                        continue;
+                    }
                     message.model = current_model.clone();
                     messages.push(message);
                 }
@@ -755,7 +759,7 @@ impl CodexProvider {
                     } else {
                         let text = Self::value_text(payload.get("content"));
                         if role == Some("user") {
-                            Self::normalize_user(&text)
+                            crate::attachments::user_preview(&Self::normalize_user(&text))
                         } else {
                             text
                         }
@@ -1426,5 +1430,12 @@ mod tests {
             CodexProvider::parse_arguments(Some(&json!("raw"))).get("arguments"),
             Some(&json!("raw"))
         );
+    }
+    #[test]
+    fn user_image_only_is_preserved_as_attachment() {
+        let provider = CodexProvider::with_root(std::path::PathBuf::from("/tmp/absent"));
+        let messages = provider.parse_messages(&[json!({"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","image_url":"data:image/png;base64,YQ=="}]}})], None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].attachments.len(), 1);
     }
 }
