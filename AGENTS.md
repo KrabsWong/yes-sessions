@@ -42,3 +42,16 @@ cargo test --workspace
 ```
 
 打包后还需执行 `codesign --verify --deep --strict`，无证书时允许 ad-hoc 签名分发，并说明首次启动的手动放行步骤；配置完整分发凭据时完成 Developer ID 签名、notarization 和 stapling。
+
+## 提交与发布流程
+
+- 常规迭代必须通过功能分支和 PR 进入 `main`，不得直接推送 `main`。用户要求“提交并推送”时，也应按此流程执行。
+- 从最新 `main` 创建 `feature/` 分支，完成验证和提交前审查后提交；每个非空提交都必须有说明具体改动和验证结果的正文。
+- 每次推送前扫描将上传的完整 Git 历史中的密钥和凭据，不能只检查工作区或最终 diff；发现疑似密钥时停止推送并请求确认，不得输出完整密钥。
+- 推送功能分支后，`.github/workflows/auto-create-pr.yml` 会尝试自动创建指向 `main` 的 PR。确认 PR 已创建，必要时手动补建，避免重复创建。
+- 合并前为 PR 添加且仅添加一个版本标签：`major`（重大版本升级）、`minor`（新功能）、`patch`（修复或小版本发布）、`skip-release`（无需发版的文档或配置改动）。不要依赖缺少标签时的默认行为。
+- 提交 PR 后返回 PR 链接及版本标签；没有用户的合并授权时，不要自行合并。
+- PR 合并后，`.github/workflows/auto-version-bump.yml` 按标签更新 Cargo 版本并生成、推送 `vMAJOR.MINOR.PATCH` Git tag；`skip-release` 会跳过发版。若 PR 已准备一个尚未打 tag 的版本，工作流会直接发布该版本。
+- 版本 tag 的推送触发 `.github/workflows/release.yml`，构建 macOS DMG、创建 GitHub Release 并更新 Homebrew 分发。PR 上的版本标签和 Git 版本 tag 是不同的对象：前者控制升版，后者触发发布。
+- 不要用直接推送 `main` 代替 PR，不要擅自创建、移动或覆盖版本 tag。工作流需使用已配置的 `WORKFLOW_PAT` 推送 tag，以触发后续 Release 工作流。
+- 获准合并或发布后，检查版本工作流和 Release 工作流的运行结果；只有发布成功才能报告部署完成。若误将改动直接推送到 `main`，不要重写远程历史，应补建带适当版本标签的 PR，合并后发布现有改动。
