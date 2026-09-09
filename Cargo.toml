@@ -27,6 +27,11 @@ thiserror = "2"
 walkdir = "2"
 wry = { package = "lb-wry", version = "=0.53.3" }
 
+[patch.crates-io]
+# gpui-base 0.6.0 can restart selection autoscroll after mouse release.
+# Pin the upstream fix until it is included in a published release (PR #2941).
+gpui-base = { git = "https://github.com/longbridge/gpui-kit", rev = "12e21c9fc1fd6cd968a3a9dae9470b4d73a184fd" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

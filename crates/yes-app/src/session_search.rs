@@ -239,6 +239,14 @@ impl YesSessions {
                 }
             }
         }
+        if let Some(key) = crate::conversation::tool_activity_key_for_message(
+            &detail.messages,
+            message,
+            self.selected_app,
+            self.settings.show_thinking_content,
+        ) {
+            self.expanded_messages.insert(key);
+        }
         let turn = turn_index_for_message(&detail.messages, message, self.selected_app);
         self.conversation_state.update(cx, |state, cx| {
             state.scroll_to_item(turn, cx);

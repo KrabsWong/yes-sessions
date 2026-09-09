@@ -225,8 +225,171 @@ fn build_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversati
     turns
 }
 
+fn has_prose(message: &SessionMessage) -> bool {
+    message
+        .content
+        .as_deref()
+        .is_some_and(|text| !text.trim().is_empty())
+        || message
+            .reasoning_content
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+}
+
+fn is_subagent_message(message: &SessionMessage) -> bool {
+    message.sub_agent_session_id.is_some()
+        || message
+            .metadata
+            .get("childSessionId")
+            .and_then(|value| value.as_str())
+            .is_some()
+        || message
+            .tool_name
+            .as_deref()
+            .is_some_and(|name| tool_type(name) == ToolType::Subagent)
+}
+
+fn groupable_tool(message: &SessionMessage, show_thinking: bool) -> bool {
+    matches!(
+        message.message_type,
+        MessageType::ToolUse | MessageType::ToolResult
+    ) && !is_subagent_message(message)
+        && (message.message_type == MessageType::ToolResult
+            || (!message
+                .content
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+                && (!show_thinking
+                    || !message
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty()))))
+}
+
+// Keep provider-specific result pairing intact before combining display rows.
+fn display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<ConversationTurn> {
+    let mergeable = |item: &IndexedMessage| {
+        groupable_tool(&item.message, false)
+            || (item.message.message_type == MessageType::Assistant
+                && !item
+                    .message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| !text.trim().is_empty()))
+    };
+    let mut display = Vec::<ConversationTurn>::new();
+    for mut turn in build_turns(messages, provider) {
+        turn.messages.retain(|item| {
+            item.message.message_type != MessageType::Assistant || has_prose(&item.message)
+        });
+        if turn.messages.is_empty() {
+            continue;
+        }
+        let tools_only = turn.messages.iter().all(mergeable);
+        if tools_only
+            && display.last().is_some_and(|previous| {
+                previous
+                    .messages
+                    .iter()
+                    .rev()
+                    .find(|item| item.message.message_type != MessageType::ToolResult)
+                    .is_some_and(mergeable)
+            })
+        {
+            display.last_mut().unwrap().messages.extend(turn.messages);
+        } else {
+            display.push(turn);
+        }
+    }
+    display
+}
+
+fn tool_failed(pair: &ToolPair) -> bool {
+    pair.tool_use
+        .iter()
+        .chain(pair.tool_result.iter())
+        .any(|item| {
+            item.message
+                .metadata
+                .get("subtype")
+                .and_then(|value| value.as_str())
+                .is_some_and(|status| {
+                    matches!(
+                        status.to_ascii_lowercase().as_str(),
+                        "error" | "failed" | "failure"
+                    )
+                })
+        })
+}
+
+fn activity_keys(items: &[IndexedMessage], show_thinking: bool) -> HashMap<usize, usize> {
+    let pairs = pair_tool_messages(items);
+    let mut entries = pairs
+        .iter()
+        .map(|pair| {
+            let members = pair
+                .tool_use
+                .iter()
+                .chain(pair.tool_result.iter())
+                .collect::<Vec<_>>();
+            (
+                members[0].index,
+                members
+                    .iter()
+                    .all(|item| groupable_tool(&item.message, show_thinking)),
+                members.iter().map(|item| item.index).collect::<Vec<_>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    entries.extend(
+        items
+            .iter()
+            .filter(|item| {
+                item.message.message_type == MessageType::System
+                    || (item.message.message_type == MessageType::Assistant
+                        && (item
+                            .message
+                            .content
+                            .as_deref()
+                            .is_some_and(|text| !text.trim().is_empty())
+                            || (show_thinking && has_prose(&item.message))))
+            })
+            .map(|item| (item.index, false, vec![])),
+    );
+    entries.sort_by_key(|(index, _, _)| *index);
+    let mut keys = HashMap::new();
+    for run in entries
+        .split(|(_, groupable, _)| !groupable)
+        .filter(|run| run.len() > 1)
+    {
+        let key = usize::MAX - run[0].0;
+        for (_, _, members) in run {
+            for index in members {
+                keys.insert(*index, key);
+            }
+        }
+    }
+    keys
+}
+
+pub fn tool_activity_key_for_message(
+    messages: &[SessionMessage],
+    message_index: usize,
+    provider: AppType,
+    show_thinking: bool,
+) -> Option<usize> {
+    display_turns(messages, provider)
+        .iter()
+        .find(|turn| turn.messages.iter().any(|item| item.index == message_index))
+        .and_then(|turn| {
+            activity_keys(&turn.messages, show_thinking)
+                .get(&message_index)
+                .copied()
+        })
+}
+
 pub fn conversation_turn_count(messages: &[SessionMessage], provider: AppType) -> usize {
-    build_turns(messages, provider).len()
+    display_turns(messages, provider).len()
 }
 
 pub fn turn_index_for_message(
@@ -234,7 +397,7 @@ pub fn turn_index_for_message(
     message_index: usize,
     provider: AppType,
 ) -> usize {
-    build_turns(messages, provider)
+    display_turns(messages, provider)
         .iter()
         .position(|turn| turn.messages.iter().any(|item| item.index == message_index))
         .unwrap_or_default()
@@ -336,7 +499,11 @@ fn tool_type(tool_name: &str) -> ToolType {
     let name = tool_name.to_lowercase();
     if name.contains("skill") || name.contains("mcp") {
         ToolType::Mcp
-    } else if name.contains("agent") || name.contains("spawn") || name.contains("delegate") {
+    } else if name == "task"
+        || name.contains("agent")
+        || name.contains("spawn")
+        || name.contains("delegate")
+    {
         ToolType::Subagent
     } else if name.contains("planmode") || name == "enterplanmode" || name == "exitplanmode" {
         ToolType::Plan
@@ -1253,6 +1420,7 @@ fn render_tool(
         missing_input_label,
     );
     div()
+        .debug_selector(move || format!("tool-card-{message_index}"))
         .rounded_lg()
         .border_1()
         .border_color(cx.theme().list_active_border)
@@ -1517,11 +1685,11 @@ fn render_subagent(
     cx: &App,
 ) -> Option<AnyElement> {
     let item = tool_use.or(tool_result)?;
-    let tool_name = tool_use
-        .and_then(|item| item.message.tool_name.as_deref())
-        .or_else(|| tool_result.and_then(|item| item.message.tool_name.as_deref()))
-        .unwrap_or("Agent");
-    if tool_type(tool_name) != ToolType::Subagent {
+    if !tool_use
+        .into_iter()
+        .chain(tool_result)
+        .any(|item| is_subagent_message(&item.message))
+    {
         return None;
     }
 
@@ -1731,8 +1899,16 @@ fn render_user(
                     view.rounded(px(4.))
                         .px_2()
                         .py(px(2.))
-                        .bg(hsla(270. / 360., 0.67, 0.42, 1.))
-                        .text_color(rgb(0xffffff))
+                        .bg(if cx.theme().mode.is_dark() {
+                            rgb(0x292338).into()
+                        } else {
+                            hsla(270. / 360., 0.67, 0.42, 1.)
+                        })
+                        .text_color(if cx.theme().mode.is_dark() {
+                            rgb(0xc4b5d9)
+                        } else {
+                            rgb(0xffffff)
+                        })
                 })
                 .child(tr(
                     options.language,
@@ -1750,6 +1926,10 @@ fn render_user(
                 .child(display_time(&item.message.timestamp)),
         );
     let bubble = div()
+        .debug_selector({
+            let index = item.index;
+            move || format!("conversation-bubble-{index}")
+        })
         .rounded_lg()
         .bg(if options.is_subagent {
             cx.theme().button
@@ -1932,15 +2112,33 @@ fn render_assistant_group(
     owner: WeakEntity<YesSessions>,
     cx: &App,
 ) -> AnyElement {
-    let timestamp = items
-        .first()
+    let start_time = items
+        .iter()
+        .min_by_key(|item| item.index)
         .map(|item| display_time(&item.message.timestamp))
         .unwrap_or_default();
+    let end_time = items
+        .iter()
+        .max_by_key(|item| item.index)
+        .map(|item| display_time(&item.message.timestamp))
+        .unwrap_or_default();
+    let timestamp = if start_time == end_time {
+        start_time
+    } else {
+        format!("{start_time}–{end_time}")
+    };
     let model = items
         .iter()
         .find_map(|item| item.message.model.clone())
         .unwrap_or_default();
+    let group_keys = activity_keys(&items, options.show_thinking);
+    let search_target = owner
+        .upgrade()
+        .and_then(|owner| owner.read(cx).search_landing)
+        .map(|(index, _)| index);
     let mut sections = Vec::new();
+    let mut activity_tools = HashMap::new();
+    let mut preview_counts = HashMap::<usize, usize>::new();
     for pair in pair_tool_messages(&items) {
         let index = pair
             .tool_use
@@ -1948,7 +2146,47 @@ fn render_assistant_group(
             .or(pair.tool_result.as_ref())
             .unwrap()
             .index;
+        if pair
+            .tool_use
+            .iter()
+            .chain(pair.tool_result.iter())
+            .all(|item| groupable_tool(&item.message, options.show_thinking))
+        {
+            let members = pair
+                .tool_use
+                .iter()
+                .chain(pair.tool_result.iter())
+                .map(|item| item.index)
+                .collect::<Vec<_>>();
+            activity_tools.insert(index, (tool_failed(&pair), members));
+        }
+        if let Some(key) = group_keys.get(&index) {
+            let count = preview_counts.entry(*key).or_default();
+            *count += 1;
+            if *count > 2
+                && !expanded.contains(key)
+                && search_target.and_then(|target| group_keys.get(&target)) != Some(key)
+            {
+                sections.push((index, div().into_any_element()));
+                continue;
+            }
+        }
         let mut body = div().v_flex().gap_2().min_w_0().w_full();
+        if let Some(tool_use) = pair.tool_use.as_ref().filter(|item| {
+            item.message
+                .content
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+        }) {
+            body = body.child(assistant_content(
+                turn_index,
+                tool_use,
+                options,
+                mermaid_views,
+                owner.clone(),
+                cx,
+            ));
+        }
         if let Some(tool_use) = pair.tool_use.as_ref().filter(|item| {
             item.message
                 .reasoning_content
@@ -1999,10 +2237,20 @@ fn render_assistant_group(
             search_landing_feedback(feedback_index, body.into_any_element(), &owner, cx),
         ));
     }
-    for item in items
-        .iter()
-        .filter(|item| item.message.message_type == MessageType::Assistant)
-    {
+    for item in items.iter().filter(|item| {
+        item.message.message_type == MessageType::Assistant
+            && (item
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+                || (options.show_thinking
+                    && item
+                        .message
+                        .reasoning_content
+                        .as_deref()
+                        .is_some_and(|text| !text.trim().is_empty())))
+    }) {
         let body = div()
             .v_flex()
             .gap_2()
@@ -2037,22 +2285,153 @@ fn render_assistant_group(
             search_landing_feedback(item.index, body.into_any_element(), &owner, cx),
         ));
     }
-    // Claude interleaves explanatory text with tool blocks in the same turn.
-    if options.provider == AppType::Claude {
-        sections.sort_by_key(|(index, _)| *index);
+    // Text is a boundary even when a provider stores it alongside tool calls.
+    sections.sort_by_key(|(index, _)| *index);
+    let mut grouped_sections = Vec::new();
+    let mut sections = sections.into_iter().peekable();
+    while let Some((index, element)) = sections.next() {
+        if !group_keys.contains_key(&index) {
+            grouped_sections.push((index, element));
+            continue;
+        }
+        let mut run = vec![(index, element)];
+        while sections
+            .peek()
+            .is_some_and(|(index, _)| group_keys.get(index) == group_keys.get(&run[0].0))
+        {
+            run.push(sections.next().unwrap());
+        }
+        if run.len() == 1 {
+            grouped_sections.push(run.pop().unwrap());
+            continue;
+        }
+        let mut failures = 0;
+        let mut contains_target = false;
+        for (index, _) in &run {
+            let (failed, members) = &activity_tools[index];
+            failures += usize::from(*failed);
+            contains_target |= search_target.is_some_and(|target| members.contains(&target));
+        }
+        // Group expansion has its own key, separate from each tool's detail state.
+        let expansion_key = usize::MAX - index;
+        let open = expanded.contains(&expansion_key) || contains_target;
+        let label = tr(
+            options.language,
+            if open {
+                "message.collapseToolActivity"
+            } else {
+                "message.expandToolActivity"
+            },
+        )
+        .replace("{count}", &run.len().to_string());
+        let group_owner = owner.clone();
+        let preview_owner = owner.clone();
+        let background = cx.theme().background;
+        let body = div()
+            .v_flex()
+            .min_w_0()
+            .w_full()
+            .child(
+                div()
+                    .debug_selector(move || format!("tool-activity-preview-{index}"))
+                    .relative()
+                    .v_flex()
+                    .gap_2()
+                    .min_w_0()
+                    .w_full()
+                    .when(!open, |view| view.h(px(76.)).overflow_hidden())
+                    .children(
+                        run.into_iter()
+                            .take(if open { usize::MAX } else { 2 })
+                            .map(|(_, element)| element),
+                    )
+                    .when(!open, |view| {
+                        view.child(
+                            div()
+                                .id(("tool-activity-mask", index))
+                                .absolute()
+                                .inset_0()
+                                .occlude()
+                                .cursor_pointer()
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(move |_, _, cx| {
+                                    let _ = preview_owner.update(cx, |this, cx| {
+                                        this.toggle_message(expansion_key, turn_index, cx)
+                                    });
+                                })
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .bottom_0()
+                                        .left_0()
+                                        .right_0()
+                                        .h(px(36.))
+                                        .bg(linear_gradient(
+                                            180.,
+                                            linear_color_stop(background.opacity(0.), 0.),
+                                            linear_color_stop(background, 1.),
+                                        )),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .py_1()
+                    .child(
+                        Button::new(("tool-activity", index))
+                            .debug_selector(move || format!("tool-activity-{index}"))
+                            .ghost()
+                            .compact()
+                            .h(px(28.))
+                            .px_3()
+                            .icon(if open {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .label(label)
+                            .on_click(move |_, _, cx| {
+                                let _ = group_owner.update(cx, |this, cx| {
+                                    this.toggle_message(expansion_key, turn_index, cx)
+                                });
+                            }),
+                    )
+                    .when(failures > 0, |view| {
+                        view.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().danger)
+                                .child(
+                                    tr(options.language, "message.toolFailures")
+                                        .replace("{count}", &failures.to_string()),
+                                ),
+                        )
+                    }),
+            );
+        grouped_sections.push((index, body.into_any_element()));
     }
-    let body = div()
-        .v_flex()
-        .gap_2()
-        .min_w_0()
-        .w_full()
-        .children(sections.into_iter().map(|(index, element)| {
-            div()
-                .debug_selector(move || format!("assistant-section-{index}"))
-                .w_full()
-                .min_w_0()
-                .child(element)
-        }));
+    if grouped_sections.is_empty() {
+        return div().into_any_element();
+    }
+    let body =
+        div()
+            .v_flex()
+            .gap_2()
+            .min_w_0()
+            .w_full()
+            .children(grouped_sections.into_iter().map(|(index, element)| {
+                div()
+                    .debug_selector(move || format!("assistant-section-{index}"))
+                    .w_full()
+                    .min_w_0()
+                    .child(element)
+            }));
     div()
         .w_full()
         .flex()
@@ -2131,7 +2510,10 @@ fn render_turn(
         .filter(|item| {
             matches!(
                 item.message.message_type,
-                MessageType::Assistant | MessageType::ToolUse | MessageType::ToolResult
+                MessageType::Assistant
+                    | MessageType::ToolUse
+                    | MessageType::ToolResult
+                    | MessageType::System
             )
         })
         .collect::<Vec<_>>();
@@ -2173,7 +2555,7 @@ pub fn conversation_scroller(
     mermaid_views: Arc<HashMap<(usize, usize), Entity<MermaidDiagram>>>,
     owner: WeakEntity<YesSessions>,
 ) -> MessageScroller {
-    let turns = Arc::new(build_turns(&messages, options.provider));
+    let turns = Arc::new(display_turns(&messages, options.provider));
     let mut active_message = None;
     let anchors = turns
         .iter()
@@ -2438,6 +2820,103 @@ mod tests {
         );
     }
 
+    fn activity_message(index: usize, kind: MessageType, name: &str, id: &str) -> IndexedMessage {
+        let mut item = tool_message(index, kind, name, id);
+        item.message.content = None;
+        item
+    }
+
+    #[test]
+    fn tool_activity_preserves_provider_pairing_and_message_locations() {
+        for provider in AppType::ALL {
+            let mut messages = vec![activity_message(0, MessageType::ToolUse, "Read", "a").message];
+            if provider != AppType::OpenCode {
+                messages.push(activity_message(1, MessageType::ToolResult, "Read", "a").message);
+            } else {
+                messages[0].tool_output = Some(yes_core::model::ToolOutput {
+                    output: Some("embedded result".into()),
+                    preview: None,
+                    truncated: false,
+                    extra: Default::default(),
+                });
+            }
+            messages.push(SessionMessage::text(MessageType::Assistant, "", ""));
+            let second = messages.len();
+            messages.push(activity_message(second, MessageType::ToolUse, "Read", "b").message);
+            let mut result =
+                activity_message(second + 1, MessageType::ToolResult, "Read", "b").message;
+            result.content = Some("CodeBuddy output preview".into());
+            result.metadata.insert("subtype".into(), json!("error"));
+            if provider == AppType::OpenCode {
+                messages[second].metadata = result.metadata;
+            } else {
+                messages.push(result);
+            }
+            let turns = super::display_turns(&messages, provider);
+            assert_eq!(turns.len(), 1, "{provider:?}");
+            let pairs = pair_tool_messages(&turns[0].messages);
+            assert_eq!(pairs.len(), 2);
+            assert!(!super::tool_failed(&pairs[0]));
+            assert!(super::tool_failed(&pairs[1]));
+            for (index, message) in messages
+                .iter()
+                .enumerate()
+                .filter(|(_, message)| message.message_type != MessageType::Assistant)
+            {
+                assert_eq!(super::turn_index_for_message(&messages, index, provider), 0);
+                assert_eq!(
+                    super::tool_activity_key_for_message(&messages, index, provider, false),
+                    Some(usize::MAX)
+                );
+                assert!(matches!(message.call_id.as_deref(), Some("a" | "b")));
+            }
+        }
+    }
+
+    #[test]
+    fn tool_activity_respects_prose_thinking_and_subagent_boundaries() {
+        for provider in AppType::ALL {
+            let calls = || {
+                vec![
+                    activity_message(0, MessageType::ToolUse, "Read", "a").message,
+                    activity_message(1, MessageType::ToolUse, "Read", "b").message,
+                ]
+            };
+            for boundary in [
+                MessageType::User,
+                MessageType::Assistant,
+                MessageType::System,
+            ] {
+                let mut messages = calls();
+                messages.insert(1, SessionMessage::text(boundary, "", "visible text"));
+                assert!(
+                    super::tool_activity_key_for_message(&messages, 0, provider, false).is_none()
+                );
+                messages.insert(0, SessionMessage::text(MessageType::User, "", "question"));
+                assert!(
+                    super::tool_activity_key_for_message(&messages, 1, provider, false).is_none()
+                );
+            }
+            let mut messages = calls();
+            let mut thinking = SessionMessage::text(MessageType::Assistant, "", "");
+            thinking.reasoning_content = Some("reasoning".into());
+            messages.insert(1, thinking);
+            assert_eq!(
+                super::tool_activity_key_for_message(&messages, 0, provider, false),
+                Some(usize::MAX)
+            );
+            assert!(super::tool_activity_key_for_message(&messages, 0, provider, true).is_none());
+            let mut messages = calls();
+            messages[0].content = Some("OpenCode inline prose".into());
+            assert!(super::tool_activity_key_for_message(&messages, 0, provider, false).is_none());
+            let mut messages = calls();
+            messages[0].tool_name = Some("Task".into());
+            messages[0].sub_agent_session_id = Some("child".into());
+            assert!(super::is_subagent_message(&messages[0]));
+            assert!(super::tool_activity_key_for_message(&messages, 0, provider, false).is_none());
+        }
+    }
+
     #[test]
     fn parallel_same_name_tools_pair_results_by_call_id() {
         let messages = vec![
@@ -2560,7 +3039,7 @@ mod tests {
         ) -> impl gpui_kit::IntoElement {
             use gpui_kit::base::StyledExt as _;
             use gpui_kit::{ParentElement as _, Styled as _};
-            let mut call = tool_message(0, MessageType::ToolUse, "Agent", "task");
+            let mut call = tool_message(0, MessageType::ToolUse, "Task", "task");
             call.message.sub_agent_session_id = Some("child".into());
             call.message.tool_input = Some(serde_json::Map::from_iter([(
                 "description".into(),

@@ -2,6 +2,14 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "message.expandToolActivity") => "展开全部 {count} 项工具调用",
+        (_, "message.expandToolActivity") => "Show all {count} tool calls",
+        (Language::Zh, "message.collapseToolActivity") => "收起工具调用",
+        (_, "message.collapseToolActivity") => "Show fewer tool calls",
+        (Language::Zh, "message.toolFailures") => "{count} 项失败",
+        (_, "message.toolFailures") => "{count} failed",
+        (Language::Zh, "common.copySuccess") => "复制成功",
+        (_, "common.copySuccess") => "Copied to clipboard",
         (Language::Zh, "search.title") => "搜索当前会话",
         (_, "search.title") => "Search this session",
         (Language::Zh, "search.hint") => "↑ ↓ 选择 · Enter 跳转 · Esc 关闭",

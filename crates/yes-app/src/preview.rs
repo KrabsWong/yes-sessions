@@ -1078,10 +1078,11 @@ impl Render for WorkspacePreview {
         let mut body = div()
             .key_context("CodePreview")
             .track_focus(&self.selection.read(cx).focus)
-            .on_action(cx.listener(|this, _: &CopyCode, _, cx| {
+            .on_action(cx.listener(|this, _: &CopyCode, window, cx| {
                 let text = this.selection.read(cx).copy();
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
+                    crate::toast::copy_success(this.language, window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &SelectAllCode, window, cx| {
@@ -2135,12 +2136,17 @@ mod tests {
 
     #[gpui_kit::test]
     fn code_selection_copies_across_rows_and_keeps_diff_sides_separate(cx: &mut TestAppContext) {
-        use gpui_kit::{MouseButton, point};
+        use gpui_kit::{AppContext as _, MouseButton, point};
         cx.update(gpui_kit::init);
         let window = cx.open_window(size(px(800.), px(500.)), |window, cx| {
-            WorkspacePreview::new(std::env::temp_dir(), yes_core::Language::En, window, cx)
+            let preview = cx.new(|cx| {
+                WorkspacePreview::new(std::env::temp_dir(), yes_core::Language::En, window, cx)
+            });
+            gpui_kit::component::Root::new(preview, window, cx)
         });
-        let preview = window.root(cx).unwrap();
+        let preview = window.root(cx).unwrap().read_with(cx, |root, _| {
+            root.view().clone().downcast::<WorkspacePreview>().unwrap()
+        });
         preview.update(cx, |preview, cx| {
             preview.count_generation += 1;
             preview.selected = Some(("file.rs".into(), None));
