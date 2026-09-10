@@ -2763,7 +2763,16 @@ impl YesSessions {
             })
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.write_to_clipboard(ClipboardItem::new_string(value.clone()));
-                crate::toast::copy_success(language, window, cx);
+                crate::toast::copy_success(
+                    language,
+                    if title_key == "sessions.work" {
+                        "copy.path"
+                    } else {
+                        title_key
+                    },
+                    window,
+                    cx,
+                );
                 let feedback = (id, Instant::now());
                 this.copied_metadata = Some(feedback);
                 cx.notify();
@@ -4304,6 +4313,12 @@ mod tests {
         });
         let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
         let before = visual.debug_bounds("user-message-navigator").unwrap();
+        cx.run_until_parked();
+        // Select a stable rail window independently of the measured message heights.
+        app.update(cx, |app, cx| {
+            app.navigator_start = Some(0);
+            cx.notify();
+        });
         let tick = visual.debug_bounds("navigator-tick-2").unwrap();
         let content = visual.debug_bounds("conversation-end").unwrap();
         assert!(
