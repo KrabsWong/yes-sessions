@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use gpui_kit::base::StyledExt;
+use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
@@ -1209,6 +1209,7 @@ fn avatar(icon: impl Into<Icon>, foreground: Hsla, background: Hsla) -> AnyEleme
 
 fn render_system(item: &IndexedMessage, options: ConversationOptions, cx: &App) -> AnyElement {
     div()
+        .group(format!("message-actions-{}", item.index))
         .w_full()
         .rounded_lg()
         .border_1()
@@ -1253,6 +1254,12 @@ fn render_system(item: &IndexedMessage, options: ConversationOptions, cx: &App) 
                     })
                 })
                 .child(message_content(item, &HashMap::new())),
+        )
+        .child(
+            hover_actions(format!("message-actions-{}", item.index))
+                .px_3()
+                .pb_2()
+                .child(message_copy_button(item, options)),
         )
         .into_any_element()
 }
@@ -1431,6 +1438,7 @@ fn render_tool(
         missing_input_label,
     );
     div()
+        .group(format!("tool-actions-{message_index}"))
         .debug_selector(move || format!("tool-card-{message_index}"))
         .rounded_lg()
         .border_1()
@@ -1567,6 +1575,7 @@ fn render_tool(
                             }),
                     )
                 })
+                .child(tool_copy_actions(tool_use, tool_result, options))
                 .child(
                     Button::new(("tool-chevron-toggle", message_index))
                         .custom(
@@ -1832,6 +1841,7 @@ fn render_subagent(
 
     Some(
         div()
+            .group(format!("tool-actions-{}", item.index))
             .debug_selector(|| "subagent-summary".into())
             .w_full()
             .min_w_0()
@@ -1871,6 +1881,7 @@ fn render_subagent(
                             .text_color(status_fg)
                             .child(status_label),
                     )
+                    .child(tool_copy_actions(tool_use, tool_result, options))
                     .child(
                         div()
                             .debug_selector(|| "subagent-open-action".into())
@@ -1902,6 +1913,139 @@ fn render_subagent(
             )
             .into_any_element(),
     )
+}
+
+fn message_copy_text(message: &SessionMessage, show_thinking: bool) -> String {
+    let mut parts = Vec::new();
+    if show_thinking {
+        parts.extend(
+            message
+                .reasoning_content
+                .clone()
+                .filter(|text| !text.is_empty()),
+        );
+    }
+    parts.extend(message.content.clone().filter(|text| !text.is_empty()));
+    if let Some(input) = &message.tool_input {
+        parts.push(serde_json::to_string_pretty(input).unwrap_or_default());
+    }
+    if message.tool_output.is_some() {
+        if let Some(output) = tool_output_text(Some(message)) {
+            if !parts.contains(&output) {
+                parts.push(output);
+            }
+        }
+    }
+    parts.join("\n\n")
+}
+
+fn hover_actions(group: String) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .invisible()
+        .group_hover(group, |style| style.visible())
+}
+
+const MESSAGE_ACTION_GAP: f32 = 24.;
+
+// Borrow the existing message gap for actions without adding a layout row.
+fn message_actions(group: String, button: Button) -> Div {
+    div().relative().w_full().h_0().child(
+        hover_actions(group)
+            .absolute()
+            .top_0()
+            .left_0()
+            .h(px(MESSAGE_ACTION_GAP))
+            .child(button.h(px(20.))),
+    )
+}
+
+fn tool_copy_actions(
+    tool_use: Option<&IndexedMessage>,
+    tool_result: Option<&IndexedMessage>,
+    options: ConversationOptions,
+) -> Div {
+    let items = tool_use
+        .into_iter()
+        .chain(tool_result)
+        .cloned()
+        .collect::<Vec<_>>();
+    let index = items
+        .iter()
+        .map(|item| item.index)
+        .min()
+        .unwrap_or_default();
+    hover_actions(format!("tool-actions-{index}"))
+        .child(messages_copy_button(&items, options, true))
+}
+
+fn message_copy_button(item: &IndexedMessage, options: ConversationOptions) -> Button {
+    messages_copy_button(std::slice::from_ref(item), options, false)
+}
+
+fn messages_copy_text(items: &[IndexedMessage], show_thinking: bool) -> String {
+    let mut ordered = items.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|item| item.index);
+    ordered
+        .into_iter()
+        .map(|item| message_copy_text(&item.message, show_thinking))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+fn messages_copy_button(
+    items: &[IndexedMessage],
+    options: ConversationOptions,
+    is_tool: bool,
+) -> Button {
+    let index = items
+        .iter()
+        .map(|item| item.index)
+        .min()
+        .unwrap_or_default();
+    let messages = items.to_vec();
+    let has_text = messages.iter().any(|item| {
+        let message = &item.message;
+        message
+            .content
+            .as_ref()
+            .is_some_and(|text| !text.is_empty())
+            || (options.show_thinking
+                && message
+                    .reasoning_content
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty()))
+            || message.tool_input.is_some()
+            || message.tool_output.is_some()
+    });
+    let prefix = if is_tool { "copy-tool" } else { "copy-message" };
+    let label = if is_tool {
+        "message.copyTool"
+    } else {
+        "message.copy"
+    };
+    let target = if is_tool { "copy.tool" } else { "copy.message" };
+    Button::new((prefix, index))
+        .debug_selector(move || format!("{prefix}-{index}"))
+        .ghost()
+        .compact()
+        .flex_none()
+        .size(px(24.))
+        .icon(Icon::new(IconName::Copy).size(px(14.)))
+        .accessibility_label(tr(options.language, label))
+        .tooltip(tr(options.language, label))
+        .disabled(!has_text)
+        .on_click(move |_, window, cx| {
+            cx.stop_propagation();
+            let text = messages_copy_text(&messages, options.show_thinking);
+            if !text.is_empty() {
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+                crate::toast::copy_success(options.language, target, window, cx);
+            }
+        })
 }
 
 fn render_user(
@@ -1951,6 +2095,10 @@ fn render_user(
                 .text_color(cx.theme().muted_foreground)
                 .child(display_time(&item.message.timestamp)),
         );
+    let footer = message_actions(
+        format!("message-actions-{}", item.index),
+        message_copy_button(item, options),
+    );
     let bubble = div()
         .debug_selector({
             let index = item.index;
@@ -2038,6 +2186,9 @@ fn render_user(
     );
     if options.chat_bubbles {
         div()
+            .group(format!("message-actions-{}", item.index))
+            .pb(px(MESSAGE_ACTION_GAP))
+            .mb(px(-MESSAGE_ACTION_GAP))
             .w_full()
             .flex()
             .justify_end()
@@ -2050,18 +2201,29 @@ fn render_user(
                     .v_flex()
                     .items_end()
                     .child(header)
-                    .child(bubble),
+                    .child(bubble)
+                    .child(footer),
             )
             .child(user_avatar)
             .into_any_element()
     } else {
         div()
+            .group(format!("message-actions-{}", item.index))
+            .pb(px(MESSAGE_ACTION_GAP))
+            .mb(px(-MESSAGE_ACTION_GAP))
             .w_full()
             .flex()
             .items_start()
             .gap_3()
             .child(user_avatar)
-            .child(div().flex_1().min_w_0().child(header).child(bubble))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(header)
+                    .child(bubble)
+                    .child(footer),
+            )
             .into_any_element()
     }
 }
@@ -2385,13 +2547,22 @@ fn render_assistant_group(
             .w_full()
             .child(
                 div()
+                    .id(("tool-activity-preview", index))
                     .debug_selector(move || format!("tool-activity-preview-{index}"))
                     .relative()
                     .v_flex()
                     .gap_2()
                     .min_w_0()
                     .w_full()
-                    .when(!open, |view| view.h(px(76.)).overflow_hidden())
+                    .when(!open, |view| {
+                        view.h(px(76.)).overflow_hidden().cursor_pointer().on_click(
+                            move |_, _, cx| {
+                                let _ = preview_owner.update(cx, |this, cx| {
+                                    this.toggle_message(expansion_key, turn_index, cx)
+                                });
+                            },
+                        )
+                    })
                     .children(
                         run.into_iter()
                             .take(if open { usize::MAX } else { 2 })
@@ -2403,14 +2574,6 @@ fn render_assistant_group(
                                 .id(("tool-activity-mask", index))
                                 .absolute()
                                 .inset_0()
-                                .occlude()
-                                .cursor_pointer()
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(move |_, _, cx| {
-                                    let _ = preview_owner.update(cx, |this, cx| {
-                                        this.toggle_message(expansion_key, turn_index, cx)
-                                    });
-                                })
                                 .child(
                                     div()
                                         .absolute()
@@ -2471,6 +2634,10 @@ fn render_assistant_group(
     if grouped_sections.is_empty() {
         return div().into_any_element();
     }
+    let copy_items = items
+        .into_iter()
+        .filter(|item| item.message.message_type != MessageType::System)
+        .collect::<Vec<_>>();
     let body =
         div()
             .v_flex()
@@ -2485,6 +2652,10 @@ fn render_assistant_group(
                     .child(element)
             }));
     div()
+        .group(format!("reply-actions-{turn_index}"))
+        .pb(px(MESSAGE_ACTION_GAP))
+        .mb(px(-MESSAGE_ACTION_GAP))
+        .debug_selector(move || format!("assistant-reply-{turn_index}"))
         .w_full()
         .flex()
         .items_start()
@@ -2530,7 +2701,11 @@ fn render_assistant_group(
                                 .child(timestamp),
                         ),
                 )
-                .child(body),
+                .child(body)
+                .child(message_actions(
+                    format!("reply-actions-{turn_index}"),
+                    messages_copy_button(&copy_items, options, false),
+                )),
         )
         .into_any_element()
 }
@@ -2574,7 +2749,7 @@ fn render_turn(
         .debug_selector(move || format!("conversation-turn-{turn_index}"))
         .w_full()
         .v_flex()
-        .gap_3()
+        .gap(px(MESSAGE_ACTION_GAP))
         .children(systems.iter().map(|item| {
             search_landing_feedback(item.index, render_system(item, options, cx), &owner, cx)
         }))
@@ -2682,6 +2857,7 @@ pub fn conversation_scroller(
             })
             .into_any_element()
     })
+    .with_row_style(StyleRefinement::default().pb(px(MESSAGE_ACTION_GAP)))
     .with_jump_button_label(tr(options.language, "sessions.jumpLatest"))
 }
 
@@ -3085,6 +3261,169 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(build_turns(&messages, AppType::Claude).len(), 1);
         }
+    }
+
+    struct CopyMessageTestView {
+        owner: gpui_kit::Entity<crate::app::YesSessions>,
+        is_subagent: bool,
+    }
+
+    impl gpui_kit::Render for CopyMessageTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::{ParentElement as _, Styled as _};
+            let options = super::ConversationOptions {
+                language: yes_core::Language::En,
+                provider: AppType::Claude,
+                is_subagent: self.is_subagent,
+                show_thinking: false,
+                chat_bubbles: true,
+                collapse_tool_blocks: true,
+            };
+            let user = super::IndexedMessage {
+                index: 0,
+                message: yes_core::SessionMessage::text(
+                    MessageType::User,
+                    "",
+                    "Only this question",
+                ),
+            };
+            let assistant = super::IndexedMessage {
+                index: 1,
+                message: yes_core::SessionMessage::text(
+                    MessageType::Assistant,
+                    "",
+                    "**Answer**\n```rust\nlet x = 1;\n```",
+                ),
+            };
+            let mut items = vec![assistant];
+            for i in 0..3 {
+                let mut call = tool_message(
+                    2 + i * 2,
+                    MessageType::ToolUse,
+                    "Bash",
+                    &format!("call-{i}"),
+                );
+                call.message.content = None;
+                call.message.tool_input = Some(serde_json::Map::from_iter([(
+                    "command".into(),
+                    serde_json::json!(format!("command {i}")),
+                )]));
+                let mut result = tool_message(
+                    3 + i * 2,
+                    MessageType::ToolResult,
+                    "Bash",
+                    &format!("call-{i}"),
+                );
+                result.message.content = Some(format!("Result {i}"));
+                items.extend([call, result]);
+            }
+            gpui_kit::div()
+                .flex()
+                .flex_col()
+                .gap(gpui_kit::px(super::MESSAGE_ACTION_GAP))
+                .w_full()
+                .child(super::render_user(&user, options, &Default::default(), cx))
+                .child(super::render_assistant_group(
+                    0,
+                    items,
+                    options,
+                    &Default::default(),
+                    &Default::default(),
+                    self.owner.downgrade(),
+                    cx,
+                ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn copies_only_clicked_message_in_main_and_subagent_details(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, px, size};
+        cx.update(gpui_kit::init);
+        for is_subagent in [false, true] {
+            let window = cx.open_window(size(px(440.), px(1200.)), |window, cx| {
+                let owner = cx.new(|cx| crate::app::YesSessions::new(window, cx));
+                let view = cx.new(|_| CopyMessageTestView { owner, is_subagent });
+                gpui_kit::component::Root::new(view, window, cx)
+            });
+            let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+            let mut expected_reply = "**Answer**\n```rust\nlet x = 1;\n```".to_owned();
+            for i in 0..3 {
+                expected_reply.push_str(&format!(
+                    "\n\n{{\n  \"command\": \"command {i}\"\n}}\n\nResult {i}"
+                ));
+            }
+            visual.simulate_mouse_move(
+                gpui_kit::point(px(430.), px(1190.)),
+                None,
+                Default::default(),
+            );
+            assert!(visual.debug_bounds("copy-message-0").is_none());
+            assert!(visual.debug_bounds("copy-message-1").is_none());
+            assert!(visual.debug_bounds("copy-tool-2").is_none());
+            let reply_before_hover = visual.debug_bounds("assistant-reply-0").unwrap();
+            assert!(visual.debug_bounds("copy-message-2").is_none());
+            assert!(visual.debug_bounds("copy-message-3").is_none());
+            let user_body = visual.debug_bounds("conversation-bubble-0").unwrap();
+            visual.simulate_mouse_move(user_body.center(), None, Default::default());
+            let user_copy = visual.debug_bounds("copy-message-0").unwrap();
+            assert!(user_copy.top() >= user_body.bottom());
+            assert_eq!(user_copy.left(), user_body.left());
+            assert_eq!(reply_before_hover.top() - user_body.bottom(), px(24.));
+            assert!(user_copy.bottom() <= reply_before_hover.top());
+            for (index, parent, expected) in [
+                (
+                    "copy-message-0",
+                    "conversation-bubble-0",
+                    "Only this question",
+                ),
+                (
+                    "copy-message-1",
+                    "assistant-reply-0",
+                    expected_reply.as_str(),
+                ),
+                (
+                    "copy-tool-2",
+                    "tool-card-2",
+                    "{\n  \"command\": \"command 0\"\n}\n\nResult 0",
+                ),
+            ] {
+                let parent_bounds = visual.debug_bounds(parent).unwrap();
+                visual.simulate_mouse_move(parent_bounds.center(), None, Default::default());
+                visual.run_until_parked();
+                let bounds = visual
+                    .debug_bounds(index)
+                    .unwrap_or_else(|| panic!("missing hovered {index}"));
+                assert!(bounds.right() <= px(440.));
+                visual.simulate_click(bounds.center(), Default::default());
+                assert_eq!(
+                    cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+                    expected
+                );
+                assert_eq!(
+                    reply_before_hover,
+                    visual.debug_bounds("assistant-reply-0").unwrap()
+                );
+            }
+            visual.simulate_mouse_move(user_body.center(), None, Default::default());
+            assert!(visual.debug_bounds("copy-tool-2").is_none());
+            assert!(visual.debug_bounds("copy-message-1").is_none());
+        }
+    }
+
+    #[test]
+    fn message_copy_preserves_long_text_and_respects_hidden_thinking() {
+        let text = "你好\n```rust\nlet x = 1;\n```\n".repeat(10_000);
+        let mut message = yes_core::SessionMessage::text(MessageType::Assistant, "", &text);
+        message.reasoning_content = Some("Reasoning".into());
+        assert_eq!(super::message_copy_text(&message, false), text);
+        assert_eq!(
+            super::message_copy_text(&message, true),
+            format!("Reasoning\n\n{text}")
+        );
     }
 
     struct AssistantOrderTestView {

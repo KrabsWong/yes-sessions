@@ -1082,7 +1082,7 @@ impl Render for WorkspacePreview {
                 let text = this.selection.read(cx).copy();
                 if !text.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(text));
-                    crate::toast::copy_success(this.language, window, cx);
+                    crate::toast::copy_success(this.language, "copy.selection", window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &SelectAllCode, window, cx| {
