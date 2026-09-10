@@ -10,10 +10,14 @@ use yes_core::Language;
 
 use crate::i18n::tr;
 
+mod native_clip;
+use native_clip::NativeClip;
+
 static NEXT_DIAGRAM_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub struct MermaidDiagram {
     webview: Entity<gpui_wry::WebView>,
+    clip: std::rc::Rc<NativeClip>,
     language: Language,
     scale: f32,
     id: usize,
@@ -21,6 +25,7 @@ pub struct MermaidDiagram {
 
 impl MermaidDiagram {
     pub fn hide(entity: &Entity<Self>, cx: &mut App) {
+        entity.read(cx).clip.hide();
         let webview = entity.read(cx).webview.clone();
         webview.update(cx, |webview, _| webview.hide());
     }
@@ -39,8 +44,10 @@ pub fn create_mermaid_diagram(
         .with_transparent(true)
         .build_as_child(window)?;
     let webview = cx.new(|cx| gpui_wry::WebView::new(raw, window, cx));
+    let clip = std::rc::Rc::new(NativeClip::new(webview.read(cx).raw()));
     Ok(cx.new(|_| MermaidDiagram {
         webview,
+        clip,
         language,
         scale: 1.,
         id: NEXT_DIAGRAM_ID.fetch_add(1, Ordering::Relaxed),
@@ -49,7 +56,8 @@ pub fn create_mermaid_diagram(
 
 impl Render for MermaidDiagram {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.webview.update(cx, |webview, _| webview.show());
+        let clip = self.clip.clone();
+        let handle = self.webview.read(cx).handle();
         let zoom_out = self.webview.clone();
         let zoom_out_owner = cx.weak_entity();
         let reset = self.webview.clone();
@@ -147,7 +155,15 @@ impl Render for MermaidDiagram {
                 div()
                     .h(px(500.))
                     .bg(cx.theme().selection.opacity(0.3))
-                    .child(self.webview.clone()),
+                    .child(
+                        canvas(
+                            move |bounds, window, _| {
+                                clip.update(handle.raw(), bounds, window.content_mask().bounds);
+                            },
+                            |_, _, _, _| {},
+                        )
+                        .size_full(),
+                    ),
             )
             .child(
                 div()
@@ -178,9 +194,9 @@ fn mermaid_html(source: &str, dark: bool, language: Language) -> anyhow::Result<
         r#"<!doctype html>
 <html><head><meta charset="utf-8"><style>
 html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:{surface};color:{foreground};font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}}
-#stage{{position:absolute;inset:0;display:grid;place-items:center;overflow:hidden;cursor:grab}}
+#stage{{position:absolute;inset:0;display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:minmax(0,1fr);place-items:center;overflow:hidden;cursor:grab}}
 #stage.dragging{{cursor:grabbing}}
-#diagram{{transform-origin:center center;transition:transform .08s linear;padding:32px}}
+#diagram{{transform-origin:center center;transition:transform .08s linear}}
 #diagram svg{{display:block;max-width:none}}
 #fallback{{display:none;box-sizing:border-box;height:100%;overflow:auto;padding:18px}}
 #failure-heading{{display:flex;align-items:center;justify-content:space-between;gap:16px;font-size:13px}}
@@ -193,13 +209,21 @@ html,body{{margin:0;width:100%;height:100%;overflow:hidden;background:{surface};
 <section id="fallback" aria-live="polite"><div id="failure-heading"><span id="failure-message"></span><button id="retry" type="button"></button></div><pre id="error"></pre><pre id="source"></pre></section>
 <script>
 const source={encoded_source}; let scale=1, x=0, y=0, dragging=false, sx=0, sy=0;
+let fitScale=1, autoFit=true, diagramWidth=0, diagramHeight=0;
 const stage=document.getElementById('stage'), diagram=document.getElementById('diagram');
-const apply=()=>diagram.style.transform=`translate(${{x}}px,${{y}}px) scale(${{scale}})`;
-const zoomBy=factor=>{{scale=Math.min(5,Math.max(.1,scale*factor));apply()}};
-const resetView=()=>{{scale=1;x=0;y=0;apply()}};
+// Toolbar percentages are relative to the fitted view (100% = fit to viewport).
+const apply=()=>diagram.style.transform=`translate(${{x}}px,${{y}}px) scale(${{fitScale*scale}})`;
+function fitView(){{
+    if(!autoFit||!diagramWidth||!diagramHeight||stage.clientWidth<=32||stage.clientHeight<=32)return;
+    fitScale=Math.min((stage.clientWidth-32)/diagramWidth,(stage.clientHeight-32)/diagramHeight);
+    scale=1;x=0;y=0;apply();
+}}
+const zoomBy=factor=>{{autoFit=false;scale=Math.min(5,Math.max(.1,scale*factor));apply()}};
+const resetView=()=>{{autoFit=true;fitView()}};
+new ResizeObserver(fitView).observe(stage);
 stage.addEventListener('wheel',e=>{{if(!(e.metaKey||e.ctrlKey))return;e.preventDefault();zoomBy(e.deltaY<0?1.1:.9)}},{{passive:false}});
 stage.addEventListener('mousedown',e=>{{dragging=true;sx=e.clientX-x;sy=e.clientY-y;stage.classList.add('dragging')}});
-addEventListener('mousemove',e=>{{if(dragging){{x=e.clientX-sx;y=e.clientY-sy;apply()}}}});
+addEventListener('mousemove',e=>{{if(dragging){{autoFit=false;x=e.clientX-sx;y=e.clientY-sy;apply()}}}});
 addEventListener('mouseup',()=>{{dragging=false;stage.classList.remove('dragging')}});
 const labels={labels}, fallback=document.getElementById('fallback'), retry=document.getElementById('retry');
 document.getElementById('failure-message').textContent=labels[0];
@@ -214,8 +238,14 @@ async function renderDiagram(){{
         mermaid.initialize({{startOnLoad:false,securityLevel:'strict',theme:'{theme}'}});
         const result=await mermaid.render('yes-sessions-mermaid',source,diagram);
         diagram.innerHTML=result.svg;
+        const svg=diagram.querySelector('svg'), box=svg.viewBox.baseVal;
+        // Mermaid emits percentage widths for some diagram types. Use its logical
+        // drawing dimensions so fitting is independent of the initial WebView size.
+        diagramWidth=box.width;diagramHeight=box.height;
+        svg.style.width=`${{diagramWidth}}px`;svg.style.height=`${{diagramHeight}}px`;
+        diagram.style.width=`${{diagramWidth}}px`;diagram.style.height=`${{diagramHeight}}px`;
         fallback.style.display='none';stage.style.display='grid';stage.style.visibility='visible';
-        apply();
+        resetView();
     }}catch(error){{
         diagram.replaceChildren();
         stage.style.display='none';fallback.style.display='block';
