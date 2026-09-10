@@ -19,6 +19,11 @@ two-face = { version = "0.5.1", default-features = false, features = ["syntect-f
 wry.workspace = true
 yes-core = { path = "../yes-core" }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSGeometry"] }
+
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.3", features = ["test-support"] }
