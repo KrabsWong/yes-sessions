@@ -1,13 +1,16 @@
 //! Mirror GPUI's scroll mask into AppKit, which paints child views separately.
 
 use gpui_kit::{Bounds, Pixels, px};
-use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained};
-use objc2_app_kit::{NSAutoresizingMaskOptions, NSView};
+use objc2::{MainThreadMarker, MainThreadOnly, rc::Retained, runtime::AnyObject};
+use objc2_app_kit::{
+    NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSEventModifierFlags, NSView,
+};
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use wry::WebViewExtMacOS;
 
 pub(super) struct NativeClip {
     view: Retained<NSView>,
+    scroll_monitor: Option<Retained<AnyObject>>,
 }
 
 impl NativeClip {
@@ -22,7 +25,44 @@ impl NativeClip {
         parent.addSubview(&view);
         view.addSubview(&native);
         native.setAutoresizingMask(NSAutoresizingMaskOptions::ViewNotSizable);
-        Self { view }
+        let clip = view.clone();
+        let handler = block2::RcBlock::new(move |event: std::ptr::NonNull<NSEvent>| {
+            // AppKit invokes local monitors on the main thread. Keep the original
+            // NSEvent so GPUI receives precise deltas, phases and momentum.
+            let native_event = unsafe { event.as_ref() };
+            let mtm = MainThreadMarker::new().expect("AppKit events run on the main thread");
+            if clip.isHiddenOrHasHiddenAncestor()
+                || clip.window().is_none()
+                || clip.window() != native_event.window(mtm)
+                || native_event
+                    .modifierFlags()
+                    .intersects(NSEventModifierFlags::Command | NSEventModifierFlags::Control)
+            {
+                return event.as_ptr();
+            }
+            let point = clip.convertPoint_fromView(native_event.locationInWindow(), None);
+            if !clip.mouse_inRect(point, clip.bounds()) {
+                return event.as_ptr();
+            }
+            if let Some(parent) = unsafe { clip.superview() } {
+                // A DOM wheel event cannot bubble from WKWebView into GPUI.
+                // Dispatch directly to the host and consume the native event once.
+                parent.scrollWheel(native_event);
+                std::ptr::null_mut()
+            } else {
+                event.as_ptr()
+            }
+        });
+        let scroll_monitor = unsafe {
+            NSEvent::addLocalMonitorForEventsMatchingMask_handler(
+                NSEventMask::ScrollWheel,
+                &handler,
+            )
+        };
+        Self {
+            view,
+            scroll_monitor,
+        }
     }
 
     pub(super) fn hide(&self) {
@@ -68,6 +108,9 @@ impl NativeClip {
 
 impl Drop for NativeClip {
     fn drop(&mut self) {
+        if let Some(monitor) = self.scroll_monitor.take() {
+            unsafe { NSEvent::removeMonitor(&monitor) };
+        }
         self.view.removeFromSuperview();
     }
 }
