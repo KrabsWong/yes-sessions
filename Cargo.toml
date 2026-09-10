@@ -3,7 +3,7 @@ members = ["crates/yes-core", "crates/yes-app"]
 resolver = "2"
 
 [workspace.package]
-version = "11.2.1"
+version = "11.2.2"
 edition = "2024"
 license = "MIT"
 authors = ["Yes, Sessions Team"]
