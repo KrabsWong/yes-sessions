@@ -157,10 +157,10 @@ impl Render for MermaidDiagram {
                     .bg(cx.theme().selection.opacity(0.3))
                     .child(
                         canvas(
-                            move |bounds, window, _| {
+                            |_, _, _| {},
+                            move |bounds, _, window, _| {
                                 clip.update(handle.raw(), bounds, window.content_mask().bounds);
                             },
-                            |_, _, _, _| {},
                         )
                         .size_full(),
                     ),
