@@ -39,11 +39,18 @@ struct ConversationTurn {
     messages: Vec<IndexedMessage>,
 }
 
-fn conversation_markdown(id: impl Into<ElementId>, markdown: impl Into<SharedString>) -> TextView {
+fn conversation_markdown(
+    id: impl Into<ElementId>,
+    markdown: impl Into<SharedString>,
+    cx: &App,
+) -> TextView {
     let mut style = TextViewStyle::default().inline_code(HighlightStyle {
         font_weight: Some(FontWeight::BOLD),
         ..Default::default()
     });
+    if cx.theme().mode.is_dark() {
+        style.code_block.background = Some(rgb(0x151d29).into());
+    }
     style.heading_base_font_size = px(15.);
     TextView::markdown(id, markdown)
         .style(style)
@@ -946,6 +953,7 @@ fn tool_color(tool_type: ToolType) -> Hsla {
 fn message_content(
     item: &IndexedMessage,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
+    cx: &App,
 ) -> AnyElement {
     let Some(content) = item
         .message
@@ -955,7 +963,7 @@ fn message_content(
     else {
         return div().into_any_element();
     };
-    message_content_text(&content, item.index, "body", 0, mermaid_views)
+    message_content_text(&content, item.index, "body", 0, mermaid_views, cx)
 }
 
 fn message_content_text(
@@ -964,9 +972,10 @@ fn message_content_text(
     part: &str,
     diagram_start: usize,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
+    cx: &App,
 ) -> AnyElement {
     let markdown_view = |id: ElementId, markdown: String| -> AnyElement {
-        conversation_markdown(id, markdown).into_any_element()
+        conversation_markdown(id, markdown, cx).into_any_element()
     };
     let mut body = div().v_flex().gap_2().min_w_0().w_full().text_sm();
     let mut diagram_index = diagram_start;
@@ -1019,7 +1028,7 @@ fn assistant_content(
 ) -> AnyElement {
     use yes_core::claude_xml::{ClaudeXmlSegment, parse_claude_xml};
     if options.provider != AppType::Claude {
-        return message_content(item, mermaid_views);
+        return message_content(item, mermaid_views, cx);
     }
     let segments = parse_claude_xml(item.message.content.as_deref().unwrap_or_default());
     let card_indices: Vec<_> = segments
@@ -1028,7 +1037,7 @@ fn assistant_content(
         .filter_map(|(i, segment)| (!matches!(segment, ClaudeXmlSegment::Text(_))).then_some(i))
         .collect();
     if card_indices.is_empty() {
-        return message_content(item, mermaid_views);
+        return message_content(item, mermaid_views, cx);
     }
     let message_index = item.index;
     let mut body = div().v_flex().w_full().min_w_0().gap_2();
@@ -1076,6 +1085,7 @@ fn assistant_content(
                     &format!("xml-{index}"),
                     diagram_start,
                     mermaid_views,
+                    cx,
                 ));
                 continue;
             }
@@ -1205,6 +1215,7 @@ fn assistant_content(
                         index.to_string(),
                     ),
                     xml_file_markdown(content),
+                    cx,
                 ));
             }
             if let Some(entries) = entries {
@@ -1305,7 +1316,7 @@ fn render_system(item: &IndexedMessage, options: ConversationOptions, cx: &App) 
                         language: options.language,
                     })
                 })
-                .child(message_content(item, &HashMap::new())),
+                .child(message_content(item, &HashMap::new(), cx)),
         )
         .child(
             hover_actions(format!("message-actions-{}", item.index))
@@ -1393,7 +1404,11 @@ fn render_reasoning(
                     .pb_3()
                     .pt_2()
                     .text_sm()
-                    .child(conversation_markdown(("reasoning", item.index), content)),
+                    .child(conversation_markdown(
+                        ("reasoning", item.index),
+                        content,
+                        cx,
+                    )),
             )
         })
         .into_any_element()
@@ -1401,17 +1416,17 @@ fn render_reasoning(
 
 fn tool_card_background(cx: &App) -> Hsla {
     if cx.theme().mode.is_dark() {
-        rgb(0x0c1420).into()
+        rgb(0x202a3a).into()
     } else {
-        rgb(0xfafafa).into()
+        rgb(0xf1f4f9).into()
     }
 }
 
 fn tool_card_border(cx: &App) -> Hsla {
     if cx.theme().mode.is_dark() {
-        rgb(0x303a47).into()
+        rgb(0x3b4960).into()
     } else {
-        rgb(0xd9dee5).into()
+        rgb(0xd6dfed).into()
     }
 }
 
@@ -1522,7 +1537,13 @@ fn render_tool(
                 .flex()
                 .items_center()
                 .bg(tool_card_background(cx))
-                .hover(|style| style.bg(cx.theme().foreground.opacity(0.04)))
+                .hover(|style| {
+                    style.bg(if cx.theme().mode.is_dark() {
+                        rgb(0x2b3546)
+                    } else {
+                        rgb(0xe8edf5)
+                    })
+                })
                 .child(
                     Button::new(("tool-toggle", message_index))
                         .custom(
@@ -1760,6 +1781,7 @@ fn render_tool(
                                 conversation_markdown(
                                     ("plan-output", message_index),
                                     output.unwrap_or_default(),
+                                    cx,
                                 )
                                 .font_family(cx.theme().font_family.clone())
                                 .text_color(cx.theme().foreground)
@@ -2158,9 +2180,9 @@ fn render_user(
     let (background, avatar_foreground) = if options.is_subagent {
         (cx.theme().button, cx.theme().foreground)
     } else if cx.theme().mode.is_dark() {
-        (rgb(0x2b3546).into(), rgb(0xb8c9e4).into())
+        (rgb(0x344763).into(), rgb(0xb8c9e4).into())
     } else {
-        (rgb(0xe8edf5).into(), rgb(0x526986).into())
+        (rgb(0xdce5f2).into(), rgb(0x526986).into())
     };
     let header = div()
         .flex()
@@ -2240,7 +2262,7 @@ fn render_user(
                 }
                 .into_any_element()
             } else {
-                message_content(item, mermaid_views)
+                message_content(item, mermaid_views, cx)
             },
         );
     let user_avatar = avatar(
@@ -2467,6 +2489,7 @@ fn render_assistant_group(
             body = body.child(conversation_markdown(
                 ("tool-questions", item.index),
                 markdown,
+                cx,
             ));
         }
         if let Some(tool_use) = pair.tool_use.as_ref().filter(|item| {
@@ -2677,7 +2700,11 @@ fn render_assistant_group(
                     .child(
                         Button::new(("tool-activity", index))
                             .debug_selector(move || format!("tool-activity-{index}"))
-                            .ghost()
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .hover(tool_card_background(cx))
+                                    .active(cx.theme().button_active),
+                            )
                             .compact()
                             .h(px(28.))
                             .px_3()
