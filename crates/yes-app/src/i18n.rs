@@ -2,6 +2,20 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "usage.input") => "输入",
+        (_, "usage.input") => "Input",
+        (Language::Zh, "usage.output") => "输出",
+        (_, "usage.output") => "Output",
+        (Language::Zh, "usage.total") => "合计",
+        (_, "usage.total") => "Total",
+        (Language::Zh, "usage.cached") => "缓存命中",
+        (_, "usage.cached") => "Cached",
+        (Language::Zh, "usage.hitRate") => "缓存命中率",
+        (_, "usage.hitRate") => "Cache hit rate",
+        (Language::Zh, "message.multipleChoice") => "可多选",
+        (_, "message.multipleChoice") => "Select multiple options",
+        (Language::Zh, "message.singleChoice") => "单选",
+        (_, "message.singleChoice") => "Select one option",
         (Language::Zh, "timeRange.basis") => "按会话更新时间 · 本地时间",
         (_, "timeRange.basis") => "Session updated · Local time",
         (Language::Zh, "timeRange.custom") => "自定义时间",

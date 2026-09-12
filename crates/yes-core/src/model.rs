@@ -120,10 +120,41 @@ impl SessionAttachment {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TokenUsage {
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    pub fn aggregate<'a>(usages: impl IntoIterator<Item = &'a Self>) -> Option<Self> {
+        let mut usages = usages.into_iter();
+        let mut total = usages.next()?.clone();
+        for usage in usages {
+            let add = |a: Option<u64>, b: Option<u64>| a?.checked_add(b?);
+            total.input_tokens = add(total.input_tokens, usage.input_tokens);
+            total.output_tokens = add(total.output_tokens, usage.output_tokens);
+            total.total_tokens = add(total.total_tokens, usage.total_tokens);
+            total.cache_read_tokens = add(total.cache_read_tokens, usage.cache_read_tokens);
+        }
+        Some(total)
+    }
+
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        let input = self.input_tokens?;
+        let cached = self.cache_read_tokens?;
+        (input > 0 && cached <= input).then(|| cached as f64 / input as f64 * 100.0)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMessage {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<SessionAttachment>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<TokenUsage>,
     pub message_type: MessageType,
     pub timestamp: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -156,6 +187,7 @@ impl SessionMessage {
     ) -> Self {
         Self {
             attachments: Vec::new(),
+            usage: None,
             message_type,
             timestamp: timestamp.into(),
             content: Some(content.into()),
@@ -215,7 +247,50 @@ pub struct SessionStats {
 
 #[cfg(test)]
 mod tests {
-    use super::AppType;
+    use super::{AppType, TokenUsage};
+
+    #[test]
+    fn usage_aggregate_preserves_unknowns_and_weights_cache_rate() {
+        let first = TokenUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(10),
+            total_tokens: Some(110),
+            cache_read_tokens: Some(100),
+        };
+        let second = TokenUsage {
+            input_tokens: Some(900),
+            output_tokens: None,
+            total_tokens: None,
+            cache_read_tokens: Some(0),
+        };
+        let total = TokenUsage::aggregate([&first, &second]).unwrap();
+        assert_eq!(total.input_tokens, Some(1000));
+        assert_eq!(total.output_tokens, None);
+        assert_eq!(total.total_tokens, None);
+        assert_eq!(total.cache_hit_rate(), Some(10.0));
+        assert_eq!(TokenUsage::aggregate([]), None);
+    }
+
+    #[test]
+    fn cache_rate_requires_valid_known_counts() {
+        let mut usage = TokenUsage {
+            input_tokens: Some(10000),
+            cache_read_tokens: Some(9212),
+            ..Default::default()
+        };
+        assert_eq!(format!("{:.2}%", usage.cache_hit_rate().unwrap()), "92.12%");
+        usage.cache_read_tokens = Some(0);
+        assert_eq!(usage.cache_hit_rate(), Some(0.0));
+        usage.cache_read_tokens = None;
+        assert_eq!(usage.cache_hit_rate(), None);
+        usage.cache_read_tokens = Some(10001);
+        assert_eq!(usage.cache_hit_rate(), None);
+        usage.input_tokens = Some(0);
+        usage.cache_read_tokens = Some(0);
+        assert_eq!(usage.cache_hit_rate(), None);
+        usage.input_tokens = None;
+        assert_eq!(usage.cache_hit_rate(), None);
+    }
 
     #[test]
     fn provider_labels_match_the_desktop_ui() {

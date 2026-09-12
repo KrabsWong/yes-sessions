@@ -17,7 +17,7 @@ use walkdir::WalkDir;
 
 use crate::{
     AppType, MessageType, Session, SessionDetail, SessionMessage,
-    model::{SessionKind, ToolOutput},
+    model::{SessionKind, TokenUsage, ToolOutput},
 };
 
 use super::SessionProvider;
@@ -504,8 +504,55 @@ impl CodexProvider {
             .into_owned()
     }
 
+    fn token_usage(value: Option<&Value>) -> Option<TokenUsage> {
+        let value = value?;
+        let input_tokens = value.get("input_tokens").and_then(Value::as_u64);
+        let output_tokens = value.get("output_tokens").and_then(Value::as_u64);
+        let total_tokens = value
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| input_tokens?.checked_add(output_tokens?));
+        let cache_read_tokens = value.get("cached_input_tokens").and_then(Value::as_u64);
+        [input_tokens, output_tokens, total_tokens, cache_read_tokens]
+            .into_iter()
+            .flatten()
+            .any(|count| count > 0)
+            .then_some(TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_read_tokens,
+            })
+    }
+
+    fn usage_delta(current: &TokenUsage, previous: &TokenUsage) -> Option<TokenUsage> {
+        let pairs = [
+            (current.input_tokens, previous.input_tokens),
+            (current.output_tokens, previous.output_tokens),
+            (current.total_tokens, previous.total_tokens),
+            (current.cache_read_tokens, previous.cache_read_tokens),
+        ];
+        if pairs
+            .iter()
+            .any(|(a, b)| a.zip(*b).is_some_and(|(a, b)| a < b))
+        {
+            return None; // A resumed/reset counter cannot be subtracted across epochs.
+        }
+        let delta = |a: Option<u64>, b: Option<u64>| a?.checked_sub(b?);
+        Some(TokenUsage {
+            input_tokens: delta(current.input_tokens, previous.input_tokens),
+            output_tokens: delta(current.output_tokens, previous.output_tokens),
+            total_tokens: delta(current.total_tokens, previous.total_tokens),
+            cache_read_tokens: delta(current.cache_read_tokens, previous.cache_read_tokens),
+        })
+    }
+
     fn parse_messages(&self, records: &[Value], cwd: Option<&Path>) -> Vec<SessionMessage> {
-        let mut messages = Vec::new();
+        let mut messages: Vec<SessionMessage> = Vec::new();
+        let mut previous_total = None;
+        let mut seen_responses = HashSet::new();
+        let mut last_fallback = None;
+        let mut explicit_pending = None;
         let mut pending_tools: HashMap<String, String> = HashMap::new();
         let mut current_model = None;
         for record in records {
@@ -515,6 +562,103 @@ impl CodexProvider {
                     .pointer("/payload/model")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
+                continue;
+            }
+            let explicit_usage = record_type == Some("token_usage_record");
+            if explicit_usage
+                || (record_type == Some("event_msg")
+                    && record.pointer("/payload/type").and_then(Value::as_str)
+                        == Some("token_count"))
+            {
+                if explicit_usage
+                    && record
+                        .pointer("/payload/response_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| !seen_responses.insert(id.to_owned()))
+                {
+                    continue;
+                }
+                let total = Self::token_usage(record.pointer(if explicit_usage {
+                    "/payload/thread_token_usage"
+                } else {
+                    "/payload/info/total_token_usage"
+                }));
+                if total.is_some() && total == previous_total {
+                    if !explicit_usage {
+                        explicit_pending = None;
+                    }
+                    continue; // Repeated snapshots and the legacy mirror of an explicit record.
+                }
+                let last = Self::token_usage(record.pointer(if explicit_usage {
+                    "/payload/usage"
+                } else {
+                    "/payload/info/last_token_usage"
+                }));
+                let target = messages
+                    .iter()
+                    .rposition(|message| {
+                        matches!(
+                            message.message_type,
+                            MessageType::Assistant | MessageType::ToolUse | MessageType::User
+                        )
+                    })
+                    .filter(|index| messages[*index].message_type != MessageType::User);
+                if !explicit_usage
+                    && last.as_ref().is_some_and(|usage| {
+                        explicit_pending.as_ref() == Some(&(target, usage.clone()))
+                    })
+                {
+                    previous_total = total.or(previous_total);
+                    explicit_pending = None;
+                    continue;
+                }
+                if explicit_usage {
+                    explicit_pending = last.clone().map(|usage| (target, usage));
+                }
+                let usage = if explicit_usage {
+                    last
+                } else {
+                    total
+                        .as_ref()
+                        .zip(previous_total.as_ref())
+                        .and_then(|(current, previous)| Self::usage_delta(current, previous))
+                        .or(last)
+                        .or_else(|| total.clone())
+                };
+                let Some(usage) = usage else {
+                    continue;
+                };
+                // Older last-only events lack response IDs: dedup only against the
+                // same visible response, never by token values across different requests.
+                let marker = (target, usage.clone());
+                if !explicit_usage && total.is_none() && last_fallback.as_ref() == Some(&marker) {
+                    continue;
+                }
+                let stored_usage = usage.clone();
+                if total.is_some() {
+                    previous_total = total;
+                }
+                if let Some(index) = target {
+                    messages[index].usage = Some(match messages[index].usage.as_ref() {
+                        Some(previous) => TokenUsage::aggregate([previous, &usage]).unwrap(),
+                        None => usage,
+                    });
+                } else {
+                    let mut message = SessionMessage::text(
+                        MessageType::Assistant,
+                        Self::timestamp(record.get("timestamp")),
+                        "",
+                    );
+                    message.content = None;
+                    message.model = current_model.clone();
+                    message.usage = Some(usage);
+                    messages.push(message);
+                }
+                let index = target.unwrap_or(messages.len() - 1);
+                if explicit_usage {
+                    explicit_pending = Some((Some(index), stored_usage.clone()));
+                }
+                last_fallback = Some((Some(index), stored_usage));
                 continue;
             }
             if record_type != Some("response_item") {
@@ -1132,6 +1276,136 @@ impl SessionProvider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn usage_counts(input: u64, output: u64, cached: u64) -> Value {
+        json!({"input_tokens":input,"output_tokens":output,"cached_input_tokens":cached,
+            "reasoning_output_tokens":output/2,"total_tokens":input+output})
+    }
+
+    fn usage_event(total: Value, last: Value) -> Value {
+        json!({"type":"event_msg","payload":{"type":"token_count","info":{
+            "total_token_usage":total,"last_token_usage":last}}})
+    }
+
+    fn usage_reply(text: &str) -> Value {
+        json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":text}})
+    }
+
+    #[test]
+    fn explicit_usage_and_legacy_mirrors_count_once() {
+        let provider = CodexProvider::default();
+        let first = usage_counts(100, 20, 80);
+        let second = usage_counts(50, 10, 40);
+        let total = usage_counts(150, 30, 120);
+        let explicit = |id: &str, usage: Value, total: Value| {
+            json!({"type":"token_usage_record",
+            "payload":{"response_id":id,"usage":usage,"thread_token_usage":total}})
+        };
+        let a = explicit("a", first.clone(), first.clone());
+        let messages = provider.parse_messages(&[
+            json!({"type":"response_item","payload":{"type":"function_call","name":"Read","call_id":"tool","arguments":"{}"}}),
+            a.clone(), usage_event(first.clone(), first.clone()),
+            usage_reply("Done"), explicit("b",second.clone(),total.clone()),
+            usage_event(total, second), a,
+        ], None);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].usage.as_ref().unwrap().input_tokens, Some(100));
+        let total =
+            TokenUsage::aggregate(messages.iter().filter_map(|message| message.usage.as_ref()))
+                .unwrap();
+        assert_eq!(total.input_tokens, Some(150));
+        assert_eq!(total.output_tokens, Some(30)); // Reasoning is already part of output.
+        assert_eq!(total.total_tokens, Some(180));
+        assert_eq!(total.cache_hit_rate(), Some(80.0));
+    }
+
+    #[test]
+    fn legacy_totals_use_deltas_and_handle_counter_resets() {
+        let provider = CodexProvider::default();
+        let first = usage_counts(100, 20, 80);
+        let second = usage_counts(50, 10, 40);
+        let total = usage_counts(150, 30, 120);
+        let messages = provider.parse_messages(
+            &[
+                usage_reply("First"),
+                usage_event(first.clone(), first.clone()),
+                usage_event(first.clone(), first),
+                usage_reply("Second"),
+                usage_event(total, second.clone()),
+                usage_reply("Reset"),
+                usage_event(second.clone(), second),
+            ],
+            None,
+        );
+        assert_eq!(
+            messages
+                .iter()
+                .map(|m| m.usage.as_ref().unwrap().input_tokens.unwrap())
+                .collect::<Vec<_>>(),
+            vec![100, 50, 50]
+        );
+        assert_eq!(
+            TokenUsage::aggregate(messages.iter().filter_map(|m| m.usage.as_ref()))
+                .unwrap()
+                .total_tokens,
+            Some(240)
+        );
+    }
+
+    #[test]
+    fn last_only_events_preserve_equal_cost_requests_and_usage_without_text() {
+        let provider = CodexProvider::default();
+        let usage = usage_counts(100, 20, 80);
+        let event = usage_event(Value::Null, usage.clone());
+        let messages = provider.parse_messages(
+            &[
+                event.clone(),
+                event.clone(),
+                usage_reply("Next"),
+                event.clone(),
+                event,
+            ],
+            None,
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            TokenUsage::aggregate(messages.iter().filter_map(|m| m.usage.as_ref()))
+                .unwrap()
+                .input_tokens,
+            Some(200)
+        );
+        assert!(
+            CodexProvider::token_usage(Some(&json!({"input_tokens":0,"output_tokens":0})))
+                .is_none()
+        );
+        let unknown =
+            CodexProvider::token_usage(Some(&json!({"input_tokens":100,"output_tokens":10})))
+                .unwrap();
+        assert_eq!(unknown.cache_hit_rate(), None);
+        assert_eq!(unknown.total_tokens, Some(110));
+    }
+
+    #[test]
+    fn explicit_records_without_totals_do_not_duplicate_legacy_snapshots() {
+        let provider = CodexProvider::default();
+        let usage = usage_counts(100, 20, 80);
+        let messages = provider.parse_messages(
+            &[
+                usage_reply("First"),
+                json!({"type":"token_usage_record","payload":{"response_id":"one","usage":usage}}),
+                usage_event(usage.clone(), usage.clone()),
+                usage_reply("Next"),
+                usage_event(usage_counts(200, 40, 160), usage),
+            ],
+            None,
+        );
+        assert_eq!(
+            TokenUsage::aggregate(messages.iter().filter_map(|m| m.usage.as_ref()))
+                .unwrap()
+                .input_tokens,
+            Some(200)
+        );
+    }
 
     #[test]
     fn paginated_rollouts_list_once_and_load_both_history_segments() {
