@@ -955,7 +955,7 @@ fn message_content(
     else {
         return div().into_any_element();
     };
-    message_content_text(&content, item.index, "body", 0, mermaid_views, None)
+    message_content_text(&content, item.index, "body", 0, mermaid_views)
 }
 
 fn message_content_text(
@@ -964,18 +964,9 @@ fn message_content_text(
     part: &str,
     diagram_start: usize,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
-    text_style: Option<gpui_kit::base::TextViewStyle>,
 ) -> AnyElement {
     let markdown_view = |id: ElementId, markdown: String| -> AnyElement {
-        if let Some(style) = &text_style {
-            gpui_kit::base::TextView::markdown(id, markdown)
-                .style(style.clone())
-                .text_sm()
-                .text_size(px(15.))
-                .into_any_element()
-        } else {
-            conversation_markdown(id, markdown).into_any_element()
-        }
+        conversation_markdown(id, markdown).into_any_element()
     };
     let mut body = div().v_flex().gap_2().min_w_0().w_full().text_sm();
     let mut diagram_index = diagram_start;
@@ -1085,7 +1076,6 @@ fn assistant_content(
                     &format!("xml-{index}"),
                     diagram_start,
                     mermaid_views,
-                    None,
                 ));
                 continue;
             }
@@ -1409,6 +1399,22 @@ fn render_reasoning(
         .into_any_element()
 }
 
+fn tool_card_background(cx: &App) -> Hsla {
+    if cx.theme().mode.is_dark() {
+        rgb(0x0c1420).into()
+    } else {
+        rgb(0xfafafa).into()
+    }
+}
+
+fn tool_card_border(cx: &App) -> Hsla {
+    if cx.theme().mode.is_dark() {
+        rgb(0x303a47).into()
+    } else {
+        rgb(0xd9dee5).into()
+    }
+}
+
 fn render_tool(
     turn_index: usize,
     tool_use: Option<&IndexedMessage>,
@@ -1421,6 +1427,7 @@ fn render_tool(
     let Some(item) = tool_use.or(tool_result) else {
         return div().into_any_element();
     };
+    let border = tool_card_border(cx);
     let is_expanded = if options.collapse_tool_blocks {
         expanded.contains(&item.index)
     } else {
@@ -1504,8 +1511,8 @@ fn render_tool(
         .debug_selector(move || format!("tool-card-{message_index}"))
         .rounded_lg()
         .border_1()
-        .border_color(cx.theme().list_active_border)
-        .bg(cx.theme().muted.opacity(0.45))
+        .border_color(border)
+        .bg(tool_card_background(cx))
         .overflow_hidden()
         .child(
             div()
@@ -1514,8 +1521,8 @@ fn render_tool(
                 .w_full()
                 .flex()
                 .items_center()
-                .bg(cx.theme().button)
-                .hover(|style| style.bg(cx.theme().accent))
+                .bg(tool_card_background(cx))
+                .hover(|style| style.bg(cx.theme().foreground.opacity(0.04)))
                 .child(
                     Button::new(("tool-toggle", message_index))
                         .custom(
@@ -1686,7 +1693,7 @@ fn render_tool(
                 div()
                     .border_t_1()
                     .border_dashed()
-                    .border_color(cx.theme().list_active_border)
+                    .border_color(border)
                     .px_3()
                     .py_2()
                     .text_size(px(12.))
@@ -1729,7 +1736,7 @@ fn render_tool(
             view.child(
                 div()
                     .border_t_1()
-                    .border_color(cx.theme().list_active_border.opacity(0.65))
+                    .border_color(border)
                     .px_3()
                     .py_2()
                     .text_size(px(12.))
@@ -1744,7 +1751,7 @@ fn render_tool(
                             .w_full()
                             .min_w_0()
                             .rounded(px(4.))
-                            .bg(cx.theme().muted.opacity(0.72))
+                            .bg(cx.theme().foreground.opacity(0.035))
                             .p_2()
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().foreground.opacity(0.72))
@@ -1930,8 +1937,8 @@ fn render_subagent(
             .min_w_0()
             .rounded_lg()
             .border_1()
-            .border_color(cx.theme().list_active_border)
-            .bg(cx.theme().button)
+            .border_color(tool_card_border(cx))
+            .bg(tool_card_background(cx))
             .p_3()
             .v_flex()
             .gap_2()
@@ -2148,6 +2155,13 @@ fn render_user(
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
     cx: &App,
 ) -> AnyElement {
+    let (background, avatar_foreground) = if options.is_subagent {
+        (cx.theme().button, cx.theme().foreground)
+    } else if cx.theme().mode.is_dark() {
+        (rgb(0x2b3546).into(), rgb(0xb8c9e4).into())
+    } else {
+        (rgb(0xe8edf5).into(), rgb(0x526986).into())
+    };
     let header = div()
         .flex()
         .items_center()
@@ -2199,23 +2213,14 @@ fn render_user(
             move || format!("conversation-bubble-{index}")
         })
         .rounded_lg()
-        .bg(if options.is_subagent {
-            cx.theme().button
-        } else {
-            cx.theme().primary
-        })
-        .text_color(if options.is_subagent {
-            cx.theme().foreground
-        } else {
-            cx.theme().primary_foreground
-        })
+        .bg(background)
+        .text_color(cx.theme().foreground)
         .p_3()
         .v_flex()
         .gap_2()
         .text_sm()
         .when(options.chat_bubbles, |view| {
-            view.border_1()
-                .border_color(cx.theme().primary.opacity(0.2))
+            view.border_1().border_color(cx.theme().border)
         })
         .when(!item.message.attachments.is_empty(), |view| {
             view.child(crate::attachments::Attachments {
@@ -2234,39 +2239,8 @@ fn render_user(
                     language: options.language,
                 }
                 .into_any_element()
-            } else if options.is_subagent {
-                message_content(item, mermaid_views)
             } else {
-                let foreground = cx.theme().primary_foreground;
-                let style = gpui_kit::base::TextViewStyle::default()
-                    .with_foreground(foreground)
-                    .with_muted_foreground(foreground.opacity(0.85))
-                    .with_link(foreground)
-                    .with_border(foreground.opacity(0.3))
-                    .with_selection(foreground.opacity(0.25))
-                    .with_heading_base_font_size(px(15.))
-                    .with_code_background(cx.theme().muted)
-                    .with_code_block(StyleRefinement::default().text_color(cx.theme().foreground))
-                    .with_table_head(
-                        StyleRefinement::default()
-                            .bg(cx.theme().table_head)
-                            .text_color(cx.theme().table_head_foreground),
-                    )
-                    .with_inline_code(HighlightStyle {
-                        color: Some(foreground),
-                        background_color: Some(foreground.opacity(0.12)),
-                        font_weight: Some(FontWeight::BOLD),
-                        ..Default::default()
-                    })
-                    .with_dark(cx.theme().mode.is_dark());
-                message_content_text(
-                    item.message.content.as_deref().unwrap_or_default(),
-                    item.index,
-                    "body",
-                    0,
-                    mermaid_views,
-                    Some(style),
-                )
+                message_content(item, mermaid_views)
             },
         );
     let user_avatar = avatar(
@@ -2275,8 +2249,8 @@ fn render_user(
         } else {
             Icon::new(IconName::User)
         },
-        cx.theme().foreground,
-        cx.theme().button,
+        avatar_foreground,
+        background,
     );
     if options.chat_bubbles {
         div()

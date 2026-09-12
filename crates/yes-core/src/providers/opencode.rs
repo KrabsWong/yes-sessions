@@ -371,7 +371,11 @@ impl SessionProvider for OpenCodeProvider {
                 .last()
                 .and_then(|message| message.content.clone())
                 .unwrap_or_default();
-            return Ok(Some(SessionDetail { session, messages }));
+            return Ok(Some(SessionDetail {
+                subtree_usage: None,
+                session,
+                messages,
+            }));
         }
         Ok(None)
     }

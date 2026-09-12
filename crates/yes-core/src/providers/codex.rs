@@ -487,21 +487,53 @@ impl CodexProvider {
         ))
     }
 
-    fn embed_images(&self, content: &str, cwd: Option<&Path>) -> String {
-        let Ok(regex) = Regex::new(r"(!\[[^\]]*\]\()([^\)\s]+)(\))") else {
-            return content.to_owned();
+    fn extract_images(&self, message: &mut SessionMessage, cwd: Option<&Path>) {
+        // Keep image bytes out of Markdown so large images do not turn the reply
+        // into a virtualized plain-text editor. Leave code examples untouched.
+        let regex = Regex::new(r#"(?s)```.*?```|~~~.*?~~~|`[^`\n]*`|!\[([^\]\n]*)\]\((?:<([^>\n]+)>|([^\s)]+))(?:\s+"[^"]*")?\)"#).unwrap();
+        let Some(content) = message.content.as_deref() else {
+            return;
         };
-        regex
+        let content = regex
             .replace_all(content, |caps: &regex::Captures<'_>| {
-                let path = Path::new(&caps[2]);
-                if !path.is_absolute() {
+                let Some(label) = caps.get(1) else {
+                    return caps[0].to_owned();
+                };
+                let location = caps.get(2).or_else(|| caps.get(3)).unwrap().as_str();
+                let Some(mut attachment) = crate::attachments::structured(&json!({
+                    "type": "image", "image_url": location,
+                })) else {
+                    return caps[0].to_owned();
+                };
+                match &attachment.source {
+                    crate::AttachmentSource::LocalPath(path) => {
+                        let Some(data) = self.image_data_url(path, cwd) else {
+                            return caps[0].to_owned();
+                        };
+                        attachment.embedded_fallback = Some(data);
+                    }
+                    crate::AttachmentSource::DataUrl(_) => {}
+                    crate::AttachmentSource::RemoteUrl(_) => return caps[0].to_owned(),
+                }
+                if !attachment.is_image() {
                     return caps[0].to_owned();
                 }
-                self.image_data_url(path, cwd)
-                    .map(|url| format!("{}{}{}", &caps[1], url, &caps[3]))
-                    .unwrap_or_else(|| caps[0].to_owned())
+                let label = if label.as_str().is_empty() {
+                    attachment.name.as_str()
+                } else {
+                    label.as_str()
+                };
+                let replacement =
+                    if matches!(attachment.source, crate::AttachmentSource::DataUrl(_)) {
+                        label.to_owned()
+                    } else {
+                        format!("[{label}](<{location}>)")
+                    };
+                crate::attachments::add_unique(&mut message.attachments, attachment);
+                replacement
             })
-            .into_owned()
+            .into_owned();
+        message.content = Some(content);
     }
 
     fn token_usage(value: Option<&Value>) -> Option<TokenUsage> {
@@ -679,7 +711,7 @@ impl CodexProvider {
                     let content = if role == "user" {
                         Self::normalize_user(&raw)
                     } else {
-                        self.embed_images(&raw, cwd)
+                        raw
                     };
                     let mut message = SessionMessage::text(
                         if role == "user" {
@@ -691,6 +723,9 @@ impl CodexProvider {
                         content,
                     );
                     crate::attachments::normalize(&mut message, payload.get("content"));
+                    if role == "assistant" {
+                        self.extract_images(&mut message, cwd);
+                    }
                     if message.content.as_deref().unwrap_or_default().is_empty()
                         && message.attachments.is_empty()
                     {
@@ -1218,6 +1253,7 @@ impl SessionProvider for CodexProvider {
         let detail = self
             .make_session(&path, &records, &HashMap::new(), true)
             .map(|(_, messages)| SessionDetail {
+                subtree_usage: None,
                 session: session.clone(),
                 messages,
             });
@@ -1268,7 +1304,11 @@ impl SessionProvider for CodexProvider {
                 {
                     session.created_at = created;
                 }
-                SessionDetail { session, messages }
+                SessionDetail {
+                    subtree_usage: None,
+                    session,
+                    messages,
+                }
             }))
     }
 }
@@ -1750,6 +1790,66 @@ mod tests {
             Some(&json!("raw"))
         );
     }
+    #[test]
+    fn assistant_images_use_attachments_without_inflating_markdown() {
+        let base =
+            std::env::temp_dir().join(format!("yes-codex-output-images-{}", std::process::id()));
+        let root = base.join("codex");
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("color preview.png");
+        fs::write(&path, vec![0u8; 40_000]).unwrap();
+        let provider = CodexProvider::with_root(root.clone());
+        let markdown = format!("Before\n\n![Preview](<{}>)\n\nAfter", path.display());
+        let records = [
+            json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":markdown}]}}),
+        ];
+        let messages = provider.parse_messages(&records, None);
+        let message = &messages[0];
+        assert_eq!(message.attachments.len(), 1);
+        assert_eq!(
+            message.attachments[0].source,
+            crate::AttachmentSource::LocalPath(path.clone())
+        );
+        assert!(
+            message.attachments[0]
+                .embedded_fallback
+                .as_ref()
+                .unwrap()
+                .len()
+                > 32 * 1024
+        );
+        assert!(message.content.as_ref().unwrap().len() < 1024);
+        assert!(message.content.as_ref().unwrap().starts_with("Before"));
+        assert!(message.content.as_ref().unwrap().ends_with("After"));
+        assert!(!message.content.as_ref().unwrap().contains("data:image"));
+
+        let outside = base.join("outside.png");
+        fs::write(&outside, b"outside").unwrap();
+        let link = root.join("escape.png");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        for source in [
+            format!("![outside]({})", outside.display()),
+            format!("![escape]({})", link.display()),
+            format!("```markdown\n![example](<{}>)\n```", path.display()),
+            format!("`![example](<{}>)`", path.display()),
+            "![remote](https://example.com/image.png)".into(),
+        ] {
+            let mut message = SessionMessage::text(MessageType::Assistant, "", &source);
+            provider.extract_images(&mut message, None);
+            assert!(message.attachments.is_empty());
+            assert_eq!(message.content.as_deref(), Some(source.as_str()));
+        }
+        let mut embedded = SessionMessage::text(
+            MessageType::Assistant,
+            "",
+            "![Preview](data:image/png;base64,YQ==)",
+        );
+        provider.extract_images(&mut embedded, None);
+        assert_eq!(embedded.attachments.len(), 1);
+        assert_eq!(embedded.content.as_deref(), Some("Preview"));
+        fs::remove_dir_all(base).unwrap();
+    }
+
     #[test]
     fn user_image_only_is_preserved_as_attachment() {
         let provider = CodexProvider::with_root(std::path::PathBuf::from("/tmp/absent"));
