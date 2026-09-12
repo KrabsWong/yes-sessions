@@ -7,6 +7,7 @@ pub mod providers;
 pub mod search;
 pub mod settings;
 pub mod terminal;
+pub mod usage;
 pub mod workspace;
 
 pub use model::{

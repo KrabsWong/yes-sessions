@@ -8,6 +8,7 @@ actions!(
         Quit,
         CloseWindow,
         MinimizeWindow,
+        OpenSettings,
         FindInSession,
         FindInAgent
     ]
@@ -15,6 +16,7 @@ actions!(
 
 pub fn init(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-f", FindInSession, None),
         KeyBinding::new("cmd-shift-f", FindInAgent, None),
         KeyBinding::new("cmd-q", Quit, None),
@@ -48,7 +50,11 @@ pub fn restore_existing_window(cx: &mut App) -> bool {
 
 pub fn update_menus(language: Language, cx: &mut App) {
     cx.set_menus(vec![
-        Menu::new("Yes Sessions").items([MenuItem::action(tr(language, "menu.quit"), Quit)]),
+        Menu::new("Yes Sessions").items([
+            MenuItem::action(tr(language, "menu.settings"), OpenSettings),
+            MenuItem::separator(),
+            MenuItem::action(tr(language, "menu.quit"), Quit),
+        ]),
         Menu::new(tr(language, "menu.file"))
             .items([MenuItem::action(tr(language, "menu.close"), CloseWindow)]),
         Menu::new(tr(language, "menu.window")).items([MenuItem::action(

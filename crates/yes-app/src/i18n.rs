@@ -2,6 +2,83 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "dashboard.byTool") => "工具",
+        (_, "dashboard.byTool") => "Tools",
+        (Language::Zh, "dashboard.byProject") => "项目",
+        (_, "dashboard.byProject") => "Projects",
+        (Language::Zh, "dashboard.byModel") => "模型",
+        (_, "dashboard.byModel") => "Models",
+        (Language::Zh, "dashboard.title") => "用量统计",
+        (_, "dashboard.title") => "Token usage",
+        (Language::Zh, "dashboard.tools") => "全部工具",
+        (_, "dashboard.tools") => "All tools",
+        (Language::Zh, "dashboard.projects") => "全部项目",
+        (_, "dashboard.projects") => "All projects",
+        (Language::Zh, "dashboard.models") => "全部模型",
+        (_, "dashboard.models") => "All models",
+        (Language::Zh, "dashboard.unknown") => "未知",
+        (_, "dashboard.unknown") => "Unknown",
+        (Language::Zh, "dashboard.refresh") => "刷新",
+        (_, "dashboard.refresh") => "Refresh",
+        (Language::Zh, "dashboard.loading") => "建立索引…",
+        (_, "dashboard.loading") => "Indexing…",
+        (Language::Zh, "dashboard.readingCache") => "读取统计缓存…",
+        (_, "dashboard.readingCache") => "Loading saved usage…",
+        (Language::Zh, "dashboard.updating") => "更新统计…",
+        (_, "dashboard.updating") => "Updating usage…",
+        (Language::Zh, "dashboard.cachedSnapshot") => "正在显示上次统计，后台更新中。",
+        (_, "dashboard.cachedSnapshot") => {
+            "Showing previous usage while updating in the background."
+        }
+        (Language::Zh, "dashboard.cacheSaveFailed") => {
+            "统计缓存未能保存；本次结果可用，重启后可能需要重新建立索引。"
+        }
+        (_, "dashboard.cacheSaveFailed") => {
+            "Could not save the usage cache. Current results remain available; a restart may require indexing again."
+        }
+        (Language::Zh, "dashboard.back") => "返回会话",
+        (_, "dashboard.back") => "Back to sessions",
+        (Language::Zh, "dashboard.basis") => "按消息日期统计 · 本地时间 · 包含子代理",
+        (_, "dashboard.basis") => "Message dates · Local time · Includes subagents",
+        (Language::Zh, "dashboard.week") => "最近7天",
+        (_, "dashboard.week") => "Last 7 days",
+        (Language::Zh, "dashboard.allTime") => "全部时间",
+        (_, "dashboard.allTime") => "All time",
+        (Language::Zh, "dashboard.clear") => "清除筛选",
+        (_, "dashboard.clear") => "Clear filters",
+        (Language::Zh, "dashboard.sessions") => "会话排行",
+        (_, "dashboard.sessions") => "Sessions",
+        (Language::Zh, "dashboard.agents") => "主会话 / 子代理",
+        (_, "dashboard.agents") => "Main / subagents",
+        (Language::Zh, "dashboard.group") => "分组 / 已知用量占比",
+        (_, "dashboard.group") => "Group / share of known usage",
+        (Language::Zh, "dashboard.main") => "主会话",
+        (_, "dashboard.main") => "Main sessions",
+        (Language::Zh, "dashboard.subagent") => "子代理",
+        (_, "dashboard.subagent") => "Subagents",
+        (Language::Zh, "dashboard.incomplete") => "仅汇总已知用量，部分字段缺失 · 有用量的回复片段",
+        (_, "dashboard.incomplete") => {
+            "Known usage only; some fields missing · Reply fragments with usage"
+        }
+        (Language::Zh, "dashboard.failedSessions") => "个会话读取失败",
+        (_, "dashboard.failedSessions") => "sessions failed",
+        (Language::Zh, "dashboard.failedProviders") => "个工具读取失败",
+        (_, "dashboard.failedProviders") => "tools failed",
+        (Language::Zh, "dashboard.unknownDates") => "日期未知的回复片段不进入趋势图或日期筛选",
+        (_, "dashboard.unknownDates") => {
+            "Undated reply fragments excluded from trend and date filters"
+        }
+        (Language::Zh, "dashboard.trend") => "Token 消耗趋势",
+        (_, "dashboard.trend") => "Token usage over time",
+        (Language::Zh, "dashboard.trendHint") => "已知总量 · 长区间自动合并日期",
+        (_, "dashboard.trendHint") => "Known totals · Long ranges grouped into date intervals",
+        (Language::Zh, "dashboard.noUsage") => "暂无已知 token 用量",
+        (_, "dashboard.noUsage") => "No known token usage",
+        (Language::Zh, "dashboard.empty") => "当前筛选下没有会话记录",
+        (_, "dashboard.empty") => "No session records match these filters",
+        (Language::Zh, "dashboard.more") => "显示更多",
+        (_, "dashboard.more") => "Show more",
+
         (Language::Zh, "usage.input") => "输入",
         (_, "usage.input") => "Input",
         (Language::Zh, "usage.output") => "输出",
@@ -230,6 +307,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "message.editDiffLimited") => "内容较大，仅显示部分修改",
         (_, "message.editDiffLimited") => "Large edit: showing a limited preview",
 
+        (Language::Zh, "menu.settings") => "设置…",
+        (_, "menu.settings") => "Settings…",
         (Language::Zh, "menu.quit") => "退出 Yes Sessions",
         (_, "menu.quit") => "Quit Yes Sessions",
         (Language::Zh, "menu.file") => "文件",
