@@ -841,6 +841,8 @@ impl YesSessions {
         theme.button_secondary_foreground = theme.foreground;
         theme.button_secondary_hover = light;
         theme.button_secondary_active = border;
+        // Popup menu hover uses semantic tokens rather than legacy theme colors.
+        theme.tokens.accent = theme.accent.into();
         Theme::sync_base(cx);
     }
 
