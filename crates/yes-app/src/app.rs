@@ -412,6 +412,10 @@ pub struct YesSessions {
     agent_search_landing: Option<AgentSearchLanding>,
     copied_metadata: Option<(&'static str, Instant)>,
     registry: Arc<ProviderRegistry>,
+    dashboard: Option<Entity<crate::dashboard::Dashboard>>,
+    dashboard_open: bool,
+    dashboard_subscription: Option<Subscription>,
+    dashboard_session: Option<(AppType, String)>,
     settings_store: SettingsStore,
     pub settings: AppSettings,
     selected_app: AppType,
@@ -471,6 +475,10 @@ impl YesSessions {
             agent_search_landing: None,
             copied_metadata: None,
             registry: Arc::new(ProviderRegistry::default()),
+            dashboard: None,
+            dashboard_open: false,
+            dashboard_subscription: None,
+            dashboard_session: None,
             settings_store,
             settings,
             selected_app,
@@ -907,7 +915,11 @@ impl YesSessions {
                         if this.agent_search.input.is_some() {
                             this.sync_agent_search_directories();
                         }
-                        if let Some(first) = this
+                        if let Some((app, id)) = this.dashboard_session.take()
+                            && app == this.selected_app
+                        {
+                            this.select_session(id, cx);
+                        } else if let Some(first) = this
                             .sessions
                             .iter()
                             .find(|session| session.kind == yes_core::model::SessionKind::Main)
@@ -1342,6 +1354,9 @@ impl YesSessions {
     fn set_language(&mut self, language: Language, cx: &mut Context<Self>) {
         self.settings.language = language;
         crate::commands::update_menus(language, cx);
+        if let Some(dashboard) = &self.dashboard {
+            dashboard.update(cx, |dashboard, cx| dashboard.set_language(language, cx));
+        }
         if let Some(preview) = &self.workspace_preview {
             preview.update(cx, |preview, cx| preview.set_language(language, cx));
         }
@@ -1379,6 +1394,43 @@ impl YesSessions {
         };
         let progress = (started.elapsed().as_secs_f32() / 0.2).min(1.);
         from + (target - from) * ease_in_out(progress)
+    }
+
+    fn open_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_open = false;
+        self.agent_search = AgentSearch::default();
+        self.session_search = SessionSearch::default();
+        self.mermaid_views.clear();
+        if self.dashboard.is_none() {
+            let registry = self.registry.clone();
+            let language = self.settings.language;
+            let dashboard =
+                cx.new(|cx| crate::dashboard::Dashboard::new(registry, language, window, cx));
+            self.dashboard_subscription = Some(cx.subscribe(&dashboard, |this, _, event, cx| {
+                match event {
+                    crate::dashboard::DashboardEvent::Close => this.dashboard_open = false,
+                    crate::dashboard::DashboardEvent::OpenSession(app, id) => {
+                        this.dashboard_open = false;
+                        if this.selected_app == *app && !this.loading_sessions {
+                            this.select_session(id.clone(), cx);
+                        } else {
+                            this.dashboard_session = Some((*app, id.clone()));
+                            this.select_app(*app, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            }));
+            self.dashboard = Some(dashboard);
+        }
+        self.dashboard_open = true;
+        if let Some(dashboard) = &self.dashboard {
+            dashboard.update(cx, |dashboard, cx| {
+                dashboard.set_language(self.settings.language, cx);
+                dashboard.refresh(cx);
+            });
+        }
+        cx.notify();
     }
 
     fn render_header(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1481,31 +1533,29 @@ impl YesSessions {
                     .items_center()
                     .gap_2()
                     .child(
-                        Button::new("search-session")
-                            .ghost()
-                            .icon(IconName::Search)
-                            .tooltip(tr(language, "search.open"))
-                            .disabled(self.detail.is_none())
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_session_search(window, cx)
-                            })),
-                    )
-                    .child(
-                        Button::new("settings")
+                        Button::new("open-dashboard")
                             .ghost()
                             .compact()
-                            .size(px(36.))
-                            .icon(IconName::Settings)
-                            .tooltip(tr(language, "app.settings"))
-                            .accessibility_label(tr(language, "app.settings"))
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                            .size(px(32.))
+                            .child(Icon::new(IconName::ChartPie).size(px(16.)))
+                            .tooltip(tr(language, "dashboard.title"))
+                            .accessibility_label(tr(language, "dashboard.title"))
+                            .selected(self.dashboard_open)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.dashboard_open {
+                                    this.dashboard_open = false;
+                                    cx.notify();
+                                } else {
+                                    this.open_dashboard(window, cx);
+                                }
+                            })),
                     )
                     .child(
                         Button::new("toggle-workspace")
                             .ghost()
                             .compact()
                             .size(px(32.))
-                            .disabled(!self.has_workspace())
+                            .disabled(!self.has_workspace() || self.dashboard_open)
                             .child(Icon::new(IconName::PanelLeft).size(px(16.)).transform(
                                 Transformation::scale(size(self.preview_icon_scale(), 1.)),
                             ))
@@ -4081,16 +4131,32 @@ impl Render for YesSessions {
             .debug_selector(|| "yes-sessions-root".into())
             .track_focus(&self.root_focus)
             .on_action(
+                cx.listener(|this, _: &crate::commands::OpenSettings, _, cx| {
+                    this.settings_open = true;
+                    cx.notify();
+                }),
+            )
+            .on_action(
                 cx.listener(|this, _: &crate::commands::FindInSession, window, cx| {
-                    this.open_session_search(window, cx)
+                    if !this.dashboard_open {
+                        this.open_session_search(window, cx)
+                    }
                 }),
             )
             .on_action(
                 cx.listener(|this, _: &crate::commands::FindInAgent, window, cx| {
-                    this.open_agent_search(window, cx)
+                    if !this.dashboard_open {
+                        this.open_agent_search(window, cx)
+                    }
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if event.keystroke.key == "escape" && this.dashboard_open && !this.settings_open {
+                    this.dashboard_open = false;
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
                 if this.agent_search.input.is_some() {
                     match event.keystroke.key.as_str() {
                         "up" | "down" if this.agent_search_query_focused(window, cx) => {
@@ -4140,46 +4206,50 @@ impl Render for YesSessions {
             .text_color(cx.theme().foreground)
             .child(self.render_header(window, cx))
             .child(div().flex_1().min_h_0().flex().p_4().child({
-                let detail = self.render_detail(window, cx);
-                let sessions = if self.settings.sidebar_collapsed {
-                    detail
+                if self.dashboard_open {
+                    self.dashboard.as_ref().unwrap().clone().into_any_element()
                 } else {
-                    h_resizable("sessions-workspace")
-                        .child(
-                            resizable_panel()
-                                .size(px(320.))
-                                .size_range(px(160.)..px(960.))
-                                .child(self.render_sidebar(cx)),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size_range(px(280.)..px(4000.))
-                                .child(detail),
-                        )
-                        .into_any_element()
-                };
-                if self.preview_open {
-                    h_resizable("app-workspace-preview")
-                        .child(
-                            resizable_panel()
-                                .size_range(
-                                    px(if self.settings.sidebar_collapsed {
-                                        280.
-                                    } else {
-                                        440.
-                                    })..px(4000.),
-                                )
-                                .child(sessions),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(400.))
-                                .size_range(px(320.)..px(2400.))
-                                .child(self.render_workspace_preview(cx)),
-                        )
-                        .into_any_element()
-                } else {
-                    sessions
+                    let detail = self.render_detail(window, cx);
+                    let sessions = if self.settings.sidebar_collapsed {
+                        detail
+                    } else {
+                        h_resizable("sessions-workspace")
+                            .child(
+                                resizable_panel()
+                                    .size(px(320.))
+                                    .size_range(px(160.)..px(960.))
+                                    .child(self.render_sidebar(cx)),
+                            )
+                            .child(
+                                resizable_panel()
+                                    .size_range(px(280.)..px(4000.))
+                                    .child(detail),
+                            )
+                            .into_any_element()
+                    };
+                    if self.preview_open {
+                        h_resizable("app-workspace-preview")
+                            .child(
+                                resizable_panel()
+                                    .size_range(
+                                        px(if self.settings.sidebar_collapsed {
+                                            280.
+                                        } else {
+                                            440.
+                                        })..px(4000.),
+                                    )
+                                    .child(sessions),
+                            )
+                            .child(
+                                resizable_panel()
+                                    .size(px(400.))
+                                    .size_range(px(320.)..px(2400.))
+                                    .child(self.render_workspace_preview(cx)),
+                            )
+                            .into_any_element()
+                    } else {
+                        sessions
+                    }
                 }
             }))
             .when(
@@ -4210,6 +4280,31 @@ mod tests {
         session_directory_group_key, unread_after_refresh, update_conversation_scroll,
     };
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
+
+    #[gpui_kit::test]
+    fn settings_shortcut_opens_without_toggling_the_panel(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(gpui_kit::init);
+        cx.update(crate::commands::init);
+        let window = cx.open_window(
+            gpui_kit::size(gpui_kit::px(1000.), gpui_kit::px(800.)),
+            super::YesSessions::new,
+        );
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings_open = false;
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        visual.simulate_keystrokes("cmd-,");
+        visual.run_until_parked();
+        app.read_with(cx, |app, _| assert!(app.settings_open));
+        visual.simulate_keystrokes("cmd-,");
+        visual.run_until_parked();
+        app.read_with(cx, |app, _| assert!(app.settings_open));
+    }
 
     #[gpui_kit::test]
     fn returning_from_nested_subagents_restores_parent_scroll_and_expansion(

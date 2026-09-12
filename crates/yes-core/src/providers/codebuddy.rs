@@ -304,7 +304,13 @@ impl CodeBuddyProvider {
                     response_id.is_none_or(|id| seen_responses.insert(id))
                 });
             if let Some(usage) = usage {
-                pending_usage.push(usage);
+                pending_usage.push(crate::usage::UsageEvent {
+                    timestamp: Self::timestamp_ms(record.get("timestamp"))
+                        .and_then(|timestamp| Utc.timestamp_millis_opt(timestamp).single())
+                        .map(|timestamp| timestamp.to_rfc3339()),
+                    model: current_model.clone(),
+                    usage,
+                });
             }
             if kind == "reasoning" {
                 let value = Self::reasoning_text(record);
@@ -330,7 +336,9 @@ impl CodeBuddyProvider {
                     pending.content = None;
                     pending.reasoning_content = Some(std::mem::take(&mut pending_reasoning));
                     pending.model = current_model.clone();
-                    pending.usage = TokenUsage::aggregate(&pending_usage);
+                    if !pending_usage.is_empty() {
+                        crate::usage::apply_usage_events(&mut pending, &pending_usage);
+                    }
                     pending_usage.clear();
                     messages.push(pending);
                 }
@@ -394,7 +402,9 @@ impl CodeBuddyProvider {
                         message.metadata.insert("subtype".into(), json!(status));
                     }
                     message.model = current_model.clone();
-                    message.usage = TokenUsage::aggregate(&pending_usage);
+                    if !pending_usage.is_empty() {
+                        crate::usage::apply_usage_events(&mut message, &pending_usage);
+                    }
                     pending_usage.clear();
                     messages.push(message);
                 }
@@ -415,7 +425,9 @@ impl CodeBuddyProvider {
                 message.reasoning_content =
                     (!pending_reasoning.is_empty()).then(|| std::mem::take(&mut pending_reasoning));
                 message.model = current_model.clone();
-                message.usage = TokenUsage::aggregate(&pending_usage);
+                if !pending_usage.is_empty() {
+                    crate::usage::apply_usage_events(&mut message, &pending_usage);
+                }
                 pending_usage.clear();
                 if name.to_ascii_lowercase().contains("agent") {
                     pending_agents.insert(call_id, input);
@@ -431,7 +443,9 @@ impl CodeBuddyProvider {
                     pending.content = None;
                     pending.reasoning_content = Some(std::mem::take(&mut pending_reasoning));
                     pending.model = current_model.clone();
-                    pending.usage = TokenUsage::aggregate(&pending_usage);
+                    if !pending_usage.is_empty() {
+                        crate::usage::apply_usage_events(&mut pending, &pending_usage);
+                    }
                     pending_usage.clear();
                     messages.push(pending);
                 }
@@ -482,7 +496,9 @@ impl CodeBuddyProvider {
             pending.content = None;
             pending.reasoning_content = Some(pending_reasoning);
             pending.model = current_model;
-            pending.usage = TokenUsage::aggregate(&pending_usage);
+            if !pending_usage.is_empty() {
+                crate::usage::apply_usage_events(&mut pending, &pending_usage);
+            }
             messages.push(pending);
         }
         messages
@@ -894,6 +910,24 @@ impl SessionProvider for CodeBuddyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_pending_usage_retains_each_requests_attribution() {
+        let provider = CodeBuddyProvider::default();
+        let messages = provider.normalize(&[
+            json!({"type":"reasoning", "content":"Thinking", "timestamp":"2026-09-10T23:59:59+08:00",
+                "providerData":{"model":"first","messageId":"a","usage":{"inputTokens":100,"outputTokens":10}}}),
+            json!({"type":"message", "role":"assistant", "content":"Answer",
+                "providerData":{"model":"second","messageId":"b","usage":{"inputTokens":200,"outputTokens":20}}}),
+        ], 0);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].usage.as_ref().unwrap().total_tokens, Some(330));
+        let events = &messages[0].metadata["usage_events"];
+        assert_eq!(events[0]["model"], "first");
+        assert_eq!(events[0]["timestamp"], "2026-09-10T15:59:59+00:00");
+        assert_eq!(events[1]["model"], "second");
+        assert!(events[1]["timestamp"].is_null());
+    }
 
     #[test]
     fn usage_prefers_normalized_mirror_and_derives_total() {

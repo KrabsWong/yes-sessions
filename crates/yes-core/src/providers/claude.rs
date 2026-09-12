@@ -295,7 +295,23 @@ impl ClaudeProvider {
                     message.model = model;
                     messages.push(message);
                 }
-                messages.last_mut().unwrap().usage = Some(usage);
+                // Earlier display fragments share this response's usage; they are not
+                // additional requests with missing usage.
+                for message in &mut messages {
+                    crate::usage::apply_usage_events(message, &[]);
+                }
+                let message = messages.last_mut().unwrap();
+                crate::usage::apply_usage_events(
+                    message,
+                    &[crate::usage::UsageEvent {
+                        timestamp: record
+                            .get("timestamp")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned),
+                        model: message.model.clone(),
+                        usage,
+                    }],
+                );
             }
         }
         messages
@@ -318,7 +334,7 @@ impl ClaudeProvider {
                 {
                     let index = messages.len() + parsed.len() - 1;
                     if let Some(previous) = usage_indices.insert(id, index) {
-                        messages[previous].usage = None;
+                        crate::usage::apply_usage_events(&mut messages[previous], &[]);
                     }
                 }
             }
@@ -1028,6 +1044,33 @@ impl SessionProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dashboard_usage_preserves_unknown_dates_and_replacement_dedup() {
+        let record = |timestamp: Option<&str>, output: u64| {
+            json!({
+                "type":"assistant", "timestamp":timestamp,
+                "message":{"id":"same-response", "role":"assistant", "model":"test-model",
+                    "content":[{"type":"text", "text":"Answer"}],
+                    "usage":{"input_tokens":100,"output_tokens":output}}
+            })
+        };
+        let messages = ClaudeProvider::conversation_messages(&[
+            record(Some("2026-09-10T23:59:59+08:00"), 10),
+            record(None, 20),
+        ]);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].metadata["usage_events"], json!([]));
+        assert!(messages[1].metadata["usage_events"][0]["timestamp"].is_null());
+        assert_eq!(
+            messages[1].metadata["usage_events"][0]["model"],
+            "test-model"
+        );
+        assert_eq!(
+            messages[1].metadata["usage_events"][0]["usage"]["output_tokens"],
+            20
+        );
+    }
 
     #[test]
     fn usage_normalizes_cached_input_without_double_counting_thinking() {

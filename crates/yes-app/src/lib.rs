@@ -5,6 +5,7 @@ pub mod app_assets;
 mod attachments;
 pub mod commands;
 pub mod conversation;
+mod dashboard;
 mod date_time_range;
 mod edit_diff;
 pub mod i18n;

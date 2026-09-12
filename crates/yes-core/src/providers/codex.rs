@@ -687,6 +687,15 @@ impl CodexProvider {
                     messages.push(message);
                 }
                 let index = target.unwrap_or(messages.len() - 1);
+                crate::usage::UsageEvent {
+                    timestamp: record
+                        .get("timestamp")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    model: current_model.clone(),
+                    usage: stored_usage.clone(),
+                }
+                .attach(&mut messages[index]);
                 if explicit_usage {
                     explicit_pending = Some((Some(index), stored_usage.clone()));
                 }
@@ -1329,6 +1338,36 @@ mod tests {
 
     fn usage_reply(text: &str) -> Value {
         json!({"type":"response_item","payload":{"type":"message","role":"assistant","content":text}})
+    }
+
+    #[test]
+    fn dashboard_usage_keeps_event_models_dates_and_missing_timestamps() {
+        let provider = CodexProvider::default();
+        let event = |id: &str, timestamp: Option<&str>| {
+            json!({
+                "type": "token_usage_record", "timestamp": timestamp,
+                "payload": {"response_id": id, "usage": usage_counts(100, 20, 0)}
+            })
+        };
+        let messages = provider.parse_messages(
+            &[
+                json!({"type":"turn_context", "payload":{"model":"first"}}),
+                usage_reply("Visible answer"),
+                event("a", Some("2026-09-10T23:59:59+08:00")),
+                json!({"type":"turn_context", "payload":{"model":"second"}}),
+                event("b", Some("2026-09-11T00:00:01+08:00")),
+                event("c", None),
+            ],
+            None,
+        );
+        assert_eq!(messages.len(), 1); // Display structure remains unchanged.
+        assert_eq!(messages[0].usage.as_ref().unwrap().total_tokens, Some(360));
+        let events = &messages[0].metadata["usage_events"];
+        assert_eq!(events[0]["model"], "first");
+        assert_eq!(events[1]["model"], "second");
+        assert_eq!(events[0]["timestamp"], "2026-09-10T23:59:59+08:00");
+        assert_eq!(events[1]["timestamp"], "2026-09-11T00:00:01+08:00");
+        assert!(events[2]["timestamp"].is_null());
     }
 
     #[test]
