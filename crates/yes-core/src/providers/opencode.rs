@@ -7,7 +7,7 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     AppType, MessageType, Session, SessionDetail, SessionMessage,
-    model::{SessionKind, ToolOutput},
+    model::{SessionKind, TokenUsage, ToolOutput},
 };
 
 use super::SessionProvider;
@@ -97,6 +97,41 @@ impl OpenCodeProvider {
         }
     }
 
+    fn token_usage(data: &Value) -> Option<TokenUsage> {
+        let tokens = data.get("tokens")?;
+        let input = tokens.get("input").and_then(Value::as_u64);
+        let output = tokens.get("output").and_then(Value::as_u64);
+        let reasoning = tokens.get("reasoning").and_then(Value::as_u64);
+        let cache_read_tokens = tokens.pointer("/cache/read").and_then(Value::as_u64);
+        let cache_write = tokens.pointer("/cache/write").and_then(Value::as_u64);
+        let reported_total = tokens.get("total").and_then(Value::as_u64);
+        // OpenCode initializes usage to zero before a request has completed.
+        if ![
+            input,
+            output,
+            reasoning,
+            cache_read_tokens,
+            cache_write,
+            reported_total,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|count| count > 0)
+        {
+            return None;
+        }
+        let add = |a: Option<u64>, b: Option<u64>| a?.checked_add(b?);
+        // Stored input excludes cache reads/writes; stored output excludes reasoning.
+        let input_tokens = add(add(input, cache_read_tokens), cache_write);
+        let output_tokens = add(output, reasoning);
+        Some(TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: reported_total.or_else(|| add(input_tokens, output_tokens)),
+            cache_read_tokens,
+        })
+    }
+
     fn parse_message(
         data: &Value,
         parts: &[Value],
@@ -107,6 +142,9 @@ impl OpenCodeProvider {
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or("assistant");
+        let usage = (role == "assistant")
+            .then(|| Self::token_usage(data))
+            .flatten();
         let model =
             Self::model_name(data.get("modelID").or_else(|| data.get("model"))).or(inherited_model);
         let mut content = Vec::new();
@@ -188,6 +226,7 @@ impl OpenCodeProvider {
                     }
                     message.model = model.clone();
                     if index == 0 {
+                        message.usage = usage.clone();
                         crate::attachments::normalize(
                             &mut message,
                             Some(&Value::Array(parts.to_vec())),
@@ -209,6 +248,7 @@ impl OpenCodeProvider {
         );
         message.reasoning_content = (!reasoning.is_empty()).then(|| reasoning.join("\n\n"));
         message.model = model;
+        message.usage = usage;
         crate::attachments::normalize(&mut message, Some(&Value::Array(parts.to_vec())));
         vec![message]
     }
@@ -482,7 +522,12 @@ impl OpenCodeProvider {
                 );
             }
         }
-        let mut messages = Self::parse_message(&json!({"role":kind}), &parts, timestamp, model);
+        let mut messages = Self::parse_message(
+            &json!({"role":kind, "tokens":data.get("tokens")}),
+            &parts,
+            timestamp,
+            model,
+        );
         for (message, files) in messages.iter_mut().zip(&tool_files) {
             crate::attachments::normalize(message, Some(files));
         }
@@ -494,6 +539,80 @@ impl OpenCodeProvider {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn normalizes_usage_without_counting_tool_parts_twice() {
+        let tokens =
+            json!({"input":100,"output":20,"reasoning":30,"cache":{"read":800,"write":100}});
+        let messages = OpenCodeProvider::parse_message(
+            &json!({"role":"assistant","tokens":tokens}),
+            &[
+                json!({"type":"tool","tool":"read","callID":"one"}),
+                json!({"type":"tool","tool":"read","callID":"two"}),
+                json!({"type":"step-finish","tokens":tokens}),
+            ],
+            1,
+            None,
+        );
+        let usage = messages[0].usage.as_ref().unwrap();
+        assert_eq!(usage.input_tokens, Some(1000));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert_eq!(usage.total_tokens, Some(1050));
+        assert_eq!(usage.cache_read_tokens, Some(800));
+        assert_eq!(usage.cache_hit_rate(), Some(80.0));
+        assert!(messages[1].usage.is_none());
+        assert_eq!(
+            TokenUsage::aggregate(messages.iter().filter_map(|message| message.usage.as_ref())),
+            Some(usage.clone())
+        );
+        let user =
+            OpenCodeProvider::parse_message(&json!({"role":"user","tokens":tokens}), &[], 1, None);
+        assert!(user[0].usage.is_none());
+    }
+
+    #[test]
+    fn v2_reads_usage_for_text_and_tool_responses() {
+        for content in [
+            json!([{"type":"text","text":"Done"}]),
+            json!([{"type":"tool","name":"read","id":"one"},{"type":"tool","name":"read","id":"two"}]),
+        ] {
+            let messages = OpenCodeProvider::parse_v2_message(
+                "assistant",
+                &json!({"content":content,"tokens":{"input":205,"output":138,"reasoning":12,"cache":{"read":62848,"write":0}}}),
+                1,
+                None,
+            );
+            let usage = messages[0].usage.as_ref().unwrap();
+            assert_eq!(usage.input_tokens, Some(63053));
+            assert_eq!(usage.output_tokens, Some(150));
+            assert_eq!(usage.total_tokens, Some(63203));
+            assert!(messages[1..].iter().all(|message| message.usage.is_none()));
+        }
+    }
+
+    #[test]
+    fn usage_preserves_unknown_fields_and_ignores_initial_zero_values() {
+        for data in [
+            json!({}),
+            json!({"tokens":{}}),
+            json!({"tokens":{"input":0,"output":0,"reasoning":0,"cache":{"read":0,"write":0}}}),
+        ] {
+            assert!(OpenCodeProvider::token_usage(&data).is_none());
+        }
+        let usage = OpenCodeProvider::token_usage(
+            &json!({"tokens":{"input":100,"output":10,"reasoning":0,"total":150}}),
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, Some(10));
+        assert_eq!(usage.total_tokens, Some(150));
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_hit_rate(), None);
+        let usage = OpenCodeProvider::token_usage(&json!({"tokens":{"input":u64::MAX,"output":-1,"reasoning":0,"cache":{"read":1,"write":0}}})).unwrap();
+        assert_eq!(usage.input_tokens, None);
+        assert_eq!(usage.output_tokens, None);
+        assert_eq!(usage.total_tokens, None);
+    }
 
     #[test]
     fn discovers_v2_sessions_without_duplicates_and_reads_messages_in_sequence() {

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
@@ -16,7 +16,7 @@ use walkdir::WalkDir;
 use super::SessionProvider;
 use crate::{
     AppType, MessageType, Session, SessionDetail, SessionMessage,
-    model::{SessionKind, ToolOutput},
+    model::{SessionKind, TokenUsage, ToolOutput},
 };
 
 const SUMMARY_PREFIX_BYTES: u64 = 256 * 1024;
@@ -242,11 +242,48 @@ impl CodeBuddyProvider {
         Self::string(record.pointer("/providerData/toolResult/subAgent/sessionId"))
     }
 
+    fn token_usage(record: &Value) -> Option<TokenUsage> {
+        [
+            "/providerData/usage",
+            "/message/usage",
+            "/providerData/rawUsage",
+        ]
+        .into_iter()
+        .filter_map(|path| record.pointer(path))
+        .find_map(|usage| {
+            let number = |paths: &[&str]| {
+                paths
+                    .iter()
+                    .find_map(|path| usage.pointer(path).and_then(Value::as_u64))
+            };
+            let input_tokens = number(&["/inputTokens", "/input_tokens", "/prompt_tokens"]);
+            let output_tokens = number(&["/outputTokens", "/output_tokens", "/completion_tokens"]);
+            let total_tokens = number(&["/totalTokens", "/total_tokens"])
+                .or_else(|| input_tokens?.checked_add(output_tokens?));
+            let cache_read_tokens = number(&[
+                "/inputTokensDetails/0/cached_tokens",
+                "/inputTokensDetails/cached_tokens",
+                "/prompt_tokens_details/cached_tokens",
+                "/prompt_cache_hit_tokens",
+                "/cache_read_input_tokens",
+            ]);
+            let parsed = TokenUsage {
+                input_tokens,
+                output_tokens,
+                total_tokens,
+                cache_read_tokens,
+            };
+            (parsed != TokenUsage::default()).then_some(parsed)
+        })
+    }
+
     fn normalize(&self, records: &[Value], fallback: i64) -> Vec<SessionMessage> {
         let mut messages = Vec::new();
         let mut pending_agents: HashMap<String, Map<String, Value>> = HashMap::new();
         let mut current_model = None;
         let mut pending_reasoning = String::new();
+        let mut pending_usage = Vec::new();
+        let mut seen_responses = HashSet::new();
 
         for record in records {
             current_model = Self::string(record.pointer("/providerData/model")).or(current_model);
@@ -255,6 +292,20 @@ impl CodeBuddyProvider {
                 .get("type")
                 .and_then(Value::as_str)
                 .unwrap_or_default();
+            let model_record = matches!(kind, "reasoning" | "assistant" | "function_call")
+                || (kind == "message"
+                    && record.get("role").and_then(Value::as_str) == Some("assistant"));
+            let usage = model_record
+                .then(|| Self::token_usage(record))
+                .flatten()
+                .filter(|_| {
+                    let response_id = Self::string(record.pointer("/providerData/messageId"))
+                        .or_else(|| Self::string(record.pointer("/message/id")));
+                    response_id.is_none_or(|id| seen_responses.insert(id))
+                });
+            if let Some(usage) = usage {
+                pending_usage.push(usage);
+            }
             if kind == "reasoning" {
                 let value = Self::reasoning_text(record);
                 if !value.is_empty() {
@@ -273,12 +324,14 @@ impl CodeBuddyProvider {
                     Some("user" | "system")
                 )
             {
-                if !pending_reasoning.is_empty() {
+                if !pending_reasoning.is_empty() || !pending_usage.is_empty() {
                     let mut pending =
                         SessionMessage::text(MessageType::Assistant, timestamp.clone(), "");
                     pending.content = None;
                     pending.reasoning_content = Some(std::mem::take(&mut pending_reasoning));
                     pending.model = current_model.clone();
+                    pending.usage = TokenUsage::aggregate(&pending_usage);
+                    pending_usage.clear();
                     messages.push(pending);
                 }
                 let role = record.get("role").and_then(Value::as_str).unwrap_or("user");
@@ -330,6 +383,7 @@ impl CodeBuddyProvider {
                     );
                     if message.content.as_deref().unwrap_or_default().is_empty()
                         && pending_reasoning.is_empty()
+                        && pending_usage.is_empty()
                         && message.attachments.is_empty()
                     {
                         continue;
@@ -340,6 +394,8 @@ impl CodeBuddyProvider {
                         message.metadata.insert("subtype".into(), json!(status));
                     }
                     message.model = current_model.clone();
+                    message.usage = TokenUsage::aggregate(&pending_usage);
+                    pending_usage.clear();
                     messages.push(message);
                 }
                 continue;
@@ -359,6 +415,8 @@ impl CodeBuddyProvider {
                 message.reasoning_content =
                     (!pending_reasoning.is_empty()).then(|| std::mem::take(&mut pending_reasoning));
                 message.model = current_model.clone();
+                message.usage = TokenUsage::aggregate(&pending_usage);
+                pending_usage.clear();
                 if name.to_ascii_lowercase().contains("agent") {
                     pending_agents.insert(call_id, input);
                 }
@@ -367,12 +425,14 @@ impl CodeBuddyProvider {
             }
 
             if kind == "function_call_result" {
-                if !pending_reasoning.is_empty() {
+                if !pending_reasoning.is_empty() || !pending_usage.is_empty() {
                     let mut pending =
                         SessionMessage::text(MessageType::Assistant, timestamp.clone(), "");
                     pending.content = None;
                     pending.reasoning_content = Some(std::mem::take(&mut pending_reasoning));
                     pending.model = current_model.clone();
+                    pending.usage = TokenUsage::aggregate(&pending_usage);
+                    pending_usage.clear();
                     messages.push(pending);
                 }
                 let name = Self::string(record.get("name")).unwrap_or_else(|| "tool".into());
@@ -416,12 +476,13 @@ impl CodeBuddyProvider {
                 messages.push(message);
             }
         }
-        if !pending_reasoning.is_empty() {
+        if !pending_reasoning.is_empty() || !pending_usage.is_empty() {
             let mut pending =
                 SessionMessage::text(MessageType::Assistant, Self::iso_time(None, fallback), "");
             pending.content = None;
             pending.reasoning_content = Some(pending_reasoning);
             pending.model = current_model;
+            pending.usage = TokenUsage::aggregate(&pending_usage);
             messages.push(pending);
         }
         messages
@@ -620,12 +681,69 @@ impl CodeBuddyProvider {
         (first, last)
     }
 
+    // Only the latest unanswered request may use the live file. Completed requests
+    // must keep their recorded output so later edits cannot rewrite history.
+    fn attach_pending_plan(&self, messages: &mut [SessionMessage]) {
+        let Some(index) = messages
+            .iter()
+            .rposition(|message| message.message_type == MessageType::ToolUse)
+        else {
+            return;
+        };
+        let request = &messages[index];
+        if request.tool_name.as_deref() != Some("ExitPlanMode")
+            || messages[index + 1..].iter().any(|message| {
+                message.message_type == MessageType::ToolResult
+                    && message.call_id == request.call_id
+            })
+        {
+            return;
+        }
+        messages[index]
+            .metadata
+            .insert("codebuddyPendingPlan".into(), json!(true));
+        let Some(entered) = messages[..index].iter().rev().find(|message| {
+            message.message_type == MessageType::ToolResult
+                && message.tool_name.as_deref() == Some("EnterPlanMode")
+        }) else {
+            return;
+        };
+        let output = entered
+            .tool_output
+            .as_ref()
+            .and_then(|output| output.output.as_deref())
+            .unwrap_or_default();
+        let Ok(pattern) = Regex::new(r"(?m)(/[^\n`]*?/\.codebuddy/plans/[^\n`]*?\.md)\b") else {
+            return;
+        };
+        let Some(path) = pattern
+            .find(output)
+            .map(|matched| Path::new(matched.as_str()))
+        else {
+            return;
+        };
+        let Ok(path) = super::search_path(&self.root.join("plans"), path) else {
+            return;
+        };
+        // A corrupt transcript must not cause an unbounded read of an external file.
+        let mut content = String::new();
+        if fs::File::open(path)
+            .and_then(|file| file.take(2 * 1024 * 1024 + 1).read_to_string(&mut content))
+            .is_ok()
+            && content.len() <= 2 * 1024 * 1024
+            && !content.trim().is_empty()
+        {
+            messages[index].content = Some(content);
+        }
+    }
+
     fn detail_for(&self, file: &SessionFile) -> Option<SessionDetail> {
         if file.size == 0 {
             return None;
         }
         let records = Self::values(&file.path);
-        let messages = self.normalize(&records, file.updated_at);
+        let mut messages = self.normalize(&records, file.updated_at);
+        self.attach_pending_plan(&mut messages);
         if messages.is_empty() {
             return None;
         }
@@ -775,6 +893,142 @@ impl SessionProvider for CodeBuddyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_prefers_normalized_mirror_and_derives_total() {
+        let usage = CodeBuddyProvider::token_usage(&json!({
+            "providerData": {"usage": {"inputTokens": 100, "outputTokens": 20, "inputTokensDetails": [{"cached_tokens": 80}]},
+                "rawUsage": {"prompt_tokens": 900, "completion_tokens": 90, "cache_read_input_tokens": 0}},
+            "message": {"usage": {"input_tokens": 900, "output_tokens": 90}}
+        })).unwrap();
+        assert_eq!(usage.input_tokens, Some(100));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(usage.total_tokens, Some(120));
+        assert_eq!(usage.cache_read_tokens, Some(80));
+        let fallback = CodeBuddyProvider::token_usage(&json!({"providerData": {"rawUsage": {
+            "prompt_tokens": 100, "completion_tokens": 20, "prompt_cache_hit_tokens": 80, "cache_read_input_tokens": 0
+        }}})).unwrap();
+        assert_eq!(usage, fallback);
+        assert!(
+            CodeBuddyProvider::token_usage(&json!({"message": {"usage": {"input_tokens": -1}}}))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_ids_deduplicate_usage_but_equal_counts_do_not() {
+        let provider = CodeBuddyProvider::default();
+        let record = |id: &str| {
+            json!({"type": "function_call", "name": "Read", "arguments": {},
+            "providerData": {"messageId": id, "usage": {"inputTokens": 100, "outputTokens": 20}}})
+        };
+        let messages = provider.normalize(&[record("a"), record("a"), record("b")], 0);
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].usage.is_some());
+        assert!(messages[1].usage.is_none());
+        assert_eq!(
+            super::TokenUsage::aggregate(
+                messages.iter().filter_map(|message| message.usage.as_ref())
+            )
+            .unwrap()
+            .input_tokens,
+            Some(200)
+        );
+    }
+
+    #[test]
+    fn reasoning_usage_survives_flush_and_empty_assistant() {
+        let provider = CodeBuddyProvider::default();
+        let reasoning = json!({"type": "reasoning", "content": "Thinking", "providerData": {
+            "messageId": "response", "usage": {"inputTokens": 100, "outputTokens": 20}
+        }});
+        let assistant = json!({"type": "message", "role": "assistant", "content": "", "providerData": {
+            "messageId": "response", "usage": {"inputTokens": 100, "outputTokens": 20}
+        }});
+        for records in [
+            vec![reasoning.clone()],
+            vec![reasoning.clone(), assistant],
+            vec![
+                reasoning,
+                json!({"type": "message", "role": "user", "content": "Next"}),
+            ],
+        ] {
+            let messages = provider.normalize(&records, 0);
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message.usage.is_some())
+                    .count(),
+                1
+            );
+            assert_eq!(messages[0].usage.as_ref().unwrap().total_tokens, Some(120));
+        }
+        let messages = provider.normalize(&[json!({"type": "assistant", "message": {"usage": {"input_tokens": 3, "output_tokens": 0}}})], 0);
+        assert_eq!(messages[0].usage.as_ref().unwrap().total_tokens, Some(3));
+    }
+
+    #[test]
+    fn pending_plan_reads_live_file_without_rewriting_completed_requests() {
+        let base = std::env::temp_dir().join(format!("yes-pending-plan-{}", std::process::id()));
+        let root = base.join(".codebuddy");
+        fs::create_dir_all(root.join("plans")).unwrap();
+        let path = root.join("plans/test plan.md");
+        let provider = CodeBuddyProvider::with_root(root.clone());
+        let mut records = vec![
+            json!({"type":"function_call_result", "name":"EnterPlanMode", "callId":"enter",
+                "output":{"type":"text","text":format!("Create your plan at {} using the Write tool.", path.display())}}),
+            json!({"type":"function_call", "name":"ExitPlanMode", "callId":"exit", "arguments":{}}),
+        ];
+        let load = |records: &[Value]| {
+            let mut messages = provider.normalize(records, 0);
+            provider.attach_pending_plan(&mut messages);
+            messages
+        };
+        // No file yet: retain the real request and retry on detail refresh.
+        let missing = load(&records);
+        assert!(missing[1].content.is_none());
+        assert_eq!(
+            missing[1].metadata.get("codebuddyPendingPlan"),
+            Some(&json!(true))
+        );
+        fs::write(&path, "# First plan\n\n- Check parsing").unwrap();
+        assert!(provider.normalize(&records, 0)[1].content.is_none());
+        assert_eq!(
+            load(&records)[1].content.as_deref(),
+            Some("# First plan\n\n- Check parsing")
+        );
+        fs::write(&path, "# Revised plan").unwrap();
+        assert_eq!(load(&records)[1].content.as_deref(), Some("# Revised plan"));
+
+        records.push(
+            json!({"type":"function_call_result", "name":"ExitPlanMode", "callId":"exit",
+            "output":{"type":"text", "text":"User has approved your plan.\n\n# Recorded plan"}}),
+        );
+        let completed = load(&records);
+        assert!(completed[1].content.is_none());
+        assert!(!completed[1].metadata.contains_key("codebuddyPendingPlan"));
+        assert_eq!(
+            completed[2].tool_output.as_ref().unwrap().output.as_deref(),
+            Some("User has approved your plan.\n\n# Recorded plan")
+        );
+        records.push(json!({"type":"function_call", "name":"ExitPlanMode", "callId":"exit-2", "arguments":{}}));
+        let retried = load(&records);
+        assert!(retried[1].content.is_none());
+        assert_eq!(retried[3].content.as_deref(), Some("# Revised plan"));
+
+        // Canonical boundaries reject both traversal and symlink escapes.
+        let outside = base.join("outside.md");
+        fs::write(&outside, "external content").unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&outside, &path).unwrap();
+        assert!(load(&records)[3].content.is_none());
+        records[0]["output"]["text"] = json!(format!(
+            "Create at {}/plans/../../outside.md",
+            root.display()
+        ));
+        assert!(load(&records)[3].content.is_none());
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn control_only_sessions_are_hidden_until_real_messages_arrive() {

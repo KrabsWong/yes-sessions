@@ -255,6 +255,7 @@ fn groupable_tool(message: &SessionMessage, show_thinking: bool) -> bool {
         message.message_type,
         MessageType::ToolUse | MessageType::ToolResult
     ) && !is_subagent_message(message)
+        && !message.tool_name.as_deref().is_some_and(is_question_tool)
         && message.attachments.is_empty()
         && (message.message_type == MessageType::ToolResult
             || (!message
@@ -283,7 +284,9 @@ fn display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversa
     let mut display = Vec::<ConversationTurn>::new();
     for mut turn in build_turns(messages, provider) {
         turn.messages.retain(|item| {
-            item.message.message_type != MessageType::Assistant || has_prose(&item.message)
+            item.message.message_type != MessageType::Assistant
+                || item.message.usage.is_some()
+                || has_prose(&item.message)
         });
         if turn.messages.is_empty() {
             continue;
@@ -822,6 +825,65 @@ fn render_edit_diff(
                 })),
         )
         .into_any_element()
+}
+
+fn is_question_tool(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "askuserquestion" | "askquestion"
+    )
+}
+
+fn question_markdown(message: &SessionMessage, language: Language) -> Option<String> {
+    if !message.tool_name.as_deref().is_some_and(is_question_tool) {
+        return None;
+    }
+    let questions = message.tool_input.as_ref()?.get("questions")?.as_array()?;
+    let mut sections = Vec::new();
+    for question in questions {
+        let Some(text) = question.get("question").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let mut section = String::new();
+        if let Some(header) = question.get("header").and_then(serde_json::Value::as_str) {
+            section.push_str(&format!("### {header}\n\n"));
+        }
+        section.push_str(text);
+        if let Some(multiple) = question
+            .get("multiSelect")
+            .and_then(serde_json::Value::as_bool)
+        {
+            section.push_str(&format!(
+                "\n\n{}",
+                tr(
+                    language,
+                    if multiple {
+                        "message.multipleChoice"
+                    } else {
+                        "message.singleChoice"
+                    }
+                )
+            ));
+        }
+        if let Some(options) = question
+            .get("options")
+            .and_then(serde_json::Value::as_array)
+        {
+            for option in options {
+                if let Some(label) = option.get("label").and_then(serde_json::Value::as_str) {
+                    section.push_str(&format!("\n\n- {label}"));
+                    if let Some(description) = option
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        section.push_str(&format!("\n\n  {}", description.replace('\n', "\n  ")));
+                    }
+                }
+            }
+        }
+        sections.push(section);
+    }
+    (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 
 fn tool_output_text(message: Option<&SessionMessage>) -> Option<String> {
@@ -1513,6 +1575,17 @@ fn render_tool(
                                         .text_color(cx.theme().muted_foreground)
                                         .child(timestamp),
                                 )
+                                .when_some(
+                                    tool_use.and_then(|item| item.message.usage.as_ref()),
+                                    |view, usage| {
+                                        view.child(crate::token_usage::render(
+                                            ("tool-usage", message_index),
+                                            usage,
+                                            options.language,
+                                            cx,
+                                        ))
+                                    },
+                                )
                                 .when_some(summary, |view, summary| {
                                     view.child(
                                         div()
@@ -1676,7 +1749,17 @@ fn render_tool(
                             .font_family(cx.theme().mono_font_family.clone())
                             .text_color(cx.theme().foreground.opacity(0.72))
                             .whitespace_normal()
-                            .child(output.unwrap_or_default()),
+                            .child(if tool_name == "ExitPlanMode" {
+                                conversation_markdown(
+                                    ("plan-output", message_index),
+                                    output.unwrap_or_default(),
+                                )
+                                .font_family(cx.theme().font_family.clone())
+                                .text_color(cx.theme().foreground)
+                                .into_any_element()
+                            } else {
+                                div().child(output.unwrap_or_default()).into_any_element()
+                            }),
                     ),
             )
         })
@@ -1880,6 +1963,17 @@ fn render_subagent(
                             .font_weight(FontWeight::MEDIUM)
                             .text_color(status_fg)
                             .child(status_label),
+                    )
+                    .when_some(
+                        tool_use.and_then(|item| item.message.usage.as_ref()),
+                        |view, usage| {
+                            view.child(crate::token_usage::render(
+                                ("subagent-usage", item.index),
+                                usage,
+                                options.language,
+                                cx,
+                            ))
+                        },
                     )
                     .child(tool_copy_actions(tool_use, tool_result, options))
                     .child(
@@ -2393,6 +2487,14 @@ fn render_assistant_group(
                 cx,
             ));
         }
+        if let Some((item, markdown)) = pair.tool_use.as_ref().and_then(|item| {
+            question_markdown(&item.message, options.language).map(|markdown| (item, markdown))
+        }) {
+            body = body.child(conversation_markdown(
+                ("tool-questions", item.index),
+                markdown,
+            ));
+        }
         if let Some(tool_use) = pair.tool_use.as_ref().filter(|item| {
             item.message
                 .reasoning_content
@@ -2445,7 +2547,8 @@ fn render_assistant_group(
     }
     for item in items.iter().filter(|item| {
         item.message.message_type == MessageType::Assistant
-            && (!item.message.attachments.is_empty()
+            && (item.message.usage.is_some()
+                || !item.message.attachments.is_empty()
                 || item
                     .message
                     .content
@@ -2634,6 +2737,12 @@ fn render_assistant_group(
     if grouped_sections.is_empty() {
         return div().into_any_element();
     }
+    let reply_usage = yes_core::model::TokenUsage::aggregate(
+        items
+            .iter()
+            .filter(|item| item.message.message_type == MessageType::Assistant)
+            .filter_map(|item| item.message.usage.as_ref()),
+    );
     let copy_items = items
         .into_iter()
         .filter(|item| item.message.message_type != MessageType::System)
@@ -2699,7 +2808,15 @@ fn render_assistant_group(
                                 .text_size(px(12.))
                                 .text_color(cx.theme().muted_foreground)
                                 .child(timestamp),
-                        ),
+                        )
+                        .when_some(reply_usage.as_ref(), |view, usage| {
+                            view.child(crate::token_usage::render(
+                                ("reply-usage", turn_index),
+                                usage,
+                                options.language,
+                                cx,
+                            ))
+                        }),
                 )
                 .child(body)
                 .child(message_actions(
@@ -2928,6 +3045,61 @@ mod tests {
         let bounds = visual.debug_bounds("historical-edit-diff").unwrap();
         assert!(bounds.size.width > px(0.) && bounds.size.width <= px(300.));
         assert!(bounds.size.height > px(0.));
+    }
+
+    #[test]
+    fn usage_only_responses_are_kept_in_the_conversation() {
+        let mut message = SessionMessage::text(MessageType::Assistant, "", "");
+        assert!(super::display_turns(&[message.clone()], AppType::CodeBuddy).is_empty());
+        message.usage = Some(yes_core::model::TokenUsage {
+            input_tokens: Some(100),
+            output_tokens: Some(0),
+            total_tokens: Some(100),
+            cache_read_tokens: Some(90),
+        });
+        assert_eq!(
+            super::display_turns(&[message], AppType::CodeBuddy).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn questions_remain_visible_outside_collapsed_tool_groups() {
+        let mut message = SessionMessage::text(MessageType::ToolUse, "", "");
+        message.tool_name = Some("AskUserQuestion".into());
+        message.tool_input = json!({"questions":[
+            {"header":"范围", "question":"需要哪些内容？", "multiSelect":true,
+             "options":[{"label":"计划", "description":"展示 Markdown 正文"},
+                        {"label":"问题", "description":"保留选项说明"}]},
+            {"question":"Continue?", "multiSelect":false, "options":[]}
+        ]})
+        .as_object()
+        .cloned();
+        let markdown = super::question_markdown(&message, yes_core::Language::Zh).unwrap();
+        for expected in [
+            "### 范围",
+            "需要哪些内容？",
+            "可多选",
+            "- 计划",
+            "展示 Markdown 正文",
+            "- 问题",
+            "保留选项说明",
+            "Continue?",
+            "单选",
+        ] {
+            assert!(markdown.contains(expected), "missing {expected}");
+        }
+        assert!(!super::groupable_tool(&message, false));
+        let english = super::question_markdown(&message, yes_core::Language::En).unwrap();
+        assert!(english.contains("Select multiple options"));
+        assert!(english.contains("Select one option"));
+        message.tool_name = Some("Bash".into());
+        assert!(super::question_markdown(&message, yes_core::Language::En).is_none());
+        message.tool_name = Some("AskQuestion".into());
+        message.tool_input = json!({"questions":[{"unexpected":true}]})
+            .as_object()
+            .cloned();
+        assert!(super::question_markdown(&message, yes_core::Language::En).is_none());
     }
 
     #[test]

@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use super::SessionProvider;
 use crate::{
     AppType, MessageType, Session, SessionDetail, SessionMessage,
-    model::{SessionKind, ToolOutput},
+    model::{SessionKind, TokenUsage, ToolOutput},
 };
 
 #[derive(Debug, Clone)]
@@ -112,6 +112,42 @@ impl ClaudeProvider {
             .map(|value| value.as_str().to_owned())
     }
 
+    fn token_usage(record: &Value) -> Option<TokenUsage> {
+        let usage = record
+            .pointer("/message/usage")
+            .or_else(|| record.get("usage"))?;
+        let count = |name| usage.get(name).and_then(Value::as_u64);
+        let uncached_input = count("input_tokens");
+        let cache_creation_tokens = count("cache_creation_input_tokens");
+        let cache_read_tokens = count("cache_read_input_tokens");
+        // Anthropic reports uncached input separately from both cache reads and writes.
+        let input_tokens = uncached_input.and_then(|input| {
+            input
+                .checked_add(cache_creation_tokens?)?
+                .checked_add(cache_read_tokens?)
+        });
+        let output_tokens = count("output_tokens");
+        // Streaming thinking/text envelopes may carry placeholder zero usage.
+        if ![
+            uncached_input,
+            cache_creation_tokens,
+            cache_read_tokens,
+            output_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .any(|count| count > 0)
+        {
+            return None;
+        }
+        Some(TokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.and_then(|input| input.checked_add(output_tokens?)),
+            cache_read_tokens,
+        })
+    }
+
     // Content blocks, rather than promptId/toolUseResult, determine the message kind.
     fn parse_new_message(record: &Value, model: Option<String>) -> Vec<SessionMessage> {
         let role = record
@@ -132,7 +168,7 @@ impl ClaudeProvider {
         let blocks = match content {
             Some(Value::String(text)) => vec![json!({"type":"text", "text":text})],
             Some(Value::Array(blocks)) => blocks.clone(),
-            _ => return vec![],
+            _ => vec![],
         };
         let mut messages = Vec::new();
         for block in blocks {
@@ -250,6 +286,43 @@ impl ClaudeProvider {
         }
         for message in &mut messages {
             crate::attachments::normalize(message, None);
+        }
+        if role == "assistant" {
+            if let Some(usage) = Self::token_usage(record) {
+                if messages.is_empty() {
+                    let mut message =
+                        SessionMessage::text(MessageType::Assistant, Self::timestamp(record), "");
+                    message.model = model;
+                    messages.push(message);
+                }
+                messages.last_mut().unwrap().usage = Some(usage);
+            }
+        }
+        messages
+    }
+
+    fn conversation_messages(records: &[Value]) -> Vec<SessionMessage> {
+        let mut current_model = None;
+        let mut messages: Vec<SessionMessage> = Vec::new();
+        let mut usage_indices: HashMap<&str, usize> = HashMap::new();
+        for record in Self::conversation_chain(records) {
+            current_model = Self::message_model(record, current_model);
+            let parsed = Self::parse_new_message(record, current_model.clone());
+            if parsed.last().is_some_and(|message| message.usage.is_some()) {
+                // One response can be saved as several thinking/text/tool envelopes.
+                // Later nonzero usage replaces the earlier snapshot, never adds to it.
+                if let Some(id) = record
+                    .pointer("/message/id")
+                    .or_else(|| record.get("uuid"))
+                    .and_then(Value::as_str)
+                {
+                    let index = messages.len() + parsed.len() - 1;
+                    if let Some(previous) = usage_indices.insert(id, index) {
+                        messages[previous].usage = None;
+                    }
+                }
+            }
+            messages.extend(parsed);
         }
         messages
     }
@@ -624,12 +697,7 @@ impl ClaudeProvider {
                 record["isSidechain"] = json!(false);
             }
         }
-        let mut current_model = None;
-        let mut messages = Vec::new();
-        for record in Self::conversation_chain(&records) {
-            current_model = Self::message_model(record, current_model);
-            messages.extend(Self::parse_new_message(record, current_model.clone()));
-        }
+        let mut messages = Self::conversation_messages(&records);
         let mut inherited_model = None;
         for message in messages.iter_mut().rev() {
             if message.model.is_some() {
@@ -955,6 +1023,83 @@ impl SessionProvider for ClaudeProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_normalizes_cached_input_without_double_counting_thinking() {
+        let usage = ClaudeProvider::token_usage(&json!({"message":{"usage":{
+            "input_tokens":100,"cache_read_input_tokens":800,
+            "cache_creation_input_tokens":100,"output_tokens":50,
+            "output_tokens_details":{"thinking_tokens":20}
+        }}}))
+        .unwrap();
+        assert_eq!(usage.input_tokens, Some(1000));
+        assert_eq!(usage.output_tokens, Some(50));
+        assert_eq!(usage.total_tokens, Some(1050));
+        assert_eq!(usage.cache_hit_rate(), Some(80.0));
+        let uncached = ClaudeProvider::token_usage(&json!({"message":{"usage":{
+            "input_tokens":100,"output_tokens":0
+        }}}))
+        .unwrap();
+        assert_eq!(uncached.cache_read_tokens, None);
+        assert_eq!(uncached.cache_hit_rate(), None);
+        assert!(
+            ClaudeProvider::token_usage(&json!({"message":{"usage":{
+                "input_tokens":0,"output_tokens":0
+            }}}))
+            .is_none()
+        );
+        let partial = ClaudeProvider::token_usage(&json!({"message":{"usage":{
+            "input_tokens":100,"cache_read_input_tokens":900,"output_tokens":10
+        }}}))
+        .unwrap();
+        assert_eq!(partial.input_tokens, None);
+        assert_eq!(partial.total_tokens, None);
+        assert_eq!(partial.output_tokens, Some(10));
+        assert_eq!(partial.cache_read_tokens, Some(900));
+        assert_eq!(partial.cache_hit_rate(), None);
+        let invalid_input = ClaudeProvider::token_usage(&json!({"message":{"usage":{
+            "input_tokens":-1,"output_tokens":10
+        }}}))
+        .unwrap();
+        assert_eq!(invalid_input.input_tokens, None);
+        assert_eq!(invalid_input.output_tokens, Some(10));
+    }
+
+    #[test]
+    fn usage_is_counted_once_per_response_across_blocks_and_envelopes() {
+        let records = vec![
+            json!({"type":"assistant","message":{"id":"response","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"thinking","thinking":"Plan"}]}}),
+            json!({"type":"assistant","message":{"id":"response","usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":10},"content":[{"type":"text","text":"Read"},{"type":"tool_use","id":"one","name":"Read","input":{}}]}}),
+            json!({"type":"assistant","message":{"id":"response","usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":20},"content":[{"type":"tool_use","id":"two","name":"Read","input":{}}]}}),
+            json!({"type":"assistant","message":{"id":"response","usage":{"input_tokens":0,"output_tokens":0},"content":[{"type":"text","text":"placeholder"}]}}),
+            json!({"type":"assistant","message":{"id":"next","usage":{"input_tokens":120,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":5},"content":[{"type":"text","text":"Done"}]}}),
+        ];
+        let messages = ClaudeProvider::conversation_messages(&records);
+        assert_eq!(messages.len(), 6);
+        assert!(messages[0].usage.is_none());
+        assert!(messages[1].usage.is_none());
+        assert!(messages[2].usage.is_none());
+        assert_eq!(messages[3].usage.as_ref().unwrap().output_tokens, Some(20));
+        let total =
+            TokenUsage::aggregate(messages.iter().filter_map(|m| m.usage.as_ref())).unwrap();
+        assert_eq!(total.input_tokens, Some(220));
+        assert_eq!(total.output_tokens, Some(25));
+        assert_eq!(total.total_tokens, Some(245));
+    }
+
+    #[test]
+    fn usage_only_responses_are_preserved_and_filtered_records_stay_excluded() {
+        let records = vec![
+            json!({"type":"assistant","message":{"id":"response","usage":{"input_tokens":100,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":10}}}),
+            json!({"type":"assistant","isSidechain":true,"message":{"usage":{"input_tokens":900,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":10}}}),
+            json!({"type":"assistant","isMeta":true,"message":{"usage":{"input_tokens":900,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":10}}}),
+            json!({"type":"user","message":{"content":"Hello","usage":{"input_tokens":900,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"output_tokens":10}}}),
+        ];
+        let messages = ClaudeProvider::conversation_messages(&records);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].usage.as_ref().unwrap().total_tokens, Some(110));
+        assert!(messages[1].usage.is_none());
+    }
 
     #[test]
     fn discovers_sidechain_details_and_links_async_notifications() {

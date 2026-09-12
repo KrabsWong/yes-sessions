@@ -1071,7 +1071,20 @@ impl YesSessions {
                 session.id == session_id || session.uuid.as_deref() == Some(&session_id)
             })
             .and_then(detail_source_signature);
-        if current_signature.is_some() && current_signature == self.detail_source_signature {
+        let pending_plan = self.selected_app == AppType::CodeBuddy
+            && self.detail.as_ref().is_some_and(|detail| {
+                detail.messages.iter().any(|message| {
+                    message
+                        .metadata
+                        .get("codebuddyPendingPlan")
+                        .and_then(serde_json::Value::as_bool)
+                        == Some(true)
+                })
+            });
+        if !pending_plan
+            && current_signature.is_some()
+            && current_signature == self.detail_source_signature
+        {
             return;
         }
         let Some(provider) = self.registry.get(self.selected_app) else {
@@ -2815,6 +2828,12 @@ impl YesSessions {
         };
         self.ensure_workspace_preview(window, cx);
         let session = &detail.session;
+        let usage = yes_core::model::TokenUsage::aggregate(
+            detail
+                .messages
+                .iter()
+                .filter_map(|message| message.usage.as_ref()),
+        );
         let updated_date = Local
             .timestamp_millis_opt(session.updated_at)
             .single()
@@ -3026,6 +3045,16 @@ impl YesSessions {
                                         .text_color(cx.theme().muted_foreground)
                                         .child(updated_date),
                                 )
+                                .when_some(usage.as_ref(), |view, usage| {
+                                    view.child(div().ml_2().min_w_0().child(
+                                        crate::token_usage::render(
+                                            "session-token-usage",
+                                            usage,
+                                            language,
+                                            cx,
+                                        ),
+                                    ))
+                                })
                                 .child(div().flex_1())
                                 .when(
                                     session.kind != yes_core::model::SessionKind::Subagent,
