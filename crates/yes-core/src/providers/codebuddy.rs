@@ -757,6 +757,7 @@ impl CodeBuddyProvider {
             .and_then(|value| Self::timestamp_ms(value.get("timestamp")))
             .unwrap_or(file.updated_at);
         Some(SessionDetail {
+            subtree_usage: None,
             session: Session {
                 id: file.id.clone(),
                 app_type: AppType::CodeBuddy,

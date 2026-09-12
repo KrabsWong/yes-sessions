@@ -232,6 +232,9 @@ pub struct Session {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionDetail {
+    /// Usage of this session and its descendants, populated only for detail views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subtree_usage: Option<TokenUsage>,
     #[serde(flatten)]
     pub session: Session,
     pub messages: Vec<SessionMessage>,

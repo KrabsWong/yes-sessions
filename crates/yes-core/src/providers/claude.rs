@@ -726,7 +726,11 @@ impl ClaudeProvider {
             .last()
             .and_then(|message| message.content.clone())
             .unwrap_or_default();
-        Some(SessionDetail { session, messages })
+        Some(SessionDetail {
+            subtree_usage: None,
+            session,
+            messages,
+        })
     }
 
     fn link_children(&self, path: &Path, records: &[Value], messages: &mut Vec<SessionMessage>) {
@@ -911,6 +915,7 @@ impl ClaudeProvider {
             .take(100)
             .collect();
         Some(SessionDetail {
+            subtree_usage: None,
             session: Session {
                 id: session_id.into(),
                 app_type: AppType::Claude,

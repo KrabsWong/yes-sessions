@@ -466,6 +466,7 @@ mod ui_tests {
                 agent_type: None,
             };
             app.detail = Some(Arc::new(SessionDetail {
+                subtree_usage: None,
                 session,
                 messages: vec![
                     SessionMessage::text(yes_core::MessageType::User, "", "First needle"),

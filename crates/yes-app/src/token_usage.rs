@@ -5,10 +5,12 @@ use yes_core::{Language, model::TokenUsage};
 use crate::i18n::tr;
 
 fn compact_count(value: u64) -> String {
-    if value >= 999_950 {
-        format!("{:.1} M", value as f64 / 1_000_000.0)
+    if value >= 999_995_000 {
+        format!("{:.2} B", value as f64 / 1_000_000_000.0)
+    } else if value >= 999_995 {
+        format!("{:.2} M", value as f64 / 1_000_000.0)
     } else if value >= 1_000 {
-        format!("{:.1} K", value as f64 / 1_000.0)
+        format!("{:.2} K", value as f64 / 1_000.0)
     } else {
         value.to_string()
     }
@@ -162,20 +164,26 @@ mod tests {
         };
         assert_eq!(
             fields(&usage, Language::En)[0],
-            ("Input", "176.4 K (176,372)".into())
+            ("Input", "176.37 K (176,372)".into())
         );
     }
 
     #[test]
-    fn counts_use_compact_units_with_one_decimal() {
+    fn counts_use_compact_units_with_two_decimals() {
         for (value, expected) in [
             (0, "0"),
             (62, "62"),
             (999, "999"),
-            (1000, "1.0 K"),
-            (34404, "34.4 K"),
-            (999950, "1.0 M"),
-            (1250000, "1.2 M"),
+            (1000, "1.00 K"),
+            (34404, "34.40 K"),
+            (34406, "34.41 K"),
+            (999950, "999.95 K"),
+            (999994, "999.99 K"),
+            (999995, "1.00 M"),
+            (1250000, "1.25 M"),
+            (999994999, "999.99 M"),
+            (999995000, "1.00 B"),
+            (1234567890, "1.23 B"),
         ] {
             assert_eq!(compact_count(value), expected);
         }

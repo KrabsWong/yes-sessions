@@ -1237,6 +1237,7 @@ mod tests {
     }
     fn fixture(id: &str, directory: &str, updated_at: i64) -> SessionDetail {
         SessionDetail {
+            subtree_usage: None,
             session: Session {
                 id: id.into(),
                 app_type: AppType::Codex,

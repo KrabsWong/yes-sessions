@@ -55,6 +55,7 @@ struct SourceFileSignature {
 
 #[derive(Clone, PartialEq, Eq)]
 struct DetailSourceSignature {
+    descendants: Vec<(String, Option<SourceFileSignature>)>,
     primary: SourceFileSignature,
     sqlite_wal: Option<SourceFileSignature>,
 }
@@ -76,9 +77,40 @@ fn detail_source_signature(session: &Session) -> Option<DetailSourceSignature> {
         source_file_signature(PathBuf::from(path))
     });
     Some(DetailSourceSignature {
+        descendants: Vec::new(),
         primary,
         sqlite_wal: sqlite_wal.flatten(),
     })
+}
+
+fn subtree_source_signature(
+    session: &Session,
+    sessions: &[Session],
+) -> Option<DetailSourceSignature> {
+    let mut signature = detail_source_signature(session)?;
+    let mut children = HashMap::<&str, Vec<&Session>>::new();
+    for child in sessions {
+        if let Some(parent) = child.parent_session_id.as_deref() {
+            children.entry(parent).or_default().push(child);
+        }
+    }
+    let mut pending = vec![session];
+    let mut visited = HashSet::from([session.id.as_str()]);
+    while let Some(parent) = pending.pop() {
+        for id in std::iter::once(parent.id.as_str()).chain(parent.uuid.as_deref()) {
+            for child in children.get(id).into_iter().flatten() {
+                if visited.insert(child.id.as_str()) {
+                    signature.descendants.push((
+                        child.id.clone(),
+                        source_file_signature(child.file_path.clone()),
+                    ));
+                    pending.push(child);
+                }
+            }
+        }
+    }
+    signature.descendants.sort_by(|a, b| a.0.cmp(&b.0));
+    Some(signature)
 }
 
 fn ancestor_session_ids(sessions: &[Session], session_id: &str) -> Vec<String> {
@@ -1016,12 +1048,12 @@ impl YesSessions {
             .find(|session| {
                 session.id == session_id || session.uuid.as_deref() == Some(&session_id)
             })
-            .and_then(detail_source_signature);
+            .and_then(|session| subtree_source_signature(session, &self.sessions));
         let task = cx.background_executor().spawn(async move {
             (
                 source_signature,
                 provider
-                    .session_detail(&session_id)
+                    .session_detail_with_usage(&session_id)
                     .map_err(|error| error.to_string()),
             )
         });
@@ -1070,7 +1102,7 @@ impl YesSessions {
             .find(|session| {
                 session.id == session_id || session.uuid.as_deref() == Some(&session_id)
             })
-            .and_then(detail_source_signature);
+            .and_then(|session| subtree_source_signature(session, &self.sessions));
         let pending_plan = self.selected_app == AppType::CodeBuddy
             && self.detail.as_ref().is_some_and(|detail| {
                 detail.messages.iter().any(|message| {
@@ -1081,7 +1113,20 @@ impl YesSessions {
                         == Some(true)
                 })
             });
-        if !pending_plan
+        let has_unlisted_children = self.detail.as_ref().is_some_and(|detail| {
+            detail
+                .messages
+                .iter()
+                .filter_map(|message| message.sub_agent_session_id.as_deref())
+                .any(|id| {
+                    !self
+                        .sessions
+                        .iter()
+                        .any(|session| session.id == id || session.uuid.as_deref() == Some(id))
+                })
+        });
+        if !has_unlisted_children
+            && !pending_plan
             && current_signature.is_some()
             && current_signature == self.detail_source_signature
         {
@@ -1096,7 +1141,7 @@ impl YesSessions {
             (
                 current_signature,
                 provider
-                    .session_detail(&session_id)
+                    .session_detail_with_usage(&session_id)
                     .map_err(|error| error.to_string()),
             )
         });
@@ -2828,12 +2873,14 @@ impl YesSessions {
         };
         self.ensure_workspace_preview(window, cx);
         let session = &detail.session;
-        let usage = yes_core::model::TokenUsage::aggregate(
-            detail
-                .messages
-                .iter()
-                .filter_map(|message| message.usage.as_ref()),
-        );
+        let usage = detail.subtree_usage.clone().or_else(|| {
+            yes_core::model::TokenUsage::aggregate(
+                detail
+                    .messages
+                    .iter()
+                    .filter_map(|message| message.usage.as_ref()),
+            )
+        });
         let updated_date = Local
             .timestamp_millis_opt(session.updated_at)
             .single()
@@ -4186,6 +4233,7 @@ mod tests {
             ]);
             app.selected_session_id = Some(parent.id.clone());
             let parent_detail = Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: parent,
                 messages: Vec::new(),
             });
@@ -4206,6 +4254,7 @@ mod tests {
             assert_eq!(app.parent_conversations.len(), 1);
             // Supply child content before the asynchronous load returns.
             app.detail = Some(Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: child,
                 messages: Vec::new(),
             }));
@@ -4256,7 +4305,7 @@ mod tests {
             app.selected_app = AppType::Claude;
             let mut fixture = session("xml-test", None);
             fixture.app_type = AppType::Claude;
-            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail { subtree_usage: None,
                 session: fixture,
                 messages: vec![SessionMessage::text(MessageType::Assistant,
                     "2026-09-07T00:00:00Z",
@@ -4318,6 +4367,7 @@ mod tests {
             app.settings.sidebar_collapsed = true;
             app.settings_open = false;
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: session("navigator-test", None),
                 messages: (0..50)
                     .flat_map(|i| {
@@ -4439,6 +4489,7 @@ mod tests {
         app.update(cx, |app, cx| {
             app.reset_detail(cx);
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: session("single-message", None),
                 messages: vec![SessionMessage::text(
                     MessageType::User,
@@ -4488,6 +4539,7 @@ mod tests {
                 })
                 .collect();
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: session("tools", None),
                 messages,
             }));
@@ -4600,6 +4652,7 @@ mod tests {
             app.settings.sidebar_collapsed = true;
             app.settings_open = false;
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: session("selection-child", Some("parent")),
                 messages: vec![SessionMessage::text(
                     MessageType::User,
@@ -4690,6 +4743,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let detail = yes_core::SessionDetail {
+            subtree_usage: None,
             session: session("scroll-anchor", None),
             messages,
         };
@@ -4788,6 +4842,7 @@ mod tests {
             app.settings.sidebar_collapsed = true;
             app.settings_open = false;
             app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
                 session: session("unread-test", None),
                 messages: (0..30)
                     .map(|i| {
@@ -5020,7 +5075,7 @@ mod tests {
             item.agent_type = Some("Plan".into());
             item.directory = Some(PathBuf::from("/tmp/a-long-workspace-directory-for-header-layout"));
             item.first_message = "检查文件预览和差异对比面板的布局，确保缩小会话区域后标题能够自动换行并完整显示。 Review the workspace preview layout and preserve the full session title.".into();
-            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail { session: item, messages: vec![] }));
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail { subtree_usage: None, session: item, messages: vec![] }));
             cx.notify();
         });
         let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
@@ -5231,6 +5286,28 @@ mod tests {
         assert_eq!(format_count(12), "12");
         assert_eq!(format_count(1_234), "1,234");
         assert_eq!(format_count(9_876_543), "9,876,543");
+    }
+
+    #[test]
+    fn subtree_signature_tracks_child_changes_additions_and_removals() {
+        let directory =
+            std::env::temp_dir().join(format!("yes-subtree-signature-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let mut root = session("root", None);
+        root.file_path = directory.join("root");
+        let mut child = session("child", Some("root"));
+        child.file_path = directory.join("child");
+        fs::write(&root.file_path, "root").unwrap();
+        fs::write(&child.file_path, "child").unwrap();
+        let sessions = vec![root.clone(), child.clone()];
+        let before = super::subtree_source_signature(&root, &sessions);
+        fs::write(&child.file_path, "child with more tokens").unwrap();
+        let after = super::subtree_source_signature(&root, &sessions);
+        assert!(before != after);
+        assert!(after != super::subtree_source_signature(&root, &[root.clone()]));
+        fs::remove_file(&child.file_path).unwrap();
+        assert!(after != super::subtree_source_signature(&root, &sessions));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
