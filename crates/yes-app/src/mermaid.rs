@@ -16,8 +16,9 @@ use native_clip::NativeClip;
 static NEXT_DIAGRAM_ID: AtomicUsize = AtomicUsize::new(1);
 
 pub struct MermaidDiagram {
-    webview: Entity<gpui_wry::WebView>,
-    clip: std::rc::Rc<NativeClip>,
+    source: String,
+    dark: bool,
+    surface: Option<(Entity<gpui_wry::WebView>, std::rc::Rc<NativeClip>)>,
     language: Language,
     scale: f32,
     id: usize,
@@ -25,9 +26,11 @@ pub struct MermaidDiagram {
 
 impl MermaidDiagram {
     pub fn hide(entity: &Entity<Self>, cx: &mut App) {
-        entity.read(cx).clip.hide();
-        let webview = entity.read(cx).webview.clone();
-        webview.update(cx, |webview, _| webview.hide());
+        if let Some((webview, clip)) = &entity.read(cx).surface {
+            clip.hide();
+            let webview = webview.clone();
+            webview.update(cx, |webview, _| webview.hide());
+        }
     }
 }
 
@@ -35,34 +38,51 @@ pub fn create_mermaid_diagram(
     source: &str,
     dark: bool,
     language: Language,
-    window: &mut Window,
     cx: &mut App,
-) -> anyhow::Result<Entity<MermaidDiagram>> {
-    let html = mermaid_html(source, dark, language)?;
-    let raw = WebViewBuilder::new()
-        .with_html(html)
-        .with_transparent(true)
-        .build_as_child(window)?;
-    let webview = cx.new(|cx| gpui_wry::WebView::new(raw, window, cx));
-    let clip = std::rc::Rc::new(NativeClip::new(webview.read(cx).raw()));
-    Ok(cx.new(|_| MermaidDiagram {
-        webview,
-        clip,
+) -> Entity<MermaidDiagram> {
+    // Keep offscreen diagrams lightweight. WKWebView is created only when the
+    // virtual conversation list actually renders this diagram.
+    cx.new(|_| MermaidDiagram {
+        source: source.to_owned(),
+        dark,
+        surface: None,
         language,
         scale: 1.,
         id: NEXT_DIAGRAM_ID.fetch_add(1, Ordering::Relaxed),
-    }))
+    })
 }
 
 impl Render for MermaidDiagram {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let clip = self.clip.clone();
-        let handle = self.webview.read(cx).handle();
-        let zoom_out = self.webview.clone();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.surface.is_none() {
+            let surface = (|| -> anyhow::Result<_> {
+                let html = mermaid_html(&self.source, self.dark, self.language)?;
+                let raw = WebViewBuilder::new()
+                    .with_html(html)
+                    .with_transparent(true)
+                    .build_as_child(window)?;
+                let webview = cx.new(|cx| gpui_wry::WebView::new(raw, window, cx));
+                let clip = std::rc::Rc::new(NativeClip::new(webview.read(cx).raw()));
+                Ok((webview, clip))
+            })();
+            match surface {
+                Ok(surface) => self.surface = Some(surface),
+                Err(_) => {
+                    return div()
+                        .w_full()
+                        .h(px(568.))
+                        .child(tr(self.language, "mermaid.renderError"));
+                }
+            }
+        }
+        let (webview, clip) = self.surface.as_ref().expect("diagram initialized");
+        let clip = clip.clone();
+        let handle = webview.read(cx).handle();
+        let zoom_out = webview.clone();
         let zoom_out_owner = cx.weak_entity();
-        let reset = self.webview.clone();
+        let reset = webview.clone();
         let reset_owner = cx.weak_entity();
-        let zoom_in = self.webview.clone();
+        let zoom_in = webview.clone();
         let zoom_in_owner = cx.weak_entity();
         let id = self.id;
         div()
@@ -276,6 +296,19 @@ fn load_mermaid_js() -> anyhow::Result<String> {
 mod tests {
     use super::mermaid_html;
     use yes_core::Language;
+
+    #[gpui_kit::test]
+    fn offscreen_diagrams_do_not_create_native_webviews(cx: &mut gpui_kit::TestAppContext) {
+        cx.update(|cx| {
+            for _ in 0..50 {
+                let diagram =
+                    super::create_mermaid_diagram("graph TD\nA-->B", false, Language::En, cx);
+                assert!(diagram.read(cx).surface.is_none());
+                super::MermaidDiagram::hide(&diagram, cx);
+                assert!(diagram.read(cx).surface.is_none());
+            }
+        });
+    }
 
     #[test]
     fn diagram_source_cannot_terminate_the_script_element() {

@@ -31,12 +31,72 @@ pub struct ConversationOptions {
 #[derive(Clone)]
 struct IndexedMessage {
     index: usize,
-    message: SessionMessage,
+    message: Arc<SessionMessage>,
 }
 
 #[derive(Clone, Default)]
 struct ConversationTurn {
     messages: Vec<IndexedMessage>,
+}
+
+/// Reuse grouping and navigation indexes for the immutable loaded detail.
+#[derive(Default)]
+pub struct ConversationCache {
+    source: std::sync::Weak<yes_core::SessionDetail>,
+    layout: Option<Arc<ConversationLayout>>,
+}
+
+impl ConversationCache {
+    pub fn get(&mut self, detail: &Arc<yes_core::SessionDetail>) -> Arc<ConversationLayout> {
+        if self.source.ptr_eq(&Arc::downgrade(detail)) {
+            if let Some(layout) = &self.layout {
+                return layout.clone();
+            }
+        }
+        let layout = Arc::new(ConversationLayout::new(
+            &detail.messages,
+            detail.session.app_type,
+        ));
+        self.source = Arc::downgrade(detail);
+        self.layout = Some(layout.clone());
+        layout
+    }
+}
+
+pub struct ConversationLayout {
+    turns: Vec<ConversationTurn>,
+    message_turns: Vec<usize>,
+    anchors: Vec<Option<usize>>,
+}
+
+impl ConversationLayout {
+    pub fn new(messages: &[SessionMessage], provider: AppType) -> Self {
+        let turns = display_turns(messages, provider);
+        let mut message_turns = vec![0; messages.len()];
+        let mut active_message = None;
+        let anchors = turns
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                for item in &turn.messages {
+                    message_turns[item.index] = index;
+                    if crate::app::is_navigable_user_message(&item.message) {
+                        active_message = Some(item.index);
+                    }
+                }
+                active_message
+            })
+            .collect();
+        Self {
+            turns,
+            message_turns,
+            anchors,
+        }
+    }
+
+    pub fn turn_index_for_message(&self, index: usize) -> usize {
+        self.message_turns.get(index).copied().unwrap_or_default()
+    }
 }
 
 fn conversation_markdown(
@@ -140,7 +200,10 @@ fn build_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversati
     let mut current: Option<ConversationTurn> = None;
 
     for (index, message) in messages.iter().cloned().enumerate() {
-        let item = IndexedMessage { index, message };
+        let item = IndexedMessage {
+            index,
+            message: message.into(),
+        };
         match item.message.message_type {
             MessageType::User => {
                 if let Some(turn) = current.take().filter(|turn| !turn.messages.is_empty()) {
@@ -1502,8 +1565,12 @@ fn render_tool(
         Vec::new()
     };
     let edit_diff = edit.map(|(old, new)| crate::edit_diff::compare(old, new));
-    let output = tool_output_text(tool_result.map(|item| &item.message))
-        .or_else(|| tool_output_text(tool_use.map(|item| &item.message)));
+    let output = is_expanded
+        .then(|| {
+            tool_output_text(tool_result.map(|item| item.message.as_ref()))
+                .or_else(|| tool_output_text(tool_use.map(|item| item.message.as_ref())))
+        })
+        .flatten();
     let message_index = item.index;
     let missing_input_label = if tool_use.is_none() {
         format!(" · {}", tr(options.language, "message.noInput"))
@@ -2894,29 +2961,16 @@ fn render_turn(
 }
 
 pub fn conversation_scroller(
-    messages: Arc<Vec<SessionMessage>>,
+    layout: Arc<ConversationLayout>,
     state: Entity<MessageScrollerState>,
     options: ConversationOptions,
     expanded: HashSet<usize>,
     mermaid_views: Arc<HashMap<(usize, usize), Entity<MermaidDiagram>>>,
     owner: WeakEntity<YesSessions>,
 ) -> MessageScroller {
-    let turns = Arc::new(display_turns(&messages, options.provider));
-    let mut active_message = None;
-    let anchors = turns
-        .iter()
-        .map(|turn| {
-            for item in &turn.messages {
-                if crate::app::is_navigable_user_message(&item.message) {
-                    active_message = Some(item.index);
-                }
-            }
-            active_message
-        })
-        .collect::<Vec<_>>();
     let scroll_state = state.clone();
     MessageScroller::new("conversation", state, move |index, _window, cx| {
-        let Some(turn) = turns.get(index).cloned() else {
+        let Some(turn) = layout.turns.get(index).cloned() else {
             return div().into_any_element();
         };
         let content = render_turn(
@@ -2929,7 +2983,7 @@ pub fn conversation_scroller(
             owner.clone(),
             cx,
         );
-        let anchor = anchors[index];
+        let anchor = layout.anchors[index];
         let anchor_owner = owner.clone();
         let anchor_state = scroll_state.clone();
         div()
@@ -2961,7 +3015,7 @@ pub fn conversation_scroller(
                 .absolute()
                 .inset_0(),
             )
-            .when(index + 1 == turns.len(), |view| {
+            .when(index + 1 == layout.turns.len(), |view| {
                 view.child(
                     div()
                         .debug_selector(|| "conversation-end".into())
@@ -2987,6 +3041,68 @@ mod tests {
     };
     use serde_json::json;
     use yes_core::{AppType, MessageType, SessionMessage};
+
+    #[test]
+    fn cached_layout_reuses_snapshot_and_rebuilds_after_refresh() {
+        use std::sync::Arc;
+        let mut detail: yes_core::SessionDetail = serde_json::from_value(json!({
+            "id":"test", "app_type":"codebuddy", "file_name":"test", "file_path":"test.jsonl",
+            "created_at":0, "updated_at":0, "message_count":0,
+            "first_message":"", "last_message":"", "kind":"main", "messages":[]
+        }))
+        .unwrap();
+        detail
+            .messages
+            .push(SessionMessage::text(MessageType::User, "", "first"));
+        let original = Arc::new(detail);
+        let mut cache = super::ConversationCache::default();
+        let first = cache.get(&original);
+        assert!(Arc::ptr_eq(&first, &cache.get(&original)));
+        let mut refreshed = (*original).clone();
+        refreshed
+            .messages
+            .push(SessionMessage::text(MessageType::User, "", "second"));
+        let refreshed = Arc::new(refreshed);
+        let second = cache.get(&refreshed);
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert_eq!(second.turn_index_for_message(1), 1);
+        assert_eq!(second.anchors, vec![Some(0), Some(1)]);
+        // Returning from a child session must restore the parent's own indexes.
+        let restored = cache.get(&original);
+        assert_eq!(restored.turns.len(), 1);
+        assert_eq!(restored.anchors, vec![Some(0)]);
+    }
+
+    #[test]
+    fn layout_indexes_preserve_provider_pairing_and_hidden_message_fallback() {
+        for provider in AppType::ALL {
+            let messages = vec![
+                SessionMessage::text(MessageType::Assistant, "", ""),
+                SessionMessage::text(MessageType::User, "", "first"),
+                tool_message(2, MessageType::ToolUse, "Read", "a")
+                    .message
+                    .as_ref()
+                    .clone(),
+                SessionMessage::text(MessageType::Assistant, "", "answer"),
+                SessionMessage::text(MessageType::User, "", "second"),
+                tool_message(5, MessageType::ToolResult, "Read", "a")
+                    .message
+                    .as_ref()
+                    .clone(),
+            ];
+            let layout = super::ConversationLayout::new(&messages, provider);
+            for index in 0..=messages.len() {
+                assert_eq!(
+                    layout.turn_index_for_message(index),
+                    super::turn_index_for_message(&messages, index, provider)
+                );
+            }
+            assert_eq!(
+                layout.turn_index_for_message(2),
+                layout.turn_index_for_message(5)
+            );
+        }
+    }
 
     #[test]
     fn subagent_description_skips_opaque_tokens_and_uses_task_name() {
@@ -3179,7 +3295,28 @@ mod tests {
         let mut message = SessionMessage::text(message_type, "2026-09-04T12:00:00Z", "payload");
         message.tool_name = Some(name.to_owned());
         message.call_id = Some(call_id.to_owned());
-        IndexedMessage { index, message }
+        IndexedMessage {
+            index,
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn render_copies_share_tool_payloads() {
+        let items = vec![
+            tool_message(0, MessageType::ToolUse, "Read", "a"),
+            tool_message(1, MessageType::ToolResult, "Read", "a"),
+        ];
+        let cloned = items.clone();
+        let pairs = pair_tool_messages(&cloned);
+        assert!(std::sync::Arc::ptr_eq(
+            &items[0].message,
+            &pairs[0].tool_use.as_ref().unwrap().message,
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &items[1].message,
+            &pairs[0].tool_result.as_ref().unwrap().message,
+        ));
     }
 
     #[test]
@@ -3222,11 +3359,23 @@ mod tests {
         let messages = vec![
             SessionMessage::text(MessageType::User, "2026-09-04T12:00:00Z", "question"),
             SessionMessage::text(MessageType::Assistant, "2026-09-04T12:00:01Z", "intro"),
-            tool_message(2, MessageType::ToolUse, "Skill", "skill-1").message,
-            tool_message(3, MessageType::ToolResult, "Skill", "skill-1").message,
+            tool_message(2, MessageType::ToolUse, "Skill", "skill-1")
+                .message
+                .as_ref()
+                .clone(),
+            tool_message(3, MessageType::ToolResult, "Skill", "skill-1")
+                .message
+                .as_ref()
+                .clone(),
             SessionMessage::text(MessageType::Assistant, "2026-09-04T12:00:02Z", "next"),
-            tool_message(5, MessageType::ToolUse, "Bash", "bash-1").message,
-            tool_message(6, MessageType::ToolResult, "Bash", "bash-1").message,
+            tool_message(5, MessageType::ToolUse, "Bash", "bash-1")
+                .message
+                .as_ref()
+                .clone(),
+            tool_message(6, MessageType::ToolResult, "Bash", "bash-1")
+                .message
+                .as_ref()
+                .clone(),
         ];
 
         let turns = build_turns(&messages, AppType::CodeBuddy);
@@ -3255,7 +3404,7 @@ mod tests {
 
     fn activity_message(index: usize, kind: MessageType, name: &str, id: &str) -> IndexedMessage {
         let mut item = tool_message(index, kind, name, id);
-        item.message.content = None;
+        std::sync::Arc::make_mut(&mut item.message).content = None;
         item
     }
 
@@ -3270,9 +3419,15 @@ mod tests {
                 source: yes_core::AttachmentSource::LocalPath("/tmp/diagram.png".into()),
             });
             let messages = vec![
-                activity_message(0, MessageType::ToolUse, "Read", "a").message,
+                activity_message(0, MessageType::ToolUse, "Read", "a")
+                    .message
+                    .as_ref()
+                    .clone(),
                 attachment.clone(),
-                activity_message(2, MessageType::ToolUse, "Read", "b").message,
+                activity_message(2, MessageType::ToolUse, "Read", "b")
+                    .message
+                    .as_ref()
+                    .clone(),
             ];
             let turns = super::display_turns(&messages, provider);
             assert!(
@@ -3283,7 +3438,10 @@ mod tests {
             let items = messages
                 .into_iter()
                 .enumerate()
-                .map(|(index, message)| IndexedMessage { index, message })
+                .map(|(index, message)| IndexedMessage {
+                    index,
+                    message: message.into(),
+                })
                 .collect::<Vec<_>>();
             assert!(super::activity_keys(&items, false).is_empty());
             attachment.message_type = MessageType::User;
@@ -3294,9 +3452,19 @@ mod tests {
     #[test]
     fn tool_activity_preserves_provider_pairing_and_message_locations() {
         for provider in AppType::ALL {
-            let mut messages = vec![activity_message(0, MessageType::ToolUse, "Read", "a").message];
+            let mut messages = vec![
+                activity_message(0, MessageType::ToolUse, "Read", "a")
+                    .message
+                    .as_ref()
+                    .clone(),
+            ];
             if provider != AppType::OpenCode {
-                messages.push(activity_message(1, MessageType::ToolResult, "Read", "a").message);
+                messages.push(
+                    activity_message(1, MessageType::ToolResult, "Read", "a")
+                        .message
+                        .as_ref()
+                        .clone(),
+                );
             } else {
                 messages[0].tool_output = Some(yes_core::model::ToolOutput {
                     output: Some("embedded result".into()),
@@ -3307,9 +3475,16 @@ mod tests {
             }
             messages.push(SessionMessage::text(MessageType::Assistant, "", ""));
             let second = messages.len();
-            messages.push(activity_message(second, MessageType::ToolUse, "Read", "b").message);
-            let mut result =
-                activity_message(second + 1, MessageType::ToolResult, "Read", "b").message;
+            messages.push(
+                activity_message(second, MessageType::ToolUse, "Read", "b")
+                    .message
+                    .as_ref()
+                    .clone(),
+            );
+            let mut result = activity_message(second + 1, MessageType::ToolResult, "Read", "b")
+                .message
+                .as_ref()
+                .clone();
             result.content = Some("CodeBuddy output preview".into());
             result.metadata.insert("subtype".into(), json!("error"));
             if provider == AppType::OpenCode {
@@ -3343,8 +3518,14 @@ mod tests {
         for provider in AppType::ALL {
             let calls = || {
                 vec![
-                    activity_message(0, MessageType::ToolUse, "Read", "a").message,
-                    activity_message(1, MessageType::ToolUse, "Read", "b").message,
+                    activity_message(0, MessageType::ToolUse, "Read", "a")
+                        .message
+                        .as_ref()
+                        .clone(),
+                    activity_message(1, MessageType::ToolUse, "Read", "b")
+                        .message
+                        .as_ref()
+                        .clone(),
                 ]
             };
             for boundary in [
@@ -3385,10 +3566,22 @@ mod tests {
     #[test]
     fn parallel_same_name_tools_pair_results_by_call_id() {
         let messages = vec![
-            tool_message(0, MessageType::ToolUse, "Bash", "bash-a").message,
-            tool_message(1, MessageType::ToolUse, "Bash", "bash-b").message,
-            tool_message(2, MessageType::ToolResult, "Bash", "bash-a").message,
-            tool_message(3, MessageType::ToolResult, "Bash", "bash-b").message,
+            tool_message(0, MessageType::ToolUse, "Bash", "bash-a")
+                .message
+                .as_ref()
+                .clone(),
+            tool_message(1, MessageType::ToolUse, "Bash", "bash-b")
+                .message
+                .as_ref()
+                .clone(),
+            tool_message(2, MessageType::ToolResult, "Bash", "bash-a")
+                .message
+                .as_ref()
+                .clone(),
+            tool_message(3, MessageType::ToolResult, "Bash", "bash-b")
+                .message
+                .as_ref()
+                .clone(),
         ];
 
         let turns = build_turns(&messages, AppType::CodeBuddy);
@@ -3416,7 +3609,7 @@ mod tests {
             assert!(pairs[1].tool_use.is_none());
             let messages = items
                 .into_iter()
-                .map(|item| item.message)
+                .map(|item| item.message.as_ref().clone())
                 .collect::<Vec<_>>();
             let turns = build_turns(&messages, AppType::Claude);
             assert_eq!(turns.len(), 2);
@@ -3426,11 +3619,11 @@ mod tests {
                 tool_message(0, MessageType::ToolUse, "Read", "a"),
                 tool_message(1, MessageType::ToolResult, "Read", "b"),
             ];
-            items[usize::from(!missing_use)].message.call_id = None;
+            std::sync::Arc::make_mut(&mut items[usize::from(!missing_use)].message).call_id = None;
             assert_eq!(pair_tool_messages(&items).len(), 1);
             let messages = items
                 .into_iter()
-                .map(|item| item.message)
+                .map(|item| item.message.as_ref().clone())
                 .collect::<Vec<_>>();
             assert_eq!(build_turns(&messages, AppType::Claude).len(), 1);
         }
@@ -3462,7 +3655,8 @@ mod tests {
                     MessageType::User,
                     "",
                     "Only this question",
-                ),
+                )
+                .into(),
             };
             let assistant = super::IndexedMessage {
                 index: 1,
@@ -3470,7 +3664,8 @@ mod tests {
                     MessageType::Assistant,
                     "",
                     "**Answer**\n```rust\nlet x = 1;\n```",
-                ),
+                )
+                .into(),
             };
             let mut items = vec![assistant];
             for i in 0..3 {
@@ -3480,18 +3675,19 @@ mod tests {
                     "Bash",
                     &format!("call-{i}"),
                 );
-                call.message.content = None;
-                call.message.tool_input = Some(serde_json::Map::from_iter([(
-                    "command".into(),
-                    serde_json::json!(format!("command {i}")),
-                )]));
+                std::sync::Arc::make_mut(&mut call.message).content = None;
+                std::sync::Arc::make_mut(&mut call.message).tool_input =
+                    Some(serde_json::Map::from_iter([(
+                        "command".into(),
+                        serde_json::json!(format!("command {i}")),
+                    )]));
                 let mut result = tool_message(
                     3 + i * 2,
                     MessageType::ToolResult,
                     "Bash",
                     &format!("call-{i}"),
                 );
-                result.message.content = Some(format!("Result {i}"));
+                std::sync::Arc::make_mut(&mut result.message).content = Some(format!("Result {i}"));
                 items.extend([call, result]);
             }
             gpui_kit::div()
@@ -3552,7 +3748,8 @@ mod tests {
                     "copy-message-0",
                     "conversation-bubble-0",
                     "Only this question",
-                ),
+                )
+                    .into(),
                 (
                     "copy-message-1",
                     "assistant-reply-0",
@@ -3610,9 +3807,11 @@ mod tests {
             cx: &mut gpui_kit::Context<Self>,
         ) -> impl gpui_kit::IntoElement {
             let mut intro = tool_message(0, MessageType::Assistant, "", "");
-            intro.message.content = Some("First explain the plan".into());
+            std::sync::Arc::make_mut(&mut intro.message).content =
+                Some("First explain the plan".into());
             let mut conclusion = tool_message(3, MessageType::Assistant, "", "");
-            conclusion.message.content = Some("Then explain the result".into());
+            std::sync::Arc::make_mut(&mut conclusion.message).content =
+                Some("Then explain the result".into());
             super::render_assistant_group(
                 0,
                 vec![
@@ -3668,13 +3867,15 @@ mod tests {
             use gpui_kit::base::StyledExt as _;
             use gpui_kit::{ParentElement as _, Styled as _};
             let mut call = tool_message(0, MessageType::ToolUse, "Task", "task");
-            call.message.sub_agent_session_id = Some("child".into());
-            call.message.tool_input = Some(serde_json::Map::from_iter([(
-                "description".into(),
-                serde_json::json!(
-                    "检查客户端与服务端的会话渲染实现 including_a_very_long_unbroken_identifier_that_should_not_cover_the_navigation_button"
-                ),
-            )]));
+            std::sync::Arc::make_mut(&mut call.message).sub_agent_session_id = Some("child".into());
+            std::sync::Arc::make_mut(&mut call.message).tool_input = Some(
+                serde_json::Map::from_iter([(
+                    "description".into(),
+                    serde_json::json!(
+                        "检查客户端与服务端的会话渲染实现 including_a_very_long_unbroken_identifier_that_should_not_cover_the_navigation_button"
+                    ),
+                )]),
+            );
             gpui_kit::div().size_full().v_flex().child(
                 super::render_subagent(
                     0,

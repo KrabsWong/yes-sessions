@@ -25,12 +25,37 @@ pub trait SessionProvider: Send + Sync {
         self.session_detail(&session.id)
     }
 
+    /// Load a listed session with full detail semantics, optionally reusing its known path.
+    fn session_detail_from_summary(&self, session: &Session) -> Result<Option<SessionDetail>> {
+        self.session_detail(&session.id)
+    }
+
     /// Load descendant usage only when opening details, leaving list/search reads lightweight.
     fn session_detail_with_usage(&self, session_id: &str) -> Result<Option<SessionDetail>> {
-        let Some(mut detail) = self.session_detail(session_id)? else {
+        self.session_detail_with_usage_from_sessions(session_id, &self.sessions()?)
+    }
+
+    /// Reuse the UI's current listing instead of scanning all projects again on open.
+    fn session_detail_with_usage_from_sessions(
+        &self,
+        session_id: &str,
+        sessions: &[Session],
+    ) -> Result<Option<SessionDetail>> {
+        let listed = sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .or_else(|| {
+                sessions
+                    .iter()
+                    .find(|session| session.uuid.as_deref() == Some(session_id))
+            });
+        let detail = match listed {
+            Some(session) => self.session_detail_from_summary(session)?,
+            None => self.session_detail(session_id)?,
+        };
+        let Some(mut detail) = detail else {
             return Ok(None);
         };
-        let sessions = self.sessions()?;
         let mut pending = vec![detail.session.id.clone()];
         let mut visited = std::collections::HashSet::new();
         let mut usages = Vec::new();
@@ -42,7 +67,19 @@ pub trait SessionProvider: Send + Sync {
             let current = if id == detail.session.id {
                 &detail
             } else {
-                child = self.session_detail(&id)?;
+                // Reuse listed paths instead of rediscovering every provider file for each child.
+                let listed = sessions
+                    .iter()
+                    .find(|session| session.id == id)
+                    .or_else(|| {
+                        sessions
+                            .iter()
+                            .find(|session| session.uuid.as_deref() == Some(&id))
+                    });
+                child = match listed {
+                    Some(session) => self.session_detail_from_summary(session)?,
+                    None => self.session_detail(&id)?,
+                };
                 let Some(current) = child.as_ref() else {
                     continue;
                 };
@@ -246,6 +283,44 @@ mod usage_tests {
                 .find(|detail| detail.session.id == id)
                 .cloned())
         }
+    }
+
+    #[test]
+    fn usage_reuses_listed_root_children_and_uuid_aliases_without_discovery() {
+        struct ListedFixture(Fixture);
+        impl SessionProvider for ListedFixture {
+            fn app_type(&self) -> AppType {
+                AppType::CodeBuddy
+            }
+            fn is_available(&self) -> bool {
+                true
+            }
+            fn sessions(&self) -> Result<Vec<Session>> {
+                panic!("opening a listed session must not scan the provider again")
+            }
+            fn session_detail(&self, id: &str) -> Result<Option<SessionDetail>> {
+                panic!("listed session {id} must not repeat discovery")
+            }
+            fn session_detail_from_summary(
+                &self,
+                session: &Session,
+            ) -> Result<Option<SessionDetail>> {
+                self.0.session_detail(&session.id)
+            }
+        }
+        let root = detail("root", None, 100, &["child-alias", "child"]);
+        let mut child = detail("child", None, 200, &["root"]);
+        child.session.uuid = Some("child-alias".into());
+        let provider = ListedFixture(Fixture {
+            details: vec![root, child],
+            reads: Mutex::new(Vec::new()),
+        });
+        let listed = provider.0.sessions().unwrap();
+        let result = provider
+            .session_detail_with_usage_from_sessions("root", &listed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(result.subtree_usage.unwrap().total_tokens, Some(320));
     }
 
     fn detail(id: &str, parent: Option<&str>, tokens: u64, links: &[&str]) -> SessionDetail {
