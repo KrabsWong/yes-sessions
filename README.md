@@ -46,6 +46,13 @@ cargo test --workspace
 - `target/macos/Yes Sessions.app`
 - `release/Yes-Sessions-<version>-arm64.dmg`
 
+应用图标源图为 `assets/logo.png`。更换后，在 macOS 安装 ImageMagick，运行
+`./scripts/generate-icons.sh`，生成带透明边距与圆角的 16–1024 像素 PNG 和
+包含 Retina 尺寸的 `build/icon.icns`，然后重新打包。打包使用已生成的 ICNS，
+无需额外安装 ImageMagick。脚本同时同步浅色与深色 logo 资源，统一使用定稿的
+白毛猩猩墨镜原图。源图为 1254×1254；图标主画布为 1024×1024，图案宽 824px，
+四周透明边距 100px，圆角半径 184px，缩小尺寸时同比例处理并保留透明通道。
+
 本地与 GitHub Release 默认均可使用 ad-hoc 签名，无需 Apple 开发者证书。自动发布需要沿用 `HOMEBREW_TAP_TOKEN` 和 `WORKFLOW_PAT`；下面的六项 Apple 配置为可选，完整配置后启用 Developer ID 签名、Apple 公证和 stapling：
 
 - `MACOS_CERTIFICATE`：Developer ID Application 证书的 Base64 编码 `.p12`
