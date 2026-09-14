@@ -464,6 +464,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "mermaid.zoomHint") => "拖动平移 · Command + 滚动缩放",
         (Language::Zh, "settings.title") => "设置",
         (Language::Zh, "settings.general") => "通用",
+        (Language::Zh, "settings.about") => "关于",
+        (Language::Zh, "settings.version") => "版本",
         (Language::Zh, "settings.experience") => "体验",
         (Language::Zh, "settings.experienceDescription") => "可选功能，增强您的浏览体验",
         (Language::Zh, "settings.close") => "关闭",
@@ -570,6 +572,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (_, "mermaid.zoomHint") => "Drag to pan · Command + scroll to zoom",
         (_, "settings.title") => "Settings",
         (_, "settings.general") => "General",
+        (_, "settings.about") => "About",
+        (_, "settings.version") => "Version",
         (_, "settings.experience") => "Experience",
         (_, "settings.experienceDescription") => {
             "Optional features to enhance your browsing experience"

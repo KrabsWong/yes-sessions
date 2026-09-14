@@ -33,6 +33,7 @@ fn main() -> Result<()> {
     let mut cx = VisualTestAppContext::with_asset_source(platform, Arc::new(AppAssets));
     cx.update(|cx| {
         gpui_kit::init(cx);
+        yes_sessions::commands::init(cx);
         Theme::change(ThemeMode::Light, None, cx);
     });
 
@@ -243,8 +244,7 @@ fn main() -> Result<()> {
     );
     settle(&mut cx, window)?;
 
-    // The settings button is the rightmost control in the fixed 1200 px header.
-    cx.simulate_click(window, point(px(1150.0), px(26.0)), Modifiers::default());
+    cx.simulate_keystrokes(window, "cmd-,");
     settle(&mut cx, window)?;
     save_capture(&mut cx, window, output_dir.join("settings-light.png"))?;
 
@@ -263,6 +263,16 @@ fn main() -> Result<()> {
         window,
         output_dir.join("settings-terminal-light.png"),
     )?;
+
+    cx.simulate_click(window, point(px(600.0), px(267.0)), Modifiers::default());
+    settle(&mut cx, window)?;
+    save_capture(&mut cx, window, output_dir.join("settings-about-light.png"))?;
+    cx.update_window(window, |_, window, cx| {
+        YesSessions::configure_theme(ThemePreference::Dark, AccentColor::Blue, window, cx);
+        window.refresh();
+    })?;
+    settle(&mut cx, window)?;
+    save_capture(&mut cx, window, output_dir.join("settings-about-dark.png"))?;
 
     fs::remove_dir_all(&fixture_home).context("remove visual fixture home")?;
     println!("visual captures written to {}", output_dir.display());

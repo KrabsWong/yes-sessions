@@ -12,8 +12,15 @@ struct ProviderAssets;
 
 pub struct AppAssets;
 
+pub const APP_LOGO: &str = "app-logo.png";
+
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+        if path == APP_LOGO {
+            return Ok(Some(Cow::Borrowed(include_bytes!(
+                "../../../build/icons/512x512.png"
+            ))));
+        }
         if let Some(asset) = ProviderAssets::get(path) {
             return Ok(Some(asset.data));
         }
@@ -24,6 +31,9 @@ impl AssetSource for AppAssets {
 
     fn list(&self, path: &str) -> Result<Vec<SharedString>> {
         let mut assets = gpui_kit::assets::Assets.list(path)?;
+        if APP_LOGO.starts_with(path) {
+            assets.push(APP_LOGO.into());
+        }
         assets.extend(
             ProviderAssets::iter()
                 .filter(|asset| asset.starts_with(path))
