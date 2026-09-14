@@ -38,6 +38,7 @@ enum SettingsTab {
     General,
     Experience,
     Terminal,
+    About,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3462,6 +3463,7 @@ impl YesSessions {
         cx: &mut Context<Self>,
     ) -> Button {
         Button::new(id)
+            .debug_selector(move || id.into())
             .text()
             .compact()
             .h(px(40.))
@@ -3625,6 +3627,14 @@ impl YesSessions {
                                 tab == SettingsTab::Terminal,
                                 SettingsTab::Terminal,
                                 cx,
+                            ))
+                            .child(self.tab_button(
+                                "tab-about",
+                                IconName::Info,
+                                tr(language, "settings.about"),
+                                tab == SettingsTab::About,
+                                SettingsTab::About,
+                                cx,
                             )),
                     )
                     .child(
@@ -3633,6 +3643,38 @@ impl YesSessions {
                             .py_4()
                             .v_flex()
                             .gap_6()
+                            .when(tab == SettingsTab::About, |view| {
+                                view.child(
+                                    div()
+                                        .id("settings-about")
+                                        .debug_selector(|| "settings-about".into())
+                                        .v_flex()
+                                        .items_center()
+                                        .py_4()
+                                        .gap_2()
+                                        .child(
+                                            img(crate::app_assets::APP_LOGO)
+                                                .size(px(192.))
+                                                .object_fit(ObjectFit::Contain),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(20.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .child("Yes Sessions"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!(
+                                                    "{} {}",
+                                                    tr(language, "settings.version"),
+                                                    env!("CARGO_PKG_VERSION")
+                                                )),
+                                        ),
+                                )
+                            })
                             .when(tab == SettingsTab::General, |view| {
                                 view.child(
                                     div()
@@ -3924,16 +3966,6 @@ impl YesSessions {
                                             )),
                                     )
                             }),
-                    )
-                    .child(
-                        div()
-                            .border_t_1()
-                            .border_color(cx.theme().border)
-                            .py_3()
-                            .text_size(px(10.))
-                            .text_center()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("v{}", env!("CARGO_PKG_VERSION"))),
                     ),
             )
             .into_any_element()
@@ -4414,6 +4446,19 @@ mod tests {
         visual.simulate_keystrokes("cmd-,");
         visual.run_until_parked();
         app.read_with(cx, |app, _| assert!(app.settings_open));
+        let about = visual.debug_bounds("tab-about").unwrap().center();
+        visual.simulate_click(about, Default::default());
+        visual.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.settings_tab, super::SettingsTab::About);
+        });
+        assert!(visual.debug_bounds("settings-about").is_some());
+        let general = visual.debug_bounds("tab-general").unwrap().center();
+        visual.simulate_click(general, Default::default());
+        visual.run_until_parked();
+        app.read_with(cx, |app, _| {
+            assert_eq!(app.settings_tab, super::SettingsTab::General);
+        });
         visual.simulate_keystrokes("cmd-,");
         visual.run_until_parked();
         app.read_with(cx, |app, _| assert!(app.settings_open));
