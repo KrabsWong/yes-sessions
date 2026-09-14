@@ -659,7 +659,87 @@ impl YesSessions {
             theme.secondary_foreground = foreground;
             theme.accent_foreground = foreground;
         }
-        theme.tokens.accent = theme.accent.into();
+        // Keep every neutral component state in the same cool slate palette.
+        // Theme::change resets both colors and tokens to the component defaults.
+        let dark = mode == ThemeMode::Dark;
+        let background = theme.background;
+        let foreground = theme.foreground;
+        let surface = theme.secondary;
+        let border = theme.border;
+        let selected = Hsla::from(rgb(if dark { 0x344763 } else { 0xdce5f2 }));
+        let hover = Hsla::from(rgb(if dark { 0x29364a } else { 0xe8edf5 }));
+        let primary = Hsla::from(rgb(if dark { 0xdce5f2 } else { 0x334155 }));
+        let primary_hover = Hsla::from(rgb(if dark { 0xc5d3e5 } else { 0x475569 }));
+        let primary_active = Hsla::from(rgb(if dark { 0xb8c9e4 } else { 0x1e293b }));
+        theme.primary = primary;
+        theme.primary_hover = primary_hover;
+        theme.primary_active = primary_active;
+        theme.primary_foreground = background;
+        theme.secondary_hover = hover;
+        theme.secondary_active = selected;
+        theme.button = surface;
+        theme.button_foreground = foreground;
+        theme.button_hover = hover;
+        theme.button_active = selected;
+        theme.button_primary = primary;
+        theme.button_primary_hover = primary_hover;
+        theme.button_primary_active = primary_active;
+        theme.button_primary_foreground = background;
+        theme.button_secondary = surface;
+        theme.button_secondary_hover = hover;
+        theme.button_secondary_active = selected;
+        theme.button_secondary_foreground = foreground;
+        theme.sidebar_accent = selected;
+        theme.sidebar_accent_foreground = foreground;
+        theme.sidebar_primary = primary;
+        theme.sidebar_primary_foreground = background;
+        theme.list_active = selected;
+        theme.list_active_border = theme.muted_foreground;
+        theme.list_even = surface;
+        theme.selection = selected;
+        theme.caret = primary;
+        theme.ring = theme.muted_foreground;
+        theme.drag_border = theme.ring;
+        theme.drop_target = selected.opacity(0.5);
+        theme.accordion = surface;
+        theme.group_box = surface;
+        theme.group_box_foreground = foreground;
+        theme.description_list_label = surface;
+        theme.description_list_label_foreground = theme.muted_foreground;
+        theme.skeleton = border;
+        theme.scrollbar = background.opacity(0.5);
+        theme.scrollbar_thumb = theme.muted_foreground.opacity(0.3);
+        theme.scrollbar_thumb_hover = theme.muted_foreground.opacity(0.5);
+        theme.progress_bar = primary;
+        theme.slider_bar = primary;
+        theme.slider_thumb = background;
+        theme.switch = border;
+        theme.switch_thumb = background;
+        theme.tab = surface;
+        theme.tab_foreground = theme.muted_foreground;
+        theme.tab_active = selected;
+        theme.tab_active_foreground = foreground;
+        theme.tab_bar = background;
+        theme.tab_bar_segmented = surface;
+        theme.table = background;
+        theme.table_active = selected;
+        theme.table_active_border = theme.list_active_border;
+        theme.table_even = surface;
+        theme.table_head = surface;
+        theme.table_head_foreground = foreground;
+        theme.table_foot = surface;
+        theme.table_foot_foreground = foreground;
+        theme.table_hover = hover;
+        theme.table_row_border = border;
+        theme.title_bar = background;
+        theme.title_bar_border = border;
+        theme.status_bar = background;
+        theme.status_bar_border = border;
+        theme.tiles = surface;
+        theme.window_border = border;
+        // Native components also read tokens directly; sync_base alone does not
+        // rebuild these legacy tokens from the updated colors.
+        theme.tokens = theme.colors.into();
         Theme::sync_base(cx);
     }
 
@@ -2162,8 +2242,7 @@ impl YesSessions {
                                     .cursor_pointer()
                                     .when(is_selected, |view| {
                                         view.bg(cx.theme().sidebar_accent)
-                                            .text_color(cx.theme().primary)
-                                            .shadow_sm()
+                                            .text_color(cx.theme().sidebar_accent_foreground)
                                     })
                                     .when(!is_selected, |view| {
                                         view.text_color(cx.theme().muted_foreground)
@@ -3294,6 +3373,8 @@ impl YesSessions {
                 })
             });
         div()
+            // The modal backdrop must block hit testing, not just cover the content.
+            .occlude()
             .absolute()
             .inset_0()
             .bg(gpui_kit::black().opacity(0.8))
@@ -3386,7 +3467,8 @@ impl YesSessions {
                     .child(
                         div()
                             .px_6()
-                            .py_4()
+                            .pt_4()
+                            .pb_8()
                             .v_flex()
                             .gap_6()
                             .when(tab == SettingsTab::About, |view| {
@@ -4141,6 +4223,66 @@ mod tests {
         session_directory_group_key, unread_after_refresh, update_conversation_scroll,
     };
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
+
+    #[gpui_kit::test]
+    fn settings_blocks_underlying_image_preview(cx: &mut gpui_kit::TestAppContext) {
+        use base64::Engine as _;
+        use gpui_kit::{AppContext as _, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1000.), px(800.)), |window, cx| {
+            let app = cx.new(|cx| super::YesSessions::new(window, cx));
+            gpui_kit::component::Root::new(app, window, cx)
+        });
+        let app = window.root(cx).unwrap().read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<super::YesSessions>()
+                .unwrap()
+        });
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings_open = false;
+            let image = base64::engine::general_purpose::STANDARD.encode(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="blue"/></svg>"#,
+            );
+            let mut message = SessionMessage::text(MessageType::User, "", "Image attachment");
+            message.attachments.push(yes_core::SessionAttachment {
+                name: "image.svg".into(),
+                mime_type: Some("image/svg+xml".into()),
+                embedded_fallback: None,
+                source: yes_core::AttachmentSource::DataUrl(format!(
+                    "data:image/svg+xml;base64,{image}"
+                )),
+            });
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
+                session: session("settings-image", None),
+                messages: vec![message],
+            }));
+            app.conversation_state.update(cx, |state, cx| state.reset(1, cx));
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        let thumbnail = visual.debug_bounds("attachment-thumbnail").unwrap();
+        app.update(cx, |app, cx| {
+            app.settings_open = true;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual.simulate_click(thumbnail.center(), Default::default());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("attachment-preview-modal").is_none());
+        app.update(cx, |app, cx| {
+            app.settings_open = false;
+            cx.notify();
+        });
+        visual.run_until_parked();
+        visual.simulate_click(thumbnail.center(), Default::default());
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("attachment-preview-modal").is_some());
+    }
 
     #[gpui_kit::test]
     fn settings_shortcut_opens_without_toggling_the_panel(cx: &mut gpui_kit::TestAppContext) {
