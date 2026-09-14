@@ -28,8 +28,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use yes_core::mermaid::{ContentSegment, split_mermaid_blocks};
 use yes_core::{
-    AccentColor, AppSettings, AppType, ChatLayout, Language, PreferredTerminal, ProviderRegistry,
-    Session, SessionDetail, SettingsStore, ThemePreference,
+    AppSettings, AppType, ChatLayout, Language, PreferredTerminal, ProviderRegistry, Session,
+    SessionDetail, SettingsStore, ThemePreference,
     terminal::{TerminalInfo, resume_session, terminal_info},
 };
 
@@ -476,8 +476,7 @@ impl YesSessions {
         let settings = settings_store.load();
         let selected_app = settings.default_app.unwrap_or(AppType::CodeBuddy);
         let terminal_info = terminal_info(settings.preferred_terminal);
-        Self::apply_theme(settings.theme, window, cx);
-        Self::apply_accent(settings.accent_color, cx);
+        Self::configure_theme(settings.theme, window, cx);
         let mut this = Self {
             root_focus: cx.focus_handle(),
             search_landing: None,
@@ -541,12 +540,7 @@ impl YesSessions {
             if this.settings.theme == ThemePreference::System
                 && ThemeMode::from(window.appearance()) != cx.theme().mode
             {
-                Self::configure_theme(
-                    ThemePreference::System,
-                    this.settings.accent_color,
-                    window,
-                    cx,
-                );
+                Self::configure_theme(ThemePreference::System, window, cx);
                 this.mermaid_views.clear();
                 this.mermaid_prepared_for = Default::default();
                 cx.notify();
@@ -598,7 +592,7 @@ impl YesSessions {
         .detach();
     }
 
-    fn apply_theme(preference: ThemePreference, window: &mut Window, cx: &mut App) {
+    pub fn configure_theme(preference: ThemePreference, window: &mut Window, cx: &mut App) {
         let mode = match preference {
             ThemePreference::Light => ThemeMode::Light,
             ThemePreference::Dark => ThemeMode::Dark,
@@ -665,219 +659,8 @@ impl YesSessions {
             theme.secondary_foreground = foreground;
             theme.accent_foreground = foreground;
         }
-        Theme::sync_base(cx);
-    }
-
-    fn apply_accent(accent: AccentColor, cx: &mut App) {
-        let dark = Theme::global(cx).mode == ThemeMode::Dark;
-        let (hue, saturation, lightness) = match accent {
-            AccentColor::Default if dark => (210., 0.40, 0.98),
-            AccentColor::Default => (222.2, 0.474, 0.112),
-            AccentColor::Pink => (330., if dark { 0.80 } else { 0.81 }, 0.60),
-            AccentColor::Rose => (346., if dark { 0.80 } else { 0.84 }, 0.60),
-            AccentColor::Red => (0., if dark { 0.80 } else { 0.84 }, 0.60),
-            AccentColor::Orange => (
-                24.,
-                if dark { 0.90 } else { 0.95 },
-                if dark { 0.55 } else { 0.53 },
-            ),
-            AccentColor::Amber => (
-                38.,
-                if dark { 0.90 } else { 0.92 },
-                if dark { 0.55 } else { 0.50 },
-            ),
-            AccentColor::Yellow => (
-                48.,
-                if dark { 0.90 } else { 0.96 },
-                if dark { 0.55 } else { 0.53 },
-            ),
-            AccentColor::Lime => (
-                84.,
-                if dark { 0.80 } else { 0.81 },
-                if dark { 0.50 } else { 0.44 },
-            ),
-            AccentColor::Green => (
-                142.,
-                if dark { 0.70 } else { 0.71 },
-                if dark { 0.50 } else { 0.45 },
-            ),
-            AccentColor::Emerald => (
-                160.,
-                if dark { 0.80 } else { 0.84 },
-                if dark { 0.45 } else { 0.39 },
-            ),
-            AccentColor::Teal => (
-                168.,
-                if dark { 0.70 } else { 0.76 },
-                if dark { 0.45 } else { 0.42 },
-            ),
-            AccentColor::Cyan => (
-                189.,
-                if dark { 0.90 } else { 0.94 },
-                if dark { 0.48 } else { 0.43 },
-            ),
-            AccentColor::Sky => (
-                199.,
-                if dark { 0.85 } else { 0.89 },
-                if dark { 0.55 } else { 0.48 },
-            ),
-            AccentColor::Blue => (217., if dark { 0.85 } else { 0.91 }, 0.60),
-            AccentColor::Indigo => (
-                239.,
-                if dark { 0.80 } else { 0.84 },
-                if dark { 0.65 } else { 0.67 },
-            ),
-            AccentColor::Violet => (
-                258.,
-                if dark { 0.85 } else { 0.90 },
-                if dark { 0.65 } else { 0.66 },
-            ),
-            AccentColor::Purple => (
-                270.,
-                if dark { 0.65 } else { 0.67 },
-                if dark { 0.60 } else { 0.57 },
-            ),
-            AccentColor::Fuchsia => (
-                292.,
-                0.80_f32.max(if dark { 0.80 } else { 0.84 }),
-                if dark { 0.60 } else { 0.61 },
-            ),
-            AccentColor::Slate => (
-                215.,
-                if dark { 0.20 } else { 0.25 },
-                if dark { 0.55 } else { 0.47 },
-            ),
-            AccentColor::Zinc => (240., 0.05, if dark { 0.55 } else { 0.46 }),
-            AccentColor::Neutral => (0., 0., if dark { 0.55 } else { 0.45 }),
-        };
-        let color = hsla(hue / 360., saturation, lightness, 1.);
-        let foreground = if dark && accent == AccentColor::Default {
-            hsla(222.2 / 360., 0.474, 0.112, 1.)
-        } else if dark && matches!(accent, AccentColor::Yellow | AccentColor::Lime) {
-            gpui_kit::black()
-        } else if accent == AccentColor::Default {
-            hsla(210. / 360., 0.40, 0.98, 1.)
-        } else {
-            gpui_kit::white()
-        };
-        let hover = hsla(
-            hue / 360.,
-            saturation,
-            if dark {
-                (lightness + 0.08).min(0.90)
-            } else {
-                (lightness - 0.08).max(0.10)
-            },
-            1.,
-        );
-        let active = hsla(
-            hue / 360.,
-            saturation,
-            if dark {
-                (lightness - 0.12).max(0.)
-            } else {
-                (lightness - 0.06).max(0.)
-            },
-            1.,
-        );
-        let light = hsla(
-            hue / 360.,
-            saturation.min(0.70),
-            if dark { 0.20 } else { 0.94 },
-            1.,
-        );
-        let muted = hsla(
-            hue / 360.,
-            saturation.min(0.40),
-            if dark { 0.15 } else { 0.96 },
-            1.,
-        );
-        let border = hsla(
-            hue / 360.,
-            saturation.min(0.50),
-            if dark { 0.30 } else { 0.88 },
-            1.,
-        );
-        let ring = hsla(
-            hue / 360.,
-            saturation.min(0.60),
-            if dark { 0.50 } else { 0.70 },
-            1.,
-        );
-        let theme = Theme::global_mut(cx);
-        // Apply secondary/accent presets along with the derived primary surfaces.
-        if accent != AccentColor::Default {
-            let surface_saturation = match accent {
-                AccentColor::Slate => 0.20,
-                AccentColor::Zinc => 0.05,
-                AccentColor::Neutral => 0.,
-                AccentColor::Purple => {
-                    if dark {
-                        0.50
-                    } else {
-                        0.60
-                    }
-                }
-                _ if dark => 0.60,
-                AccentColor::Orange | AccentColor::Amber | AccentColor::Yellow => 0.90,
-                AccentColor::Green | AccentColor::Teal => 0.70,
-                _ => 0.80,
-            };
-            theme.secondary = hsla(
-                hue / 360.,
-                surface_saturation,
-                if dark { 0.25 } else { 0.94 },
-                1.,
-            );
-            theme.accent = hsla(
-                hue / 360.,
-                surface_saturation,
-                if dark { 0.20 } else { 0.96 },
-                1.,
-            );
-        }
-        theme.secondary_foreground = if dark { gpui_kit::white() } else { color };
-        theme.accent_foreground = theme.secondary_foreground;
-        theme.primary = color;
-        theme.primary_foreground = foreground;
-        theme.primary_hover = hover;
-        theme.primary_active = active;
-        theme.ring = ring;
-        theme.selection = color.opacity(if dark { 0.32 } else { 0.22 });
-        theme.list_active = light;
-        theme.list_active_border = border;
-        theme.sidebar_primary = color;
-        theme.sidebar_primary_foreground = foreground;
-        theme.sidebar_accent = light;
-        theme.sidebar_accent_foreground = theme.foreground;
-        theme.link = color;
-        theme.link_hover = hover;
-        theme.link_active = active;
-        theme.button = muted;
-        theme.button_foreground = theme.foreground;
-        theme.button_hover = light;
-        theme.button_active = border;
-        theme.button_primary = color;
-        theme.button_primary_foreground = foreground;
-        theme.button_primary_hover = hover;
-        theme.button_primary_active = active;
-        theme.button_secondary = muted;
-        theme.button_secondary_foreground = theme.foreground;
-        theme.button_secondary_hover = light;
-        theme.button_secondary_active = border;
-        // Popup menu hover uses semantic tokens rather than legacy theme colors.
         theme.tokens.accent = theme.accent.into();
         Theme::sync_base(cx);
-    }
-
-    pub fn configure_theme(
-        preference: ThemePreference,
-        accent: AccentColor,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        Self::apply_theme(preference, window, cx);
-        Self::apply_accent(accent, cx);
     }
 
     fn save_settings(&mut self) {
@@ -1353,14 +1136,6 @@ impl YesSessions {
         cx.notify();
     }
 
-    fn set_accent(&mut self, accent: AccentColor, window: &mut Window, cx: &mut Context<Self>) {
-        self.settings.accent_color = accent;
-        Self::apply_theme(self.settings.theme, window, cx);
-        Self::apply_accent(accent, cx);
-        self.save_settings();
-        cx.notify();
-    }
-
     fn set_default_app(&mut self, app_type: AppType, cx: &mut Context<Self>) {
         self.settings.default_app = Some(app_type);
         self.save_settings();
@@ -1398,8 +1173,7 @@ impl YesSessions {
 
     fn set_theme(&mut self, theme: ThemePreference, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.theme = theme;
-        Self::apply_theme(theme, window, cx);
-        Self::apply_accent(self.settings.accent_color, cx);
+        Self::configure_theme(theme, window, cx);
         self.mermaid_views.clear();
         self.mermaid_prepared_for = Default::default();
         self.save_settings();
@@ -3490,34 +3264,6 @@ impl YesSessions {
     fn render_settings(&self, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         let tab = self.settings_tab;
-        let accent_owner = cx.weak_entity();
-        let accent_control = Button::new("accent-picker")
-            .outline()
-            .compact()
-            .h(px(32.))
-            .icon(IconName::Palette)
-            .label(match self.settings.accent_color {
-                AccentColor::Default => tr(language, "settings.accentDefault"),
-                AccentColor::Blue => tr(language, "settings.accentBlue"),
-                AccentColor::Green => tr(language, "settings.accentGreen"),
-                AccentColor::Orange => tr(language, "settings.accentOrange"),
-                AccentColor::Red => tr(language, "settings.accentRed"),
-                AccentColor::Purple => tr(language, "settings.accentPurple"),
-                AccentColor::Pink => tr(language, "settings.accentPink"),
-                accent => accent.display_name(),
-            })
-            .dropdown_caret(true)
-            .dropdown_menu(move |menu, _, _| {
-                AccentColor::ALL.into_iter().fold(menu, |menu, accent| {
-                    let owner = accent_owner.clone();
-                    menu.item(PopupMenuItem::new(accent.display_name()).on_click(
-                        move |_, window, cx| {
-                            let _ =
-                                owner.update(cx, |this, cx| this.set_accent(accent, window, cx));
-                        },
-                    ))
-                })
-            });
         let default_owner = cx.weak_entity();
         let default_control = Button::new("default-provider")
             .outline()
@@ -3800,36 +3546,6 @@ impl YesSessions {
                                                     cx,
                                                 )),
                                         ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .border_b_1()
-                                        .border_color(cx.theme().border.opacity(0.6))
-                                        .pb_6()
-                                        .child(
-                                            div()
-                                                .v_flex()
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .text_sm()
-                                                        .font_weight(FontWeight::MEDIUM)
-                                                        .child(tr(language, "settings.accent")),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(tr(
-                                                            language,
-                                                            "settings.accentDescription",
-                                                        )),
-                                                ),
-                                        )
-                                        .child(accent_control),
                                 )
                                 .child(
                                     div()

@@ -23,85 +23,6 @@ pub enum ThemePreference {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
-pub enum AccentColor {
-    #[default]
-    Default,
-    Pink,
-    Rose,
-    Red,
-    Orange,
-    Amber,
-    Yellow,
-    Lime,
-    Green,
-    Emerald,
-    Teal,
-    Cyan,
-    Sky,
-    Blue,
-    Indigo,
-    Violet,
-    Purple,
-    Fuchsia,
-    Slate,
-    Zinc,
-    Neutral,
-}
-
-impl AccentColor {
-    pub const ALL: [Self; 21] = [
-        Self::Default,
-        Self::Pink,
-        Self::Rose,
-        Self::Red,
-        Self::Orange,
-        Self::Amber,
-        Self::Yellow,
-        Self::Lime,
-        Self::Green,
-        Self::Emerald,
-        Self::Teal,
-        Self::Cyan,
-        Self::Sky,
-        Self::Blue,
-        Self::Indigo,
-        Self::Violet,
-        Self::Purple,
-        Self::Fuchsia,
-        Self::Slate,
-        Self::Zinc,
-        Self::Neutral,
-    ];
-
-    pub const fn display_name(self) -> &'static str {
-        match self {
-            Self::Default => "Default",
-            Self::Pink => "Pink",
-            Self::Rose => "Rose",
-            Self::Red => "Red",
-            Self::Orange => "Orange",
-            Self::Amber => "Amber",
-            Self::Yellow => "Yellow",
-            Self::Lime => "Lime",
-            Self::Green => "Green",
-            Self::Emerald => "Emerald",
-            Self::Teal => "Teal",
-            Self::Cyan => "Cyan",
-            Self::Sky => "Sky",
-            Self::Blue => "Blue",
-            Self::Indigo => "Indigo",
-            Self::Violet => "Violet",
-            Self::Purple => "Purple",
-            Self::Fuchsia => "Fuchsia",
-            Self::Slate => "Slate",
-            Self::Zinc => "Zinc",
-            Self::Neutral => "Neutral",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
 pub enum ChatLayout {
     #[default]
     Left,
@@ -123,7 +44,6 @@ pub enum PreferredTerminal {
 pub struct AppSettings {
     pub language: Language,
     pub theme: ThemePreference,
-    pub accent_color: AccentColor,
     pub auto_start: bool,
     pub lightweight_mode: bool,
     pub default_app: Option<AppType>,
@@ -140,7 +60,6 @@ impl Default for AppSettings {
         Self {
             language: Language::En,
             theme: ThemePreference::System,
-            accent_color: AccentColor::Default,
             auto_start: false,
             lightweight_mode: false,
             default_app: None,
@@ -198,6 +117,23 @@ mod tests {
         assert_eq!(settings.language, Language::Zh);
         assert!(settings.collapse_bash_blocks);
         assert_eq!(settings.theme, ThemePreference::System);
+    }
+
+    #[test]
+    fn legacy_accent_is_ignored_without_resetting_other_settings() {
+        let settings: AppSettings = serde_json::from_str(
+            r#"{"accentColor":"purple","language":"zh","theme":"dark","collapseBashBlocks":false}"#,
+        )
+        .unwrap();
+        assert_eq!(settings.language, Language::Zh);
+        assert_eq!(settings.theme, ThemePreference::Dark);
+        assert!(!settings.collapse_bash_blocks);
+        assert!(
+            serde_json::to_value(&settings)
+                .unwrap()
+                .get("accentColor")
+                .is_none()
+        );
     }
 
     #[test]

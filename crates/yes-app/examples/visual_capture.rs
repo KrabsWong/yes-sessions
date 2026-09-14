@@ -8,7 +8,7 @@ use anyhow::{Context as _, Result, ensure};
 use gpui_kit::component::{Root, Theme, ThemeMode};
 use gpui_kit::*;
 use yes_core::{
-    AccentColor, SessionProvider, ThemePreference, model::SessionKind, providers::CodeBuddyProvider,
+    SessionProvider, ThemePreference, model::SessionKind, providers::CodeBuddyProvider,
 };
 use yes_sessions::{app::YesSessions, app_assets::AppAssets};
 
@@ -61,14 +61,14 @@ fn main() -> Result<()> {
     click(&mut cx, window, 1000.0, 260.0)?;
 
     cx.update_window(window, |_, window, cx| {
-        YesSessions::configure_theme(ThemePreference::Dark, AccentColor::Blue, window, cx);
+        YesSessions::configure_theme(ThemePreference::Dark, window, cx);
         window.refresh();
     })?;
     settle(&mut cx, window)?;
     save_capture(&mut cx, window, output_dir.join("main-dark.png"))?;
 
     cx.update_window(window, |_, window, cx| {
-        YesSessions::configure_theme(ThemePreference::Light, AccentColor::Blue, window, cx);
+        YesSessions::configure_theme(ThemePreference::Light, window, cx);
         window.refresh();
     })?;
     settle(&mut cx, window)?;
@@ -248,7 +248,7 @@ fn main() -> Result<()> {
     settle(&mut cx, window)?;
     save_capture(&mut cx, window, output_dir.join("settings-light.png"))?;
 
-    cx.simulate_click(window, point(px(460.0), px(228.0)), Modifiers::default());
+    cx.simulate_click(window, point(px(430.0), px(309.0)), Modifiers::default());
     settle(&mut cx, window)?;
     save_capture(
         &mut cx,
@@ -256,7 +256,7 @@ fn main() -> Result<()> {
         output_dir.join("settings-experience-light.png"),
     )?;
 
-    cx.simulate_click(window, point(px(560.0), px(205.0)), Modifiers::default());
+    cx.simulate_click(window, point(px(515.0), px(257.0)), Modifiers::default());
     settle(&mut cx, window)?;
     save_capture(
         &mut cx,
@@ -268,7 +268,7 @@ fn main() -> Result<()> {
     settle(&mut cx, window)?;
     save_capture(&mut cx, window, output_dir.join("settings-about-light.png"))?;
     cx.update_window(window, |_, window, cx| {
-        YesSessions::configure_theme(ThemePreference::Dark, AccentColor::Blue, window, cx);
+        YesSessions::configure_theme(ThemePreference::Dark, window, cx);
         window.refresh();
     })?;
     settle(&mut cx, window)?;
@@ -425,7 +425,6 @@ fn prepare_fixture(home: &Path) -> Result<()> {
         r#"{
   "language": "zh",
   "theme": "light",
-  "accentColor": "blue",
   "defaultApp": "codebuddy",
   "collapseBashBlocks": true,
   "enableTitleMarquee": false,

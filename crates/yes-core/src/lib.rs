@@ -16,6 +16,5 @@ pub use model::{
 };
 pub use providers::{ProviderRegistry, SessionProvider};
 pub use settings::{
-    AccentColor, AppSettings, ChatLayout, Language, PreferredTerminal, SettingsStore,
-    ThemePreference,
+    AppSettings, ChatLayout, Language, PreferredTerminal, SettingsStore, ThemePreference,
 };
