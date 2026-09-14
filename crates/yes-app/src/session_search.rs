@@ -218,7 +218,6 @@ impl YesSessions {
                     .map(|index| {
                         let hit = &this.session_search.hits[index];
                         let selected = this.session_search.active == index;
-                        let dark = cx.theme().mode == ThemeMode::Dark;
                         let highlights = match_range(&hit.excerpt, &query).map(|range| {
                             (
                                 range,
@@ -254,10 +253,14 @@ impl YesSessions {
                             .cursor_pointer()
                             .border_b_1()
                             .border_color(cx.theme().border)
-                            .when(selected, |view| {
-                                view.bg(if dark { rgb(0x39331e) } else { rgb(0xfff7d6) })
+                            .when(selected, |view| view.bg(cx.theme().list_active))
+                            .hover(|style| {
+                                style.bg(if selected {
+                                    cx.theme().list_active
+                                } else {
+                                    cx.theme().list_hover
+                                })
                             })
-                            .hover(|style| style.bg(cx.theme().muted))
                             .child(
                                 div()
                                     .flex()
