@@ -3,6 +3,7 @@ use std::{
     fs,
     io::Read,
     path::{Component, Path, PathBuf},
+    sync::LazyLock,
     time::UNIX_EPOCH,
 };
 
@@ -161,21 +162,25 @@ impl CodeBuddyProvider {
     }
 
     fn clean_user_text(text: &str) -> String {
-        let patterns = [
+        static PATTERNS: LazyLock<[Regex; 5]> = LazyLock::new(|| {
+            [
             r#"(?is)<system-reminder\b[^>]*data-role\s*=\s*["']?command-caveat["']?[^>]*>.*?</system-reminder\s*>"#,
             r"(?is)<system-reminder>.*?</system-reminder\s*>",
             r"(?is)<local-command-stdout\b[^>]*>.*?</local-command-stdout\s*>",
             r"(?is)<local-command-stderr\b[^>]*>.*?</local-command-stderr\s*>",
             r"(?is)<command-name\b[^>]*>.*?</command-name\s*>",
-        ];
-        let cleaned = patterns.iter().fold(text.to_owned(), |value, pattern| {
-            Regex::new(pattern)
-                .map(|regex| regex.replace_all(&value, "").into_owned())
-                .unwrap_or(value)
+            ]
+            .map(|pattern| Regex::new(pattern).expect("valid user text pattern"))
         });
-        Regex::new(r"\n{3,}")
-            .map(|regex| regex.replace_all(&cleaned, "\n\n").trim().to_owned())
-            .unwrap_or(cleaned)
+        static BLANK_LINES: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\n{3,}").expect("valid blank line pattern"));
+        let cleaned = PATTERNS.iter().fold(text.to_owned(), |value, pattern| {
+            match pattern.replace_all(&value, "") {
+                std::borrow::Cow::Borrowed(_) => value,
+                std::borrow::Cow::Owned(cleaned) => cleaned,
+            }
+        });
+        BLANK_LINES.replace_all(&cleaned, "\n\n").trim().to_owned()
     }
 
     fn tool_input(value: Option<&Value>) -> Map<String, Value> {
@@ -234,8 +239,22 @@ impl CodeBuddyProvider {
         {
             return Some(id);
         }
-        Regex::new(r"(?i)\bagent-[a-z0-9_-]+\b").ok()?.find_iter(&text).last().map(|value| value.as_str().to_owned())
-            .or_else(|| Regex::new(r#"(?i)(?:childSessionId|subAgentSessionId|sessionId|session)["']?\s*[:=]\s*["']?([a-f0-9-]{36})"#).ok()?.captures(&text)?.get(1).map(|value| value.as_str().to_owned()))
+        static AGENT_ID: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)\bagent-[a-z0-9_-]+\b").expect("valid agent ID pattern")
+        });
+        static SESSION_ID: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r#"(?i)(?:childSessionId|subAgentSessionId|sessionId|session)["']?\s*[:=]\s*["']?([a-f0-9-]{36})"#).expect("valid session ID pattern")
+        });
+        AGENT_ID
+            .find_iter(&text)
+            .last()
+            .map(|value| value.as_str().to_owned())
+            .or_else(|| {
+                SESSION_ID
+                    .captures(&text)?
+                    .get(1)
+                    .map(|value| value.as_str().to_owned())
+            })
     }
 
     fn structured_child_id(record: &Value) -> Option<String> {
@@ -349,7 +368,13 @@ impl CodeBuddyProvider {
                 }
 
                 let mut message = SessionMessage::text(
-                    if role == "system" {
+                    // CodeBuddy injects CLI notifications with the user role.
+                    if role == "system"
+                        || record
+                            .pointer("/providerData/isMeta")
+                            .and_then(Value::as_bool)
+                            == Some(true)
+                    {
                         MessageType::System
                     } else {
                         MessageType::User
@@ -897,6 +922,10 @@ impl SessionProvider for CodeBuddyProvider {
         }))
     }
 
+    fn session_detail_from_summary(&self, session: &Session) -> Result<Option<SessionDetail>> {
+        self.session_detail_for_search(session)
+    }
+
     fn session_detail(&self, session_id: &str) -> Result<Option<SessionDetail>> {
         let files = self.discover();
         Ok(files
@@ -910,6 +939,33 @@ impl SessionProvider for CodeBuddyProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_notifications_are_system_messages_not_user_requests() {
+        let provider = CodeBuddyProvider::default();
+        let notification = "<task-notification><task-id>background-task</task-id><status>completed</status></task-notification>\nUse the TaskOutput tool to retrieve the full output.";
+        let messages = provider.normalize(
+            &[
+                json!({"type":"message", "role":"user",
+                    "providerData":{"isMeta":true,"startsNewUserRequest":false},
+                    "content":[{"type":"input_text","text":notification}]}),
+                json!({"type":"message", "role":"user", "content":"A real request"}),
+                json!({"type":"message", "role":"user", "content":notification,
+                    "providerData":{"isMeta":false,"startsNewUserRequest":false}}),
+                json!({"type":"message", "role":"system", "content":"System context"}),
+            ],
+            0,
+        );
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].message_type, MessageType::System);
+        assert_eq!(messages[0].content.as_deref(), Some(notification));
+        assert_eq!(messages[1].message_type, MessageType::User);
+        // Quoting a notification or continuing a request does not make it metadata.
+        assert_eq!(messages[2].message_type, MessageType::User);
+        assert_eq!(messages[2].content.as_deref(), Some(notification));
+        assert_eq!(messages[3].message_type, MessageType::System);
+        assert_eq!(CodeBuddyProvider::previews(&messages).0, "A real request");
+    }
 
     #[test]
     fn dashboard_pending_usage_retains_each_requests_attribution() {

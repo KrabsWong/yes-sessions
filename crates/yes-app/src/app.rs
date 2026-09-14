@@ -343,8 +343,15 @@ fn format_count(value: usize) -> String {
     formatted
 }
 
+const SESSION_GROUP_INITIAL_COUNT: usize = 5;
+const SESSION_GROUP_PAGE_SIZE: usize = 10;
+
 #[derive(Clone)]
 enum SessionListRow {
+    ShowMore {
+        key: String,
+        visible_count: usize,
+    },
     Header {
         key: String,
         label: String,
@@ -384,7 +391,8 @@ fn append_session_tree(
 use crate::{
     app_assets::ProviderIcon,
     conversation::{
-        ConversationOptions, conversation_scroller, conversation_turn_count, turn_index_for_message,
+        ConversationCache, ConversationLayout, ConversationOptions, conversation_scroller,
+        conversation_turn_count, turn_index_for_message,
     },
     i18n::tr,
     mermaid::{MermaidDiagram, create_mermaid_diagram},
@@ -422,6 +430,7 @@ pub struct YesSessions {
     sessions: Arc<Vec<Session>>,
     selected_session_id: Option<String>,
     detail: Option<Arc<SessionDetail>>,
+    conversation_cache: ConversationCache,
     conversation_state: Entity<MessageScrollerState>,
     parent_conversations: Vec<ParentConversation>,
     unread_message_count: usize,
@@ -437,6 +446,7 @@ pub struct YesSessions {
     settings_tab: SettingsTab,
     session_view_mode: SessionViewMode,
     collapsed_groups: HashSet<String>,
+    group_visible_counts: HashMap<String, usize>,
     expanded_parents: HashSet<String>,
     parent_transition: Option<(String, Instant, bool)>,
     expanded_messages: HashSet<usize>,
@@ -451,6 +461,7 @@ pub struct YesSessions {
     navigator_start: Option<usize>,
     navigator_wheel: f32,
     mermaid_views: HashMap<(usize, usize), Entity<MermaidDiagram>>,
+    mermaid_prepared_for: std::sync::Weak<SessionDetail>,
     terminal_info: TerminalInfo,
     sessions_generation: u64,
     detail_generation: u64,
@@ -485,6 +496,7 @@ impl YesSessions {
             sessions: Arc::new(Vec::new()),
             selected_session_id: None,
             detail: None,
+            conversation_cache: ConversationCache::default(),
             conversation_state: cx.new(|cx| MessageScrollerState::new(0, cx)),
             parent_conversations: Vec::new(),
             unread_message_count: 0,
@@ -500,6 +512,7 @@ impl YesSessions {
             settings_tab: SettingsTab::General,
             session_view_mode: SessionViewMode::Date,
             collapsed_groups: HashSet::new(),
+            group_visible_counts: HashMap::new(),
             expanded_parents: HashSet::new(),
             parent_transition: None,
             expanded_messages: HashSet::new(),
@@ -514,6 +527,7 @@ impl YesSessions {
             navigator_start: None,
             navigator_wheel: 0.,
             mermaid_views: HashMap::new(),
+            mermaid_prepared_for: Default::default(),
             terminal_info,
             sessions_generation: 0,
             detail_generation: 0,
@@ -533,6 +547,7 @@ impl YesSessions {
                     cx,
                 );
                 this.mermaid_views.clear();
+                this.mermaid_prepared_for = Default::default();
                 cx.notify();
             }
         })
@@ -887,11 +902,13 @@ impl YesSessions {
         self.error = None;
         self.sessions = Arc::new(Vec::new());
         self.detail = None;
+        self.conversation_cache = ConversationCache::default();
         self.workspace_preview = None;
         self.preview_subscription = None;
         self.preview_open = false;
         self.preview_icon_transition = None;
         self.mermaid_views.clear();
+        self.mermaid_prepared_for = Default::default();
         self.selected_session_id = None;
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
@@ -986,6 +1003,7 @@ impl YesSessions {
         if self.selected_app == app_type {
             return;
         }
+        self.group_visible_counts.clear();
         self.selected_app = app_type;
         self.load_sessions(cx);
     }
@@ -1004,6 +1022,7 @@ impl YesSessions {
         self.refreshing_detail = false;
         self.detail_source_signature = None;
         self.detail = None;
+        self.conversation_cache = ConversationCache::default();
         self.workspace_preview = None;
         self.preview_subscription = None;
         self.preview_open = false;
@@ -1017,6 +1036,7 @@ impl YesSessions {
         self.navigator_motion = None;
         self.navigator_wheel = 0.;
         self.mermaid_views.clear();
+        self.mermaid_prepared_for = Default::default();
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
     }
@@ -1044,10 +1064,16 @@ impl YesSessions {
         for parent_id in &ancestors {
             self.expanded_parents.insert(parent_id.clone());
         }
-        if let Some(root_id) = ancestors.last()
-            && let Some(root) = self.sessions.iter().find(|session| session.id == *root_id)
-        {
-            self.collapsed_groups.remove(&self.session_group_key(root));
+        let root_id = ancestors.last().unwrap_or(&session_id);
+        if let Some(root) = self.sessions.iter().find(|session| session.id == *root_id) {
+            let key = self.session_group_key(root);
+            self.collapsed_groups.remove(&key);
+            // A new navigation to a hidden session may reveal it after a pagination reset.
+            if !self.session_rows().iter().any(|row| {
+                matches!(row, SessionListRow::Session { session, .. } if session.id == *root_id)
+            }) {
+                self.group_visible_counts.remove(&key);
+            }
         }
         self.reset_detail(cx);
         self.selected_session_id = Some(session_id.clone());
@@ -1063,11 +1089,12 @@ impl YesSessions {
                 session.id == session_id || session.uuid.as_deref() == Some(&session_id)
             })
             .and_then(|session| subtree_source_signature(session, &self.sessions));
+        let sessions = self.sessions.clone();
         let task = cx.background_executor().spawn(async move {
             (
                 source_signature,
                 provider
-                    .session_detail_with_usage(&session_id)
+                    .session_detail_with_usage_from_sessions(&session_id, &sessions)
                     .map_err(|error| error.to_string()),
             )
         });
@@ -1151,11 +1178,12 @@ impl YesSessions {
         };
         self.refreshing_detail = true;
         let generation = self.detail_generation;
+        let sessions = self.sessions.clone();
         let task = cx.background_executor().spawn(async move {
             (
                 current_signature,
                 provider
-                    .session_detail_with_usage(&session_id)
+                    .session_detail_with_usage_from_sessions(&session_id, &sessions)
                     .map_err(|error| error.to_string()),
             )
         });
@@ -1180,6 +1208,7 @@ impl YesSessions {
                             mermaid_sources_changed(&previous.messages, &detail.messages)
                         }) {
                             this.mermaid_views.clear();
+                            this.mermaid_prepared_for = Default::default();
                         }
                         this.unread_message_count = unread_after_refresh(
                             this.unread_message_count,
@@ -1361,6 +1390,7 @@ impl YesSessions {
             preview.update(cx, |preview, cx| preview.set_language(language, cx));
         }
         self.mermaid_views.clear();
+        self.mermaid_prepared_for = Default::default();
         self.save_settings();
         cx.notify();
     }
@@ -1370,6 +1400,7 @@ impl YesSessions {
         Self::apply_theme(theme, window, cx);
         Self::apply_accent(self.settings.accent_color, cx);
         self.mermaid_views.clear();
+        self.mermaid_prepared_for = Default::default();
         self.save_settings();
         cx.notify();
     }
@@ -1401,6 +1432,7 @@ impl YesSessions {
         self.agent_search = AgentSearch::default();
         self.session_search = SessionSearch::default();
         self.mermaid_views.clear();
+        self.mermaid_prepared_for = Default::default();
         if self.dashboard.is_none() {
             let registry = self.registry.clone();
             let language = self.settings.language;
@@ -1701,6 +1733,12 @@ impl YesSessions {
         let yesterday = (Local::now() - chrono::Duration::days(1))
             .format("%Y-%m-%d")
             .to_string();
+        let selected_root = self.selected_session_id.as_ref().map(|id| {
+            ancestor_session_ids(&self.sessions, id)
+                .last()
+                .cloned()
+                .unwrap_or_else(|| id.clone())
+        });
         let mut rows = Vec::new();
         for (key, sessions) in groups {
             let label = match self.session_view_mode {
@@ -1714,13 +1752,33 @@ impl YesSessions {
             };
             let collapsed = self.collapsed_groups.contains(&key);
             rows.push(SessionListRow::Header {
-                key,
+                key: key.clone(),
                 label,
                 collapsed,
             });
             if !collapsed {
-                for session in sessions {
+                // Keep sessions opened from search visible, including a subagent's root.
+                let selected_count = sessions
+                    .iter()
+                    .position(|session| selected_root.as_deref() == Some(session.id.as_str()))
+                    .map_or(0, |index| {
+                        SESSION_GROUP_INITIAL_COUNT
+                            + (index + 1)
+                                .saturating_sub(SESSION_GROUP_INITIAL_COUNT)
+                                .div_ceil(SESSION_GROUP_PAGE_SIZE)
+                                * SESSION_GROUP_PAGE_SIZE
+                    });
+                let visible_count = self
+                    .group_visible_counts
+                    .get(&key)
+                    .copied()
+                    .unwrap_or(SESSION_GROUP_INITIAL_COUNT.max(selected_count));
+                let has_more = sessions.len() > visible_count;
+                for session in sessions.into_iter().take(visible_count) {
                     append_session_tree(&mut rows, session, 0, &children, &self.expanded_parents);
+                }
+                if has_more {
+                    rows.push(SessionListRow::ShowMore { key, visible_count });
                 }
             }
         }
@@ -1745,6 +1803,12 @@ impl YesSessions {
             .iter()
             .filter(|session| session.kind == yes_core::model::SessionKind::Main)
             .map(|session| self.session_group_key(session))
+            .collect();
+        // Explicit limits also reset groups containing a selected session on a later page.
+        self.group_visible_counts = self
+            .collapsed_groups
+            .iter()
+            .map(|key| (key.clone(), SESSION_GROUP_INITIAL_COUNT))
             .collect();
         cx.notify();
     }
@@ -1920,6 +1984,7 @@ impl YesSessions {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.session_view_mode = SessionViewMode::Date;
                                         this.collapsed_groups.clear();
+                                        this.group_visible_counts.clear();
                                         cx.notify();
                                     })),
                             )
@@ -1962,6 +2027,7 @@ impl YesSessions {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.session_view_mode = SessionViewMode::Directory;
                                         this.collapsed_groups.clear();
+                                        this.group_visible_counts.clear();
                                         cx.notify();
                                     })),
                             ),
@@ -2008,6 +2074,48 @@ impl YesSessions {
                     cx.processor(move |_this, range: Range<usize>, _window, cx| {
                         range
                             .map(|index| {
+                                if let SessionListRow::ShowMore { key, visible_count } =
+                                    rows[index].clone()
+                                {
+                                    return div()
+                                        .id(("show-more-wrapper", index))
+                                        .pl_4()
+                                        .pr_2()
+                                        .w_full()
+                                        .h(px(36.))
+                                        .child(
+                                            BaseButton::new(("show-more", index))
+                                                .debug_selector(move || {
+                                                    format!("session-show-more-{index}").into()
+                                                })
+                                                .accessibility_label(tr(
+                                                    language,
+                                                    "sessions.showMore",
+                                                ))
+                                                .w_full()
+                                                .h_full()
+                                                .px_2()
+                                                .rounded(px(4.))
+                                                .flex()
+                                                .items_center()
+                                                .text_size(px(12.))
+                                                .text_color(
+                                                    cx.theme().muted_foreground.opacity(0.6),
+                                                )
+                                                .cursor_pointer()
+                                                .hover(|style| {
+                                                    style.bg(cx.theme().accent.opacity(0.3))
+                                                })
+                                                .child(tr(language, "sessions.showMore"))
+                                                .on_click(cx.listener(move |this, _, _, cx| {
+                                                    this.group_visible_counts.insert(
+                                                        key.clone(),
+                                                        visible_count + SESSION_GROUP_PAGE_SIZE,
+                                                    );
+                                                    cx.notify();
+                                                })),
+                                        );
+                                }
                                 let SessionListRow::Session {
                                     session,
                                     depth,
@@ -2455,23 +2563,27 @@ impl YesSessions {
             .into_any_element()
     }
 
-    fn prepare_mermaid_views(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn prepare_mermaid_views(&mut self, cx: &mut Context<Self>) {
         for diagram in self.mermaid_views.values() {
             MermaidDiagram::hide(diagram, cx);
         }
         let Some(detail) = &self.detail else { return };
+        if self.mermaid_prepared_for.ptr_eq(&Arc::downgrade(detail)) {
+            return;
+        }
+        self.mermaid_prepared_for = Arc::downgrade(detail);
         let dark = cx.theme().mode == ThemeMode::Dark;
         let mut sources = Vec::new();
         collect_mermaid_sources(&detail.messages, 0, &mut sources);
         for (key, source) in sources {
             if let std::collections::hash_map::Entry::Vacant(entry) = self.mermaid_views.entry(key)
             {
-                match create_mermaid_diagram(&source, dark, self.settings.language, window, cx) {
-                    Ok(diagram) => {
-                        entry.insert(diagram);
-                    }
-                    Err(error) => self.error = Some(error.to_string()),
-                }
+                entry.insert(create_mermaid_diagram(
+                    &source,
+                    dark,
+                    self.settings.language,
+                    cx,
+                ));
             }
         }
     }
@@ -2479,6 +2591,7 @@ impl YesSessions {
     fn render_user_navigator(
         &self,
         messages: &[yes_core::SessionMessage],
+        layout: &ConversationLayout,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if self.agent_search.input.is_some() {
@@ -2505,7 +2618,7 @@ impl YesSessions {
                                 .collect::<Vec<_>>()
                                 .join(", ")
                         }),
-                    turn_index_for_message(messages, index, self.selected_app),
+                    layout.turn_index_for_message(index),
                 )
             })
             .collect::<Vec<_>>();
@@ -2956,13 +3069,13 @@ impl YesSessions {
             .w_full()
             .whitespace_normal()
             .child(title);
-        let messages = Arc::new(detail.messages.clone());
+        let layout = self.conversation_cache.get(&detail);
         if self.settings_open || self.session_search.input.is_some() {
             for diagram in self.mermaid_views.values() {
                 MermaidDiagram::hide(diagram, cx);
             }
         } else {
-            self.prepare_mermaid_views(window, cx);
+            self.prepare_mermaid_views(cx);
         }
         let mermaid_views = if self.settings_open || self.session_search.input.is_some() {
             Arc::new(HashMap::new())
@@ -2970,7 +3083,7 @@ impl YesSessions {
             Arc::new(self.mermaid_views.clone())
         };
         let scroller = conversation_scroller(
-            messages,
+            layout.clone(),
             self.conversation_state.clone(),
             ConversationOptions {
                 language,
@@ -2999,7 +3112,7 @@ impl YesSessions {
         }
         let scroller = scroller.jump_button(false).with_row_style(row_style);
         let show_jump = unread > 0 || self.conversation_state.read(cx).is_scrolled_up();
-        let navigator = self.render_user_navigator(&detail.messages, cx);
+        let navigator = self.render_user_navigator(&detail.messages, &layout, cx);
         div()
             .flex_1()
             .h_full()
@@ -4812,6 +4925,65 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    #[ignore = "manual performance probe; set YES_PROFILE_SESSION"]
+    fn profile_real_session_render_and_scroll(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point, px, size};
+        use std::time::Instant;
+        let id = std::env::var("YES_PROFILE_SESSION").expect("set YES_PROFILE_SESSION");
+        let provider = yes_core::ProviderRegistry::default()
+            .get(AppType::CodeBuddy)
+            .unwrap();
+        let start = Instant::now();
+        let detail = provider.session_detail_with_usage(&id).unwrap().unwrap();
+        eprintln!(
+            "provider {:?}; messages {}",
+            start.elapsed(),
+            detail.messages.len()
+        );
+        let count = super::conversation_turn_count(&detail.messages, AppType::CodeBuddy);
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1200.), px(800.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.detail_generation += 1;
+            app.loading_sessions = false;
+            app.loading_detail = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings.collapse_bash_blocks = true;
+            app.selected_app = AppType::CodeBuddy;
+            app.detail = Some(std::sync::Arc::new(detail));
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(count, cx);
+                state.scroll_to_item(0, cx);
+            });
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let start = Instant::now();
+        visual.run_until_parked();
+        eprintln!("first render {:?}", start.elapsed());
+        let viewport = visual.debug_bounds("conversation-viewport").unwrap();
+        let mut frames = Vec::new();
+        for _ in 0..40 {
+            let start = Instant::now();
+            visual.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Moved,
+            });
+            visual.run_until_parked();
+            frames.push(start.elapsed());
+        }
+        frames.sort();
+        eprintln!(
+            "scroll p50 {:?}; p95 {:?}; max {:?}",
+            frames[20], frames[38], frames[39]
+        );
+    }
+
+    #[gpui_kit::test]
     fn fast_upward_scroll_after_jump_latest_preserves_nearby_history(
         cx: &mut gpui_kit::TestAppContext,
     ) {
@@ -5238,6 +5410,116 @@ mod tests {
                 1
             );
         }
+    }
+
+    #[gpui_kit::test]
+    fn session_groups_show_ten_more_at_a_time(cx: &mut gpui_kit::TestAppContext) {
+        use super::SessionListRow;
+        use gpui_kit::{px, size};
+        let provider_root = std::env::temp_dir().join(format!(
+            "yes-sessions-pagination-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(provider_root.join("projects")).unwrap();
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1100.), px(1100.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.selected_app = AppType::Claude;
+            let mut registry = yes_core::providers::ProviderRegistry::default();
+            registry.register(std::sync::Arc::new(
+                yes_core::providers::ClaudeProvider::with_root(provider_root.clone()),
+            ));
+            app.registry = std::sync::Arc::new(registry);
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        for mode in [
+            super::SessionViewMode::Date,
+            super::SessionViewMode::Directory,
+        ] {
+            app.update(cx, |app, cx| {
+                app.session_view_mode = mode;
+                app.group_visible_counts.clear();
+                app.collapsed_groups.clear();
+                app.selected_session_id = None;
+                app.sessions = std::sync::Arc::new(
+                    (0..25)
+                        .map(|index| {
+                            let mut item = session(&format!("item-{index:02}"), None);
+                            item.updated_at = 1_700_000_000_000 - index;
+                            item.directory = Some(PathBuf::from("/workspace/project"));
+                            item
+                        })
+                        .collect(),
+                );
+                cx.notify();
+            });
+            for (visible, more) in [(5, true), (15, true), (25, false)] {
+                app.read_with(cx, |app, _| {
+                    let rows = app.session_rows();
+                    assert_eq!(
+                        rows.iter()
+                            .filter(|row| matches!(row, SessionListRow::Session { .. }))
+                            .count(),
+                        visible
+                    );
+                    assert_eq!(
+                        rows.iter()
+                            .any(|row| matches!(row, SessionListRow::ShowMore { .. })),
+                        more
+                    );
+                });
+                if more {
+                    let button = visual
+                        .debug_bounds(if visible == 5 {
+                            "session-show-more-6"
+                        } else {
+                            "session-show-more-16"
+                        })
+                        .unwrap();
+                    visual.simulate_click(button.center(), Default::default());
+                }
+            }
+            app.update(cx, |app, cx| {
+                let key = app.session_group_key(&app.sessions[0]);
+                app.toggle_group(&key, cx);
+                assert_eq!(app.session_rows().len(), 1);
+                app.toggle_group(&key, cx);
+                assert_eq!(app.session_rows().len(), 26);
+                app.group_visible_counts.clear();
+                app.selected_session_id = Some("item-24".into());
+                assert_eq!(app.session_rows().len(), 26);
+                app.collapse_all_groups(cx);
+                assert_eq!(app.session_rows().len(), 1);
+                app.expand_all_groups(cx);
+                assert_eq!(app.session_rows().len(), 7);
+                assert_eq!(app.selected_session_id.as_deref(), Some("item-24"));
+                app.selected_session_id = None;
+                // A second group gets its own initial page.
+                let mut sessions = app.sessions.as_ref().clone();
+                let mut other = session("other", None);
+                other.updated_at = 1_600_000_000_000;
+                other.directory = Some(PathBuf::from("/workspace/other"));
+                sessions.push(other);
+                app.sessions = std::sync::Arc::new(sessions);
+                assert_eq!(app.session_rows().len(), 9);
+                // Expanded children do not consume the main-session page budget.
+                let mut sessions = app.sessions.as_ref().clone();
+                sessions.push(session("child", Some("item-00")));
+                app.sessions = std::sync::Arc::new(sessions);
+                app.expanded_parents.insert("item-00".into());
+                assert_eq!(app.session_rows().len(), 10);
+                cx.notify();
+            });
+        }
+        fs::remove_dir_all(provider_root).unwrap();
     }
 
     #[gpui_kit::test]
