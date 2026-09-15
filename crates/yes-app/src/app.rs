@@ -696,7 +696,9 @@ impl YesSessions {
         theme.list_active = selected;
         theme.list_active_border = theme.muted_foreground;
         theme.list_even = surface;
-        theme.selection = selected;
+        // Match search highlights, but keep the overlay translucent because
+        // Markdown paints selection over glyphs.
+        theme.selection = Hsla::from(rgb(0xffdf61)).opacity(if dark { 0.32 } else { 0.42 });
         theme.caret = primary;
         theme.ring = theme.muted_foreground;
         theme.drag_border = theme.ring;
@@ -4248,6 +4250,56 @@ mod tests {
         session_directory_group_key, unread_after_refresh, update_conversation_scroll,
     };
     use yes_core::{AppType, MessageType, Session, SessionMessage, model::SessionKind};
+
+    #[gpui_kit::test]
+    fn text_selection_stays_translucent_across_theme_changes(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{px, size};
+        use yes_core::ThemePreference;
+
+        struct ThemeTestView;
+        impl gpui_kit::Render for ThemeTestView {
+            fn render(
+                &mut self,
+                _: &mut gpui_kit::Window,
+                _: &mut gpui_kit::Context<Self>,
+            ) -> impl gpui_kit::IntoElement {
+                gpui_kit::div()
+            }
+        }
+
+        cx.update(gpui_kit::init);
+        cx.open_window(size(px(300.), px(200.)), |window, cx| {
+            for preference in [
+                ThemePreference::Light,
+                ThemePreference::Dark,
+                ThemePreference::Light,
+            ] {
+                super::YesSessions::configure_theme(preference, window, cx);
+                let theme = super::Theme::global(cx);
+                assert!(theme.selection.a > 0.0 && theme.selection.a <= 0.45);
+                let overlay = gpui_kit::Rgba::from(theme.selection);
+                let background = gpui_kit::Rgba::from(theme.background);
+                // Check the visible result of compositing, not just alpha: a
+                // translucent pale color can pass the alpha check yet disappear.
+                let channel_shift = ((overlay.r - background.r).abs()
+                    + (overlay.g - background.g).abs()
+                    + (overlay.b - background.b).abs())
+                    * overlay.a
+                    / 3.0;
+                assert!(
+                    channel_shift >= 0.1,
+                    "selection is too faint: {channel_shift}"
+                );
+                assert_eq!(theme.list_active.a, 1.0);
+                assert_eq!(theme.tokens.selection, theme.selection.into());
+                let text_style = gpui_kit::base::text::TextViewStyle::from_theme(
+                    &gpui_kit::base::Theme::global(cx),
+                );
+                assert_eq!(text_style.selection(), theme.selection);
+            }
+            ThemeTestView
+        });
+    }
 
     #[gpui_kit::test]
     fn settings_blocks_underlying_image_preview(cx: &mut gpui_kit::TestAppContext) {
