@@ -10,7 +10,9 @@ actions!(
         MinimizeWindow,
         OpenSettings,
         FindInSession,
-        FindInAgent
+        FindInAgent,
+        ScrollSessionToTop,
+        ScrollSessionToBottom
     ]
 );
 
@@ -22,6 +24,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-w", CloseWindow, None),
         KeyBinding::new("cmd-m", MinimizeWindow, None),
+        KeyBinding::new("g g", ScrollSessionToTop, Some("SessionNavigation")),
+        KeyBinding::new("shift-g", ScrollSessionToBottom, Some("SessionNavigation")),
     ]);
     cx.on_action(|_: &Quit, cx| cx.quit());
     // This single-window app keeps the live workspace when dismissed with Cmd-W.

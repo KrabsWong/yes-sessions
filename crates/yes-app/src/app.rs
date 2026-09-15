@@ -4073,6 +4073,31 @@ impl Render for YesSessions {
             .id("yes-sessions-root")
             .debug_selector(|| "yes-sessions-root".into())
             .track_focus(&self.root_focus)
+            .when(
+                self.root_focus.is_focused(window)
+                    && self.detail.is_some()
+                    && !self.dashboard_open
+                    && !self.settings_open
+                    && !self.preview_open
+                    && self.session_search.input.is_none()
+                    && self.agent_search.input.is_none(),
+                |view| view.key_context("SessionNavigation"),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::commands::ScrollSessionToTop, _, cx| {
+                    this.conversation_state.update(cx, |state, cx| {
+                        state.scroll_to_item(0, cx);
+                    });
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &crate::commands::ScrollSessionToBottom, _, cx| {
+                    this.unread_message_count = 0;
+                    this.conversation_state
+                        .update(cx, |state, cx| state.scroll_to_end(cx));
+                    cx.notify();
+                }),
+            )
             .on_action(
                 cx.listener(|this, _: &crate::commands::OpenSettings, _, cx| {
                     this.settings_open = true;
@@ -4998,6 +5023,72 @@ mod tests {
             );
             assert!(app.read_with(cx, |app, _| app.expanded_messages.is_empty()));
         }
+    }
+
+    #[gpui_kit::test]
+    fn vim_shortcuts_scroll_session_and_preserve_search_input(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{px, size};
+        cx.update(gpui_kit::init);
+        cx.update(crate::commands::init);
+        let window = cx.open_window(size(px(1000.), px(600.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            app.detail = Some(std::sync::Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
+                session: session("unread-test", None),
+                messages: (0..30)
+                    .map(|i| {
+                        SessionMessage::text(
+                            MessageType::User,
+                            "2026-09-07T00:00:00Z",
+                            format!("Message {i}\n{}", "History content\n".repeat(10)),
+                        )
+                    })
+                    .collect(),
+            }));
+            app.conversation_state.update(cx, |state, cx| {
+                state.reset(30, cx);
+                state.scroll_to_end(cx);
+            });
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        visual.debug_bounds("session-detail-title").unwrap();
+        assert!(visual.debug_bounds("conversation-end").is_some());
+        visual.simulate_keystrokes("g");
+        assert!(visual.debug_bounds("conversation-end").is_some());
+        visual.simulate_keystrokes("g");
+        assert!(visual.debug_bounds("conversation-end").is_none());
+        assert!(visual.debug_bounds("conversation-turn-0").is_some());
+        app.update(cx, |app, cx| {
+            app.unread_message_count = 3;
+            cx.notify();
+        });
+        visual.simulate_keystrokes("shift-g");
+        assert!(visual.debug_bounds("conversation-end").is_some());
+        assert_eq!(app.read_with(cx, |app, _| app.unread_message_count), 0);
+        visual.simulate_keystrokes("cmd-f");
+        visual.simulate_keystrokes("g g shift-g");
+        app.read_with(cx, |app, cx| {
+            assert_eq!(
+                app.session_search.input.as_ref().unwrap().read(cx).value(),
+                "ggG"
+            );
+        });
+        assert!(visual.debug_bounds("conversation-end").is_some());
+        visual.simulate_keystrokes("escape");
+        app.update(cx, |app, cx| {
+            app.settings_open = true;
+            cx.notify();
+        });
+        visual.simulate_keystrokes("g g");
+        app.read_with(cx, |app, cx| {
+            assert!(app.conversation_state.read(cx).is_following_tail());
+        });
     }
 
     #[gpui_kit::test]
