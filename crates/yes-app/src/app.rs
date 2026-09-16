@@ -2255,7 +2255,7 @@ impl YesSessions {
                                     .gap_2()
                                     .rounded(px(4.))
                                     .when(is_subagent, |view| {
-                                        view.border_l_1().border_color(hsla(
+                                        view.rounded_none().border_l_1().border_color(hsla(
                                             270. / 360.,
                                             0.67,
                                             0.65,
