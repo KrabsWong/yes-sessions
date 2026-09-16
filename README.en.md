@@ -6,7 +6,9 @@
 
 Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, Claude Code, OpenCode, and Codex CLI into a native interface. Find an earlier question, inspect tool activity, or return to the terminal to continue working without digging through log files.
 
-<img width="700" alt="image" src="https://github.com/user-attachments/assets/e302bc59-62cd-4e3f-8aa1-f67b93acd84d" />
+|Dark|Light
+|:--|:--
+<img width="500" alt="image" src="https://github.com/user-attachments/assets/1cffc250-0b2f-4614-a86f-f8d8a1edd13c" /> | <img width="500" alt="image" src="https://github.com/user-attachments/assets/fdb31790-ebe5-4d10-90a1-22e413660d7e" />
 
 [Download](https://github.com/KrabsWong/yes-sessions/releases/latest) · [User guide](docs/en/USER_GUIDE.md) · [FAQ](docs/en/FAQ.md) · [Report an issue](https://github.com/KrabsWong/yes-sessions/issues)
 
