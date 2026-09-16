@@ -94,13 +94,19 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-fn resume_command(app_type: AppType, session_id: &str) -> (&'static str, Vec<String>) {
-    match app_type {
+fn resume_command(app_type: AppType, session_id: &str) -> io::Result<(&'static str, Vec<String>)> {
+    Ok(match app_type {
+        AppType::CodeBuddyCn => {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "CodeBuddy CN sessions cannot be resumed in a CLI",
+            ));
+        }
         AppType::Claude => ("claude", vec![format!("--resume={session_id}")]),
         AppType::OpenCode => ("opencode", vec!["-s".into(), session_id.into()]),
         AppType::CodeBuddy => ("codebuddy", vec![format!("--resume={session_id}")]),
         AppType::Codex => ("codex", vec!["resume".into(), session_id.into()]),
-    }
+    })
 }
 
 pub fn resume_session(
@@ -109,8 +115,8 @@ pub fn resume_session(
     working_dir: Option<&Path>,
     preference: PreferredTerminal,
 ) -> io::Result<()> {
+    let (mut command, args) = resume_command(app_type, session_id)?;
     let terminal = terminal_info(preference).preferred;
-    let (mut command, args) = resume_command(app_type, session_id);
     if app_type == AppType::OpenCode
         && crate::providers::OpenCodeProvider::default()
             .is_v2_session(session_id)
@@ -214,11 +220,17 @@ mod tests {
     #[test]
     fn builds_provider_resume_commands() {
         assert_eq!(
-            resume_command(AppType::Codex, "abc"),
+            resume_command(AppType::CodeBuddyCn, "abc")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(
+            resume_command(AppType::Codex, "abc").unwrap(),
             ("codex", vec!["resume".to_owned(), "abc".to_owned()])
         );
         assert_eq!(
-            resume_command(AppType::Claude, "abc"),
+            resume_command(AppType::Claude, "abc").unwrap(),
             ("claude", vec!["--resume=abc".to_owned()])
         );
     }

@@ -296,7 +296,12 @@ fn build_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversati
 }
 
 fn has_prose(message: &SessionMessage) -> bool {
-    !message.attachments.is_empty()
+    message
+        .metadata
+        .get("user_context")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|text| !text.is_empty())
+        || !message.attachments.is_empty()
         || message
             .content
             .as_deref()
@@ -2238,7 +2243,113 @@ fn messages_copy_button(
         })
 }
 
+fn user_context_payload(index: usize, text: TextView, cx: &App) -> AnyElement {
+    div()
+        .id(("user-context-body", index))
+        .debug_selector(move || format!("user-context-body-{index}"))
+        .w_full()
+        .min_w_0()
+        .h(px(280.))
+        .overflow_hidden()
+        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+        .rounded_md()
+        .bg(cx.theme().background.opacity(0.5))
+        .child(
+            text.scrollable(true)
+                .selectable(true)
+                .h_full()
+                .w_full()
+                .p_2(),
+        )
+        .into_any_element()
+}
+
+fn render_user_context(
+    turn_index: usize,
+    item: &IndexedMessage,
+    options: ConversationOptions,
+    owner: WeakEntity<YesSessions>,
+    cx: &App,
+) -> AnyElement {
+    let Some(context) = item
+        .message
+        .metadata
+        .get("user_context")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+    else {
+        return div().into_any_element();
+    };
+    let index = item.index;
+    let expanded = owner
+        .upgrade()
+        .is_some_and(|owner| owner.read(cx).user_context_expanded.contains(&index));
+    let toggle_owner = owner.clone();
+    let toggle = Button::new(("user-context-toggle", index))
+        .debug_selector(move || format!("user-context-toggle-{index}"))
+        .ghost()
+        .compact()
+        .icon(if expanded {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        })
+        .label(tr(options.language, "message.userContext"))
+        .accessibility_label(tr(options.language, "message.userContext"))
+        .on_click(move |_, _, cx| {
+            let _ = toggle_owner.update(cx, |this, cx| {
+                this.toggle_user_context(index, turn_index, cx)
+            });
+        });
+    div()
+        .w_full()
+        .min_w_0()
+        .v_flex()
+        .gap_2()
+        .text_color(cx.theme().muted_foreground)
+        .child(div().flex().justify_start().child(toggle))
+        .when(expanded, |view| {
+            let view = view.child(user_context_payload(
+                index,
+                conversation_markdown(("user-context-text", index), xml_file_markdown(context), cx),
+                cx,
+            ));
+            let Some(original) = item
+                .message
+                .metadata
+                .get("original_user_content")
+                .and_then(serde_json::Value::as_str)
+            else {
+                return view;
+            };
+            let copy = original.to_owned();
+            view.child(
+                div().flex().flex_wrap().items_center().gap_2().child(
+                    Button::new(("copy-user-original", index))
+                        .debug_selector(move || format!("copy-user-original-{index}"))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Copy)
+                        .label(tr(options.language, "message.copyOriginal"))
+                        .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                            crate::toast::copy_success(
+                                options.language,
+                                "copy.message",
+                                window,
+                                cx,
+                            );
+                        }),
+                ),
+            )
+        })
+        .into_any_element()
+}
+
 fn render_user(
+    turn_index: usize,
+    owner: WeakEntity<YesSessions>,
     item: &IndexedMessage,
     options: ConversationOptions,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
@@ -2332,6 +2443,9 @@ fn render_user(
                 message_content(item, mermaid_views, cx)
             },
         );
+    let bubble = bubble.when(item.message.metadata.contains_key("user_context"), |view| {
+        view.child(render_user_context(turn_index, item, options, owner, cx))
+    });
     let user_avatar = avatar(
         if options.is_subagent {
             Icon::new(ProviderIcon::from(options.provider))
@@ -2941,7 +3055,14 @@ fn render_turn(
         .when_some(user, |view, item| {
             view.child(search_landing_feedback(
                 item.index,
-                render_user(&item, options, mermaid_views, cx),
+                render_user(
+                    remeasure_turn_index,
+                    owner.clone(),
+                    &item,
+                    options,
+                    mermaid_views,
+                    cx,
+                ),
                 &owner,
                 cx,
             ))
@@ -3629,6 +3750,176 @@ mod tests {
         }
     }
 
+    use super::{ConversationOptions, render_user};
+    use crate::app::YesSessions;
+    use gpui_kit::{
+        AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, Styled as _,
+        TestAppContext, VisualTestContext, Window, div, px, size,
+    };
+    use std::sync::Arc;
+    use yes_core::Language;
+
+    struct UserContextTestView {
+        owner: Entity<YesSessions>,
+        language: Language,
+    }
+
+    impl Render for UserContextTestView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            let mut message = SessionMessage::text(
+                MessageType::User,
+                "",
+                "Please inspect <widget> as user code.",
+            );
+            message.metadata.insert(
+                "user_context".into(),
+                serde_json::json!("<user_info>\nShell: Zsh\n</user_info>"),
+            );
+            message.metadata.insert("original_user_content".into(), serde_json::json!("<user_info>\nShell: Zsh\n</user_info>\n<user_query>Please inspect <widget> as user code.</user_query>"));
+            let options = ConversationOptions {
+                language: self.language,
+                provider: AppType::CodeBuddyCn,
+                is_subagent: false,
+                show_thinking: false,
+                chat_bubbles: false,
+                collapse_tool_blocks: true,
+            };
+            div().w_full().child(render_user(
+                0,
+                self.owner.downgrade(),
+                &IndexedMessage {
+                    index: 0,
+                    message: Arc::new(message),
+                },
+                options,
+                &Default::default(),
+                cx,
+            ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn user_context_is_collapsed_and_original_copy_is_explicit(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        for language in [Language::Zh, Language::En] {
+            let window = cx.open_window(size(px(440.), px(1000.)), |window, cx| {
+                let owner = cx.new(|cx| YesSessions::new(window, cx));
+                let view = cx.new(|cx| {
+                    cx.observe(&owner, |_, _, cx| cx.notify()).detach();
+                    UserContextTestView { owner, language }
+                });
+                gpui_kit::component::Root::new(view, window, cx)
+            });
+            let mut visual = VisualTestContext::from_window(*window, cx);
+            assert!(visual.debug_bounds("user-context-body-0").is_none());
+            assert!(visual.debug_bounds("user-original-body-0").is_none());
+            let bubble = visual.debug_bounds("conversation-bubble-0").unwrap();
+            visual.simulate_mouse_move(bubble.center(), None, Default::default());
+            let copy = visual.debug_bounds("copy-message-0").unwrap();
+            visual.simulate_click(copy.center(), Default::default());
+            assert_eq!(
+                cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+                "Please inspect <widget> as user code."
+            );
+            let toggle = visual.debug_bounds("user-context-toggle-0").unwrap();
+            visual.simulate_click(toggle.center(), Default::default());
+            visual.run_until_parked();
+            let body = visual.debug_bounds("user-context-body-0").unwrap();
+            assert!(body.right() <= px(440.));
+            assert!(visual.debug_bounds("user-original-body-0").is_none());
+            assert!(visual.debug_bounds("user-original-toggle-0").is_none());
+            let copy = visual.debug_bounds("copy-user-original-0").unwrap();
+            assert!(copy.right() <= px(440.));
+            visual.simulate_click(copy.center(), Default::default());
+            assert_eq!(
+                cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+                "<user_info>\nShell: Zsh\n</user_info>\n<user_query>Please inspect <widget> as user code.</user_query>"
+            );
+            let toggle = visual.debug_bounds("user-context-toggle-0").unwrap();
+            visual.simulate_click(toggle.center(), Default::default());
+            visual.run_until_parked();
+            assert!(visual.debug_bounds("user-context-body-0").is_none());
+            assert!(visual.debug_bounds("user-original-body-0").is_none());
+        }
+    }
+
+    struct ContextScrollTestView {
+        outer_scroll: gpui_kit::ScrollHandle,
+        text: Entity<gpui_kit::component::text::TextViewState>,
+    }
+    impl Render for ContextScrollTestView {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            use gpui_kit::{InteractiveElement as _, StatefulInteractiveElement as _};
+            div()
+                .id("context-outer-scroll")
+                .h(px(400.))
+                .overflow_y_scroll()
+                .track_scroll(&self.outer_scroll)
+                .child(super::user_context_payload(
+                    0,
+                    gpui_kit::component::text::TextView::new(&self.text),
+                    cx,
+                ))
+                .child(div().h(px(1000.)))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn user_context_scrolls_to_end_and_back(cx: &mut TestAppContext) {
+        use gpui_kit::component::text::TextViewState;
+        use gpui_kit::{ScrollDelta, ScrollWheelEvent, TouchPhase, point};
+        cx.update(gpui_kit::init);
+        let mut text = None;
+        let outer_scroll = gpui_kit::ScrollHandle::new();
+        let window = cx.open_window(size(px(440.), px(500.)), |_, cx| {
+            let source = super::xml_file_markdown(
+                &(0..300)
+                    .map(|i| format!("Context line {i}\n"))
+                    .collect::<String>(),
+            );
+            let state = cx.new(|cx| TextViewState::markdown(&source, cx));
+            text = Some(state.clone());
+            ContextScrollTestView {
+                text: state,
+                outer_scroll: outer_scroll.clone(),
+            }
+        });
+        let text = text.unwrap();
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        let bounds = visual.debug_bounds("user-context-body-0").unwrap();
+        assert_eq!(bounds.size.height, px(280.));
+        let offset = |cx: &TestAppContext| {
+            text.read_with(cx, |state, _| {
+                let offset = state.list_state().logical_scroll_top();
+                (offset.item_ix, offset.offset_in_item)
+            })
+        };
+        let initial = offset(cx);
+        let scroll = |visual: &mut VisualTestContext, delta| {
+            visual.simulate_event(ScrollWheelEvent {
+                position: bounds.center(),
+                delta: ScrollDelta::Pixels(point(px(0.), px(delta))),
+                modifiers: Default::default(),
+                touch_phase: TouchPhase::Moved,
+            });
+            visual.run_until_parked();
+        };
+        scroll(&mut visual, -100_000.);
+        let end = offset(cx);
+        assert_eq!(
+            outer_scroll.offset().y,
+            px(0.),
+            "inner scrolling must not move the conversation"
+        );
+        assert_ne!(end, initial, "wheel must move the inner text viewport");
+        scroll(&mut visual, -100_000.);
+        assert_eq!(offset(cx), end, "a second large scroll stays at the end");
+        scroll(&mut visual, 100_000.);
+        assert_eq!(offset(cx), initial, "wheel can return to the first line");
+        assert_eq!(visual.debug_bounds("user-context-body-0").unwrap(), bounds);
+    }
+
     struct CopyMessageTestView {
         owner: gpui_kit::Entity<crate::app::YesSessions>,
         is_subagent: bool,
@@ -3695,7 +3986,14 @@ mod tests {
                 .flex_col()
                 .gap(gpui_kit::px(super::MESSAGE_ACTION_GAP))
                 .w_full()
-                .child(super::render_user(&user, options, &Default::default(), cx))
+                .child(super::render_user(
+                    0,
+                    self.owner.downgrade(),
+                    &user,
+                    options,
+                    &Default::default(),
+                    cx,
+                ))
                 .child(super::render_assistant_group(
                     0,
                     items,
