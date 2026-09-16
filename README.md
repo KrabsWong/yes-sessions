@@ -1,109 +1,82 @@
 # Yes Sessions
 
-Yes Sessions 是一款只面向 macOS 的 AI CLI 会话浏览与恢复工具。应用使用纯 Rust 实现：界面使用 GPUI Kit，只有 Mermaid 图表通过 `gpui-wry` 嵌入系统 WKWebView，无需附带浏览器运行时。
+**在一个 macOS 应用中，浏览、搜索并继续你的 AI 编程会话。**
 
-![Logo](./build/icons/256x256.png)
+中文 · [English](README.en.md)
 
-## 功能
+Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 和 Codex CLI 的本地历史集中到一个原生界面。找回之前的提问、查看工具执行记录，或回到终端继续工作，无需逐个翻找日志文件。
 
-- 浏览 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 与 Codex CLI 的本地会话
-- 按日期和项目目录分组、折叠与快速定位用户消息；右侧刻度导航悬停展示提问和回复摘要，点击跳转，长会话可在刻度上滚动浏览
-- 展示 Markdown、代码、推理过程、工具调用和子 Agent 会话；Edit 工具可直接对比历史替换片段
-- 通过系统 WKWebView 渲染 Mermaid，并支持缩放、平移和重置；渲染失败可查看原文并重试
-- 阅读历史消息时保持当前位置，新消息以条数提示，点击跳转到底部
-- 在 Ghostty、Kitty 或 Terminal.app 中恢复会话
-- 中文/英文、浅色/深色/跟随系统和阅读布局设置
-- 原生 macOS 窗口，无启动页，无前后端 IPC
+[下载安装](https://github.com/KrabsWong/yes-sessions/releases/latest) · [使用指南](docs/zh/USER_GUIDE.md) · [常见问题](docs/zh/FAQ.md) · [反馈问题](https://github.com/KrabsWong/yes-sessions/issues)
 
-标题栏右侧的收起／展开图标可打开文件与变更面板，与左侧会话区域等高并可拖动宽度。面板内通过 Files／Changes 切换文件树和工作区变更。文件树只在点击展开文件夹时读取一级子项，收起后保留缓存；支持文件名搜索、文本行号与 PNG/JPEG/GIF/WebP/BMP/TIFF/ICO/SVG 图片预览（等比缩放）；不支持的格式及无法解码的图片会显示提示。文件与 diff 支持语法高亮（包括 Rust、TypeScript/TSX、Kotlin、Swift、Python、C/C++/Objective-C、JSON、TOML，以及 Makefile/Dockerfile 和 shebang 脚本），颜色跟随浅色／深色主题；未知语言及超过高亮预算的内容以纯文本展示。Git diff 区分已暂存／未暂存／未跟踪文件，文本支持切换合并与左右对比并强调行内修改；未修改的上下文可点击展开，再通过「收起上下文」恢复紧凑展示。上下文来自本次加载的缓存，超出读取上限则退回常规 diff。图片支持修改前后并排预览，Changes 列表显示当前分支（游离 HEAD 时显示提交短哈希）。后台检测到 Git 变化时仅提示新内容，点击刷新才更新预览。Changes 列表、计数和搜索复用同一份变更结果；diff 先展示内容，再在后台为展开的内容补充高亮。预览顶部的返回按钮或 Escape 可返回列表并保留目录状态；再次点击右侧图标或在列表中按 Escape 收起面板。触控板滚动锁定手势主方向，避免横向和纵向串动；Read/Write/Edit 等工具调用中的明确文件路径可直接打开预览。
+## 你可以用它做什么
 
-`⌘W` 隐藏应用并保留当前会话、滚动位置和面板状态，从 Dock 打开后继续阅读；`⌘M` 最小化窗口，`⌘Q` 完全退出应用。正常退出后保存窗口位置、大小和最大化／全屏状态；重新启动时恢复，并按当前显示器可用区域校正位置。
+- **找回上下文**：按项目和日期浏览会话，搜索当前会话或当前工具的历史，直接跳转到匹配消息。
+- **读懂执行过程**：查看 Markdown、代码、思考内容、工具调用、附件和子会话；展开附加上下文，查看 IDE 注入的环境与规则。
+- **查看代码与变更**：在侧边面板浏览项目文件、预览图片，对比已暂存、未暂存和未跟踪的 Git 变更。
+- **继续之前的工作**：将支持的 CLI 会话交给 Ghostty、Kitty 或系统终端恢复。
+- **舒适地阅读长会话**：通过右侧导航快速定位提问，阅读时保留位置，按需跳转到新消息；支持中英文、明暗主题和阅读布局设置。
 
-预览只读，展示当前磁盘内容和工作区变更，不代表历史会话快照；通过「刷新」重新读取。文件内容上限 4 MiB，文本最多 10 万行且每行不超过 32 KiB；超限或不支持的文件会显示提示。搜索最多返回 500 项，并限制目录遍历范围。
+## 支持的工具
 
-## 系统要求
+| 工具 | 浏览与搜索本地历史 | 在终端恢复 |
+| --- | --- | --- |
+| CodeBuddy CLI | 支持 | 支持 |
+| CodeBuddy CN（IDE） | 支持 | 不支持 |
+| Claude Code | 支持 | 支持 |
+| OpenCode | 支持，兼容 OpenCode 1 与 OpenCode 2 beta 数据 | 支持，需安装对应 CLI |
+| Codex CLI | 支持 | 支持 |
 
-- macOS 13.0 或更高版本
-- 当前发布目标：Apple Silicon
-- 开发环境：Rust stable、Xcode Command Line Tools
-
-## 开发
-
-```bash
-# 运行
-cargo run -p yes-sessions
-
-# 静态检查与测试
-cargo check --workspace
-cargo test --workspace
-
-# 生成 .app 与 DMG
-./scripts/package-macos.sh
-```
-
-产物位于：
-
-- `target/macos/Yes Sessions.app`
-- `release/Yes-Sessions-<version>-arm64.dmg`
-
-应用图标源图为 `assets/logo.png`。更换后，在 macOS 安装 ImageMagick，运行
-`./scripts/generate-icons.sh`，生成带透明边距与圆角的 16–1024 像素 PNG 和
-包含 Retina 尺寸的 `build/icon.icns`，然后重新打包。打包使用已生成的 ICNS，
-无需额外安装 ImageMagick。脚本同时同步浅色与深色 logo 资源，统一使用定稿的
-白毛猩猩墨镜原图。源图为 1254×1254；图标主画布为 1024×1024，图案宽 824px，
-四周透明边距 100px，圆角半径 184px，缩小尺寸时同比例处理并保留透明通道。
-
-本地与 GitHub Release 默认均可使用 ad-hoc 签名，无需 Apple 开发者证书。自动发布需要沿用 `HOMEBREW_TAP_TOKEN` 和 `WORKFLOW_PAT`；下面的六项 Apple 配置为可选，完整配置后启用 Developer ID 签名、Apple 公证和 stapling：
-
-- `MACOS_CERTIFICATE`：Developer ID Application 证书的 Base64 编码 `.p12`
-- `MACOS_CERTIFICATE_PASSWORD`：导出 `.p12` 时使用的密码
-- `CODESIGN_IDENTITY`：证书身份，例如 `Developer ID Application: ...`
-- `APPLE_ID`、`APPLE_TEAM_ID`、`APPLE_APP_PASSWORD`：Apple 公证账号、团队 ID 与 app-specific password
-- `HOMEBREW_TAP_TOKEN`：更新 Homebrew tap 与发布附件
-- `WORKFLOW_PAT`：自动版本工作流推送 release tag，并触发后续 Release 工作流
-
-六项 Apple 配置全部留空时正常发布 ad-hoc 安装包；只配置部分时工作流会报错，避免错误的签名配置。本地也可同时设置 `CODESIGN_IDENTITY` 和三项 Apple 公证凭据，让 `./scripts/package-macos.sh` 生成已签名、公证并 stapled 的 `.app` 与 DMG。
-
-发布链路、首次合并检查和 Homebrew 模板维护见 [发布流水线](docs/RELEASE_PIPELINE.md)。
-
-## 架构
-
-```text
-crates/
-  yes-core/             会话模型、五类数据源解析、设置、终端与 Git 服务
-  yes-app/              GPUI Kit 界面、会话交互、Markdown 与 Mermaid 宿主
-    assets/             本地 Mermaid 运行资源
-packaging/              macOS Info.plist
-scripts/package-macos.sh
-```
-
-应用是单进程 Rust 架构。耗时的会话读取通过 GPUI 后台任务执行并回到 UI 更新状态。Mermaid 是唯一的 WebView 使用场景，且使用 macOS 自带的 WebKit，不内置浏览器内核。
-
-## 数据路径
-
-| 工具 | 路径 |
-| --- | --- |
-| CodeBuddy | `~/.codebuddy/projects/<project>/*.jsonl` |
-| CodeBuddy CN | `~/Library/Application Support/CodeBuddyExtension/Data/<account>/CodeBuddyIDE/<user>/history/<workspace>/<session>/` |
-| Claude Code | `~/.claude/projects/<project>/*.jsonl` |
-| OpenCode | `~/.local/share/opencode/opencode.db`（兼容 OpenCode 1 / OpenCode 2 beta，迁移会话自动去重） |
-| Codex CLI | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/session_index.jsonl` |
-
-CodeBuddy CN 使用独立入口，列表只读索引，详情按索引顺序读取消息正文，保留思考、工具调用与结果、图片和请求级用量；用户消息优先展示原始提问，IDE 注入的环境和规则默认折叠，可展开阅读上下文并复制原始消息。空会话不展示。项目路径从 CodeBuddy CN 的 `User/workspaceStorage` 还原。仅支持本地已保存历史的查看与搜索，不支持通过 CLI 恢复 IDE 会话。
-
-大型 JSONL 会话采用轻量摘要扫描；只有打开具体会话时才解析完整内容，避免启动时读取数 GB 历史记录。
+展示内容取决于原工具实际保存的记录。Yes Sessions 不会补全缺失的消息，也不提供模型服务；恢复会话需要已安装并配置好对应 CLI。
 
 ## 安装
 
-发布后可通过 Homebrew 安装：
+需要 **Apple Silicon Mac，macOS 13 Ventura 或更高版本**。当前不提供 Intel、Windows 或 Linux 安装包。
+
+### Homebrew
 
 ```bash
 brew tap krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
 
-也可从 GitHub Releases 下载 DMG，签名状态见发布说明。未公证版本首次启动被 macOS 拦截时，在「系统设置 → 隐私与安全」选择「仍要打开」。受管理的电脑可能限制手动放行。
+更新已安装的应用：
+
+```bash
+brew update
+brew upgrade --cask yes-sessions
+```
+
+### 手动下载
+
+从 [GitHub Releases](https://github.com/KrabsWong/yes-sessions/releases/latest) 下载 `Yes-Sessions-<版本>-arm64.dmg`，打开后将 `Yes Sessions.app` 拖入「应用程序」。
+
+签名与公证状态以对应版本的发布说明为准。未公证版本若被 macOS 拦截，确认下载来源后，可在「系统设置 → 隐私与安全」中选择「仍要打开」。受管理的电脑可能限制此操作。
+
+其他安装方式见 [安装脚本说明](docs/zh/INSTALL_SCRIPT.md)。
+
+## 开始使用
+
+1. 先在支持的工具中产生本地会话记录，然后打开 Yes Sessions。
+2. 选择工具，在会话列表中按项目与日期找到记录，点击查看详情。
+3. 用 `⌘F` 搜索当前会话，用 `⇧⌘F` 搜索当前工具的会话历史。
+4. 需要继续对话时，使用会话恢复入口；需要查看项目代码时，打开标题栏右侧的文件与变更面板。
+
+通过 `⌘,` 打开设置，切换界面语言、主题、阅读布局和首选终端。详见 [使用指南](docs/zh/USER_GUIDE.md)。
+
+## 数据与隐私
+
+会话浏览与搜索直接读取本机历史文件或数据库，无需向 Yes Sessions 提供模型 API Key。应用设置与窗口状态保存在本机。会话来源、CodeBuddy CN 的读取范围及外部操作边界见 [数据与隐私](docs/zh/DATA_AND_PRIVACY.md)。
+
+文件与 Git 面板为只读预览，展示的是**当前工作区**，不是会话发生时的文件快照。恢复会话后，CLI 的网络访问、文件修改和费用由对应工具决定。
+
+## 文档与贡献
+
+- [文档首页](docs/zh/README.md)：安装、使用、常见问题与维护文档。
+- [开发与贡献](docs/zh/CONTRIBUTING.md)：本地运行、验证、提交问题和贡献代码。
+- [发布流程](docs/zh/RELEASE_PIPELINE.md)：面向维护者的版本、签名与分发说明。
+
+项目使用 Rust 与 GPUI Kit 构建原生 macOS 界面，仅 Mermaid 图表使用系统 WebKit 渲染，不附带浏览器内核。
 
 ## 许可证
 
-MIT。Mermaid 的第三方许可证随应用资源一起分发。
+项目在 [Cargo.toml](Cargo.toml) 中声明使用 MIT 许可证。第三方组件保留各自许可证，相关声明见 [第三方许可目录](crates/yes-app/third-party/)。
