@@ -7,17 +7,25 @@ use serde_json::{Map, Value};
 #[serde(rename_all = "lowercase")]
 pub enum AppType {
     CodeBuddy,
+    CodeBuddyCn,
     Claude,
     OpenCode,
     Codex,
 }
 
 impl AppType {
-    pub const ALL: [Self; 4] = [Self::CodeBuddy, Self::Claude, Self::OpenCode, Self::Codex];
+    pub const ALL: [Self; 5] = [
+        Self::CodeBuddy,
+        Self::CodeBuddyCn,
+        Self::Claude,
+        Self::OpenCode,
+        Self::Codex,
+    ];
 
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::CodeBuddy => "codebuddy",
+            Self::CodeBuddyCn => "codebuddycn",
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
             Self::Codex => "codex",
@@ -27,6 +35,7 @@ impl AppType {
     pub const fn display_name(self) -> &'static str {
         match self {
             Self::CodeBuddy => "Codebuddy",
+            Self::CodeBuddyCn => "CodeBuddy CN",
             Self::Claude => "Claude Code",
             Self::OpenCode => "OpenCode",
             Self::Codex => "Codex CLI",
@@ -46,6 +55,7 @@ impl FromStr for AppType {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
             "codebuddy" => Ok(Self::CodeBuddy),
+            "codebuddycn" => Ok(Self::CodeBuddyCn),
             "claude" => Ok(Self::Claude),
             "opencode" => Ok(Self::OpenCode),
             "codex" => Ok(Self::Codex),

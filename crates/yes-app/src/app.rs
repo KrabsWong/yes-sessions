@@ -406,6 +406,7 @@ struct ParentConversation {
     detail: Arc<SessionDetail>,
     scroll: Entity<MessageScrollerState>,
     expanded_messages: HashSet<usize>,
+    user_context_expanded: HashSet<usize>,
     claude_xml_expanded: HashMap<(usize, usize), bool>,
     unread: usize,
     active_message: Option<usize>,
@@ -451,6 +452,7 @@ pub struct YesSessions {
     expanded_parents: HashSet<String>,
     parent_transition: Option<(String, Instant, bool)>,
     expanded_messages: HashSet<usize>,
+    pub(crate) user_context_expanded: HashSet<usize>,
     pub(crate) claude_xml_expanded: HashMap<(usize, usize), bool>,
     marquee_session_id: Option<String>,
     sidebar_icon_transition: Option<(Instant, f32)>,
@@ -516,6 +518,7 @@ impl YesSessions {
             expanded_parents: HashSet::new(),
             parent_transition: None,
             expanded_messages: HashSet::new(),
+            user_context_expanded: HashSet::new(),
             claude_xml_expanded: HashMap::new(),
             marquee_session_id: None,
             sidebar_icon_transition: None,
@@ -894,6 +897,7 @@ impl YesSessions {
         self.preview_open = false;
         self.preview_icon_transition = None;
         self.expanded_messages.clear();
+        self.user_context_expanded.clear();
         self.claude_xml_expanded.clear();
         self.navigator_active_message = None;
         self.navigator_focus = None;
@@ -1141,6 +1145,7 @@ impl YesSessions {
             self.detail = Some(saved.detail);
             self.conversation_state = saved.scroll;
             self.expanded_messages = saved.expanded_messages;
+            self.user_context_expanded = saved.user_context_expanded;
             self.claude_xml_expanded = saved.claude_xml_expanded;
             self.unread_message_count = saved.unread;
             self.navigator_active_message = saved.active_message;
@@ -1161,6 +1166,7 @@ impl YesSessions {
                 detail: detail.clone(),
                 scroll: self.conversation_state.clone(),
                 expanded_messages: self.expanded_messages.clone(),
+                user_context_expanded: self.user_context_expanded.clone(),
                 claude_xml_expanded: self.claude_xml_expanded.clone(),
                 unread: self.unread_message_count,
                 active_message: self.navigator_active_message,
@@ -1191,6 +1197,21 @@ impl YesSessions {
         for index in item_indices {
             self.claude_xml_expanded
                 .insert((message_index, index), expanded);
+        }
+        self.conversation_state.update(cx, |state, cx| {
+            let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
+        });
+        cx.notify();
+    }
+
+    pub(crate) fn toggle_user_context(
+        &mut self,
+        message_index: usize,
+        turn_index: usize,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.user_context_expanded.remove(&message_index) {
+            self.user_context_expanded.insert(message_index);
         }
         self.conversation_state.update(cx, |state, cx| {
             let _ = state.remeasure_items(turn_index..turn_index + 1, cx);
@@ -3125,7 +3146,8 @@ impl YesSessions {
                                 })
                                 .child(div().flex_1())
                                 .when(
-                                    session.kind != yes_core::model::SessionKind::Subagent,
+                                    session.kind != yes_core::model::SessionKind::Subagent
+                                        && session.app_type != AppType::CodeBuddyCn,
                                     |view| {
                                         view.child(
                                             Button::new("resume-session")

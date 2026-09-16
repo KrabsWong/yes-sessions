@@ -2,6 +2,10 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "message.userContext") => "附加上下文",
+        (_, "message.userContext") => "Attached context",
+        (Language::Zh, "message.copyOriginal") => "复制原始消息",
+        (_, "message.copyOriginal") => "Copy original message",
         (Language::Zh, "dashboard.byTool") => "工具",
         (_, "dashboard.byTool") => "Tools",
         (Language::Zh, "dashboard.byProject") => "项目",

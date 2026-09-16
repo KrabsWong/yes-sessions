@@ -6,7 +6,7 @@ Yes Sessions 是一款只面向 macOS 的 AI CLI 会话浏览与恢复工具。�
 
 ## 功能
 
-- 浏览 CodeBuddy、Claude Code、OpenCode 与 Codex CLI 的本地会话
+- 浏览 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 与 Codex CLI 的本地会话
 - 按日期和项目目录分组、折叠与快速定位用户消息；右侧刻度导航悬停展示提问和回复摘要，点击跳转，长会话可在刻度上滚动浏览
 - 展示 Markdown、代码、推理过程、工具调用和子 Agent 会话；Edit 工具可直接对比历史替换片段
 - 通过系统 WKWebView 渲染 Mermaid，并支持缩放、平移和重置；渲染失败可查看原文并重试
@@ -70,7 +70,7 @@ cargo test --workspace
 
 ```text
 crates/
-  yes-core/             会话模型、四类数据源解析、设置、终端与 Git 服务
+  yes-core/             会话模型、五类数据源解析、设置、终端与 Git 服务
   yes-app/              GPUI Kit 界面、会话交互、Markdown 与 Mermaid 宿主
     assets/             本地 Mermaid 运行资源
 packaging/              macOS Info.plist
@@ -84,9 +84,12 @@ scripts/package-macos.sh
 | 工具 | 路径 |
 | --- | --- |
 | CodeBuddy | `~/.codebuddy/projects/<project>/*.jsonl` |
+| CodeBuddy CN | `~/Library/Application Support/CodeBuddyExtension/Data/<account>/CodeBuddyIDE/<user>/history/<workspace>/<session>/` |
 | Claude Code | `~/.claude/projects/<project>/*.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode.db`（兼容 OpenCode 1 / OpenCode 2 beta，迁移会话自动去重） |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/session_index.jsonl` |
+
+CodeBuddy CN 使用独立入口，列表只读索引，详情按索引顺序读取消息正文，保留思考、工具调用与结果、图片和请求级用量；用户消息优先展示原始提问，IDE 注入的环境和规则默认折叠，可展开阅读上下文并复制原始消息。空会话不展示。项目路径从 CodeBuddy CN 的 `User/workspaceStorage` 还原。仅支持本地已保存历史的查看与搜索，不支持通过 CLI 恢复 IDE 会话。
 
 大型 JSONL 会话采用轻量摘要扫描；只有打开具体会话时才解析完整内容，避免启动时读取数 GB 历史记录。
 

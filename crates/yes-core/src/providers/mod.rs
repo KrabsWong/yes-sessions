@@ -1,5 +1,6 @@
 mod claude;
 mod codebuddy;
+mod codebuddy_cn;
 mod codex;
 mod opencode;
 
@@ -11,6 +12,7 @@ use crate::{AppType, Session, SessionDetail, SessionStats};
 
 pub use claude::ClaudeProvider;
 pub use codebuddy::CodeBuddyProvider;
+pub use codebuddy_cn::CodeBuddyCnProvider;
 pub use codex::CodexProvider;
 pub use opencode::OpenCodeProvider;
 
@@ -137,6 +139,7 @@ impl Default for ProviderRegistry {
             providers: HashMap::new(),
         };
         registry.register(Arc::new(CodeBuddyProvider::default()));
+        registry.register(Arc::new(CodeBuddyCnProvider::default()));
         registry.register(Arc::new(ClaudeProvider::default()));
         registry.register(Arc::new(OpenCodeProvider::default()));
         registry.register(Arc::new(CodexProvider::default()));

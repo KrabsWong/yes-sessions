@@ -66,7 +66,7 @@ impl gpui_kit::component::IconNamed for ProviderIcon {
 impl From<AppType> for ProviderIcon {
     fn from(value: AppType) -> Self {
         match value {
-            AppType::CodeBuddy => Self::CodeBuddy,
+            AppType::CodeBuddy | AppType::CodeBuddyCn => Self::CodeBuddy,
             AppType::Claude => Self::Claude,
             AppType::OpenCode => Self::OpenCode,
             AppType::Codex => Self::Codex,
