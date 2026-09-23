@@ -29,6 +29,8 @@ walkdir = "2"
 wry = { package = "lb-wry", version = "=0.53.3" }
 
 [patch.crates-io]
+# Correct block's uninhabited external static without changing its API.
+block = { path = "vendor/block" }
 # Preserve scroll anchors across unmeasured transcript rows.
 gpui-pre = { path = "vendor/gpui-pre" }
 # Present embedded AppKit views and the GPUI scene in the same transaction.

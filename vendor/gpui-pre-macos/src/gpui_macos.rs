@@ -34,10 +34,14 @@ mod platform;
 mod window;
 mod window_appearance;
 
-use cocoa::{
-    base::{id, nil},
-    foundation::{NSAutoreleasePool, NSNotFound, NSString, NSUInteger},
-};
+use objc2::rc::Retained;
+use objc2_foundation::{NSNotFound, NSString, NSUInteger};
+
+// Raw pointers remain at the legacy objc runtime's dynamically registered method boundary.
+#[allow(non_camel_case_types)]
+pub(crate) type id = *mut objc::runtime::Object;
+#[allow(non_upper_case_globals)]
+pub(crate) const nil: id = std::ptr::null_mut();
 
 use objc::runtime::{BOOL, NO, YES};
 use std::{
@@ -73,8 +77,11 @@ trait NSStringExt {
 
 impl NSStringExt for id {
     unsafe fn to_str(&self) -> &str {
+        if self.is_null() {
+            return "";
+        }
         unsafe {
-            let cstr = self.UTF8String();
+            let cstr = (&*self.cast::<NSString>()).UTF8String();
             if cstr.is_null() {
                 ""
             } else {
@@ -134,8 +141,23 @@ unsafe impl objc::Encode for NSRange {
     }
 }
 
-/// Allow NSString::alloc use here because it sets autorelease
-#[allow(clippy::disallowed_methods)]
 unsafe fn ns_string(string: &str) -> id {
-    unsafe { NSString::alloc(nil).init_str(string).autorelease() }
+    Retained::autorelease_ptr(NSString::from_str(string)).cast()
+}
+
+#[cfg(test)]
+mod string_tests {
+    use super::{NSStringExt, nil, ns_string};
+
+    #[test]
+    fn strings_round_trip_through_the_legacy_runtime_boundary() {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            for text in ["", "Yes Sessions", "会话 🦀"] {
+                let string = ns_string(text);
+                assert!(!string.is_null());
+                assert_eq!(string.to_str(), text);
+            }
+            assert_eq!(nil.to_str(), "");
+        });
+    }
 }

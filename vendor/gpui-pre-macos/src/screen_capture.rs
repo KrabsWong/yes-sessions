@@ -1,10 +1,7 @@
 use crate::ns_string;
+use crate::{id, nil};
 use anyhow::{Result, anyhow};
 use block::ConcreteBlock;
-use cocoa::{
-    base::{YES, id, nil},
-    foundation::NSArray,
-};
 use collections::HashMap;
 use core_foundation::base::TCFType;
 use core_graphics::display::{
@@ -19,6 +16,7 @@ use gpui::{
 };
 use media::core_media::{CMSampleBuffer, CMSampleBufferRef};
 use metal::NSInteger;
+use objc::runtime::YES;
 use objc::{
     class,
     declare::ClassDecl,
@@ -26,6 +24,8 @@ use objc::{
     runtime::{Class, Object, Sel},
     sel, sel_impl,
 };
+use objc2::{rc::Retained, runtime::AnyObject};
+use objc2_foundation::NSArray;
 use std::{cell::RefCell, ffi::c_void, mem, ptr, rc::Rc};
 
 use crate::NSStringExt;
@@ -89,8 +89,9 @@ impl ScreenCaptureSource for MacScreenCaptureSource {
             let delegate: id = msg_send![DELEGATE_CLASS, alloc];
             let output: id = msg_send![OUTPUT_CLASS, alloc];
 
-            let excluded_windows = NSArray::array(nil);
-            let filter: id = msg_send![filter, initWithDisplay:self.sc_display excludingWindows:excluded_windows];
+            let excluded_windows = NSArray::<AnyObject>::new();
+            let excluded_windows_ptr = Retained::as_ptr(&excluded_windows) as id;
+            let filter: id = msg_send![filter, initWithDisplay:self.sc_display excludingWindows:excluded_windows_ptr];
             let configuration: id = msg_send![configuration, init];
             let _: id = msg_send![configuration, setScalesToFit: true];
             let _: id = msg_send![configuration, setPixelFormat: 0x42475241];
@@ -253,8 +254,9 @@ pub(crate) fn get_sources() -> oneshot::Receiver<Result<Vec<Rc<dyn ScreenCapture
             let result = if error == nil {
                 let displays: id = msg_send![shareable_content, displays];
                 let mut result = Vec::new();
-                for i in 0..displays.count() {
-                    let display = displays.objectAtIndex(i);
+                let displays = displays.cast::<NSArray<AnyObject>>().as_ref();
+                for display in displays.into_iter().flat_map(|displays| displays.iter()) {
+                    let display = Retained::as_ptr(&display) as id;
                     let id: CGDirectDisplayID = msg_send![display, displayID];
                     let meta = screen_id_to_label.get(&id).cloned();
                     let source = MacScreenCaptureSource {

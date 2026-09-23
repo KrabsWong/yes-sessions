@@ -1,11 +1,8 @@
-use cocoa::{
-    appkit::{NSAppearanceNameVibrantDark, NSAppearanceNameVibrantLight},
-    base::id,
-    foundation::NSString,
-};
+use crate::id;
+use cocoa::appkit::{NSAppearanceNameVibrantDark, NSAppearanceNameVibrantLight};
 use gpui::WindowAppearance;
 use objc::{msg_send, sel, sel_impl};
-use std::ffi::CStr;
+use objc2_foundation::NSString;
 
 pub(crate) unsafe fn window_appearance_from_native(appearance: id) -> WindowAppearance {
     let name: id = msg_send![appearance, name];
@@ -21,7 +18,7 @@ pub(crate) unsafe fn window_appearance_from_native(appearance: id) -> WindowAppe
         } else {
             println!(
                 "unknown appearance: {:?}",
-                CStr::from_ptr(name.UTF8String())
+                (&*name.cast::<NSString>()).to_string()
             );
             WindowAppearance::Light
         }
