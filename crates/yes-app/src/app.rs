@@ -41,6 +41,15 @@ enum SettingsTab {
     About,
 }
 
+#[derive(Clone)]
+struct SidebarResize;
+
+impl Render for SidebarResize {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionViewMode {
     Date,
@@ -456,6 +465,7 @@ pub struct YesSessions {
     pub(crate) claude_xml_expanded: HashMap<(usize, usize), bool>,
     marquee_session_id: Option<String>,
     sidebar_icon_transition: Option<(Instant, f32)>,
+    sidebar_width: Pixels,
     stats_hovered: bool,
     navigator_active_message: Option<usize>,
     navigator_focus: Option<usize>,
@@ -522,6 +532,7 @@ impl YesSessions {
             claude_xml_expanded: HashMap::new(),
             marquee_session_id: None,
             sidebar_icon_transition: None,
+            sidebar_width: px(320.),
             stats_hovered: false,
             navigator_active_message: None,
             navigator_focus: None,
@@ -4205,17 +4216,50 @@ impl Render for YesSessions {
                     let sessions = if self.settings.sidebar_collapsed {
                         detail
                     } else {
-                        h_resizable("sessions-workspace")
+                        div()
+                            .id("sessions-workspace")
+                            .flex()
+                            .size_full()
+                            .min_w_0()
+                            .on_drag_move(cx.listener(
+                                |this, event: &DragMoveEvent<std::rc::Rc<SidebarResize>>, _, cx| {
+                                    let max_width = (event.bounds.size.width - px(280.))
+                                        .clamp(px(160.), px(960.));
+                                    this.sidebar_width = (event.event.position.x
+                                        - event.bounds.left())
+                                    .clamp(px(160.), max_width);
+                                    cx.notify();
+                                },
+                            ))
                             .child(
-                                resizable_panel()
-                                    .size(px(320.))
-                                    .size_range(px(160.)..px(960.))
+                                div()
+                                    .w(self.sidebar_width)
+                                    .flex_shrink_1()
+                                    .min_w(px(160.))
+                                    .h_full()
                                     .child(self.render_sidebar(cx)),
                             )
                             .child(
-                                resizable_panel()
-                                    .size_range(px(280.)..px(4000.))
-                                    .child(detail),
+                                div()
+                                    .debug_selector(|| "sessions-main-content".into())
+                                    .relative()
+                                    .flex_1()
+                                    .min_w(px(280.))
+                                    .h_full()
+                                    .child(detail)
+                                    .child(
+                                        gpui_kit::base::resize_handle(
+                                            "sidebar-resize",
+                                            Axis::Horizontal,
+                                        )
+                                        .on_drag(
+                                            SidebarResize,
+                                            |drag, _, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.new(|_| drag.as_ref().clone())
+                                            },
+                                        ),
+                                    ),
                             )
                             .into_any_element()
                     };
@@ -5588,6 +5632,52 @@ mod tests {
             });
         }
         fs::remove_dir_all(provider_root).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn sidebar_keeps_dragged_width_when_window_resizes(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{MouseButton, point, px, size};
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(1100.), px(700.)), super::YesSessions::new);
+        let app = window.root(cx).unwrap();
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = false;
+            app.settings_open = false;
+            app.dashboard_open = false;
+            app.preview_open = false;
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let sidebar = visual.debug_bounds("sessions-sidebar").unwrap();
+        assert_eq!(sidebar.size.width, px(320.));
+        let start = point(sidebar.right() - px(2.), sidebar.center().y);
+        let end = point(sidebar.left() + px(420.), start.y);
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(
+            start + point(px(12.), px(0.)),
+            Some(MouseButton::Left),
+            Default::default(),
+        );
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        assert_eq!(
+            visual.debug_bounds("sessions-sidebar").unwrap().size.width,
+            px(420.)
+        );
+        let content = visual.debug_bounds("sessions-main-content").unwrap();
+        for width in [1920., 900., 1100.] {
+            visual.simulate_resize(size(px(width), px(900.)));
+            visual.run_until_parked();
+            assert_eq!(
+                visual.debug_bounds("sessions-sidebar").unwrap().size.width,
+                px(420.)
+            );
+            let resized = visual.debug_bounds("sessions-main-content").unwrap();
+            assert_eq!(resized.size.width, content.size.width + px(width - 1100.));
+        }
     }
 
     #[gpui_kit::test]
