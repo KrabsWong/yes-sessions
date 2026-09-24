@@ -49,6 +49,45 @@ fn main() -> Result<()> {
     settle(&mut cx, window)?;
     save_capture(&mut cx, window, output_dir.join("main-light.png"))?;
 
+    // Capture the rendered selection while the button is still held. Do not
+    // call settle here: its forced refresh would hide missing invalidation.
+    cx.simulate_mouse_down(
+        window,
+        point(px(370.), px(90.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    let mut previous_selection_len = 0;
+    for (x, name) in [
+        (520., "title-drag-start.png"),
+        (760., "title-drag-extended.png"),
+    ] {
+        cx.simulate_mouse_move(
+            window,
+            point(px(x), px(90.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        cx.advance_clock(std::time::Duration::from_millis(34));
+        cx.run_until_parked();
+        let selected = cx.update_window(window, |_, window, cx| {
+            gpui_kit::base::TextSelection::selected_text(window, cx)
+        })?;
+        ensure!(
+            selected.len() > previous_selection_len,
+            "title selection did not repaint during drag"
+        );
+        previous_selection_len = selected.len();
+        save_capture(&mut cx, window, output_dir.join(name))?;
+    }
+    cx.simulate_mouse_up(
+        window,
+        point(px(760.), px(90.)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    click(&mut cx, window, 1000., 260.)?;
+
     // Drag across Markdown text so selection contrast is verified against
     // actual glyphs instead of only checking the theme token.
     drag(
