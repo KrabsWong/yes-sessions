@@ -2950,13 +2950,26 @@ impl YesSessions {
         } else {
             session.first_message.clone()
         };
+        let title_id = ElementId::Name(format!("session-detail-title-text-{}", session.id).into());
+        // Plain selectable text needs an explicit repaint subscription, unlike TextView.
+        // Keep both alive only while this session's title is rendered.
+        let title_selection = window.use_keyed_state(title_id.clone(), cx, |window, cx| {
+            let handle = gpui_kit::base::TextSelectionHandle::new(title.clone(), cx);
+            let subscription = handle.refresh_window_on_change(window, cx);
+            (handle, subscription)
+        });
         let title_view = div()
             .id("session-detail-title")
             .debug_selector(|| "session-detail-title".into())
             .min_w_0()
             .w_full()
             .whitespace_normal()
-            .child(title);
+            .cursor_text()
+            .child(gpui_kit::base::SelectableText::with_handle(
+                title_id,
+                title_selection.read(cx).0.clone(),
+                title,
+            ));
         let layout = self.conversation_cache.get(&detail);
         if self.settings_open || self.session_search.input.is_some() {
             for diagram in self.mermaid_views.values() {
@@ -5429,6 +5442,112 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[gpui_kit::test]
+    fn detail_title_supports_partial_and_full_copy(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::{AppContext as _, MouseButton, point, px, size};
+        use std::sync::Arc;
+        const TITLE: &str = "检查标题复制 🦀 **literal** [session](title) 完整内容";
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(900.), px(600.)), |window, cx| {
+            let app = cx.new(|cx| super::YesSessions::new(window, cx));
+            gpui_kit::component::Root::new(app, window, cx)
+        });
+        let app = window.root(cx).unwrap().read_with(cx, |root, _| {
+            root.view()
+                .clone()
+                .downcast::<super::YesSessions>()
+                .unwrap()
+        });
+        app.update(cx, |app, cx| {
+            app.sessions_generation += 1;
+            app.loading_sessions = false;
+            app.settings.sidebar_collapsed = true;
+            app.settings_open = false;
+            let mut item = session("title-copy", None);
+            item.first_message = TITLE.into();
+            app.detail = Some(Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
+                session: item,
+                messages: vec![],
+            }));
+            cx.notify();
+        });
+        let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
+        let bounds = visual.debug_bounds("session-detail-title").unwrap();
+        let start = point(bounds.left() + px(1.), bounds.top() + px(8.));
+        let end = point(start.x + px(64.), start.y);
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        let dragging =
+            visual.update(|window, cx| gpui_kit::base::TextSelection::selected_text(window, cx));
+        assert!(
+            !dragging.is_empty(),
+            "selection must repaint before mouse-up"
+        );
+        let extended = point(end.x + px(60.), end.y);
+        visual.simulate_mouse_move(extended, Some(MouseButton::Left), Default::default());
+        let extended_text =
+            visual.update(|window, cx| gpui_kit::base::TextSelection::selected_text(window, cx));
+        assert!(
+            extended_text.len() > dragging.len(),
+            "dragging must extend the painted selection"
+        );
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.update(|window, cx| {
+            assert_eq!(
+                gpui_kit::base::TextSelection::selected_text(window, cx),
+                dragging
+            );
+        });
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        visual.simulate_keystrokes("cmd-c");
+        let partial = cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap());
+        assert!(!partial.is_empty());
+        assert!(partial.len() < TITLE.len());
+        assert!(TITLE.starts_with(&partial));
+
+        // Select across wrapped lines without interpreting Markdown punctuation.
+        visual.simulate_resize(size(px(340.), px(600.)));
+        let wrapped = visual.debug_bounds("session-detail-title").unwrap();
+        assert!(wrapped.size.height > bounds.size.height);
+        let start = point(wrapped.left() + px(1.), wrapped.top() + px(8.));
+        let end = point(wrapped.right() - px(1.), wrapped.bottom() - px(4.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        visual.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            TITLE
+        );
+
+        // Switching sessions must not keep the previous title's selection.
+        app.update(cx, |app, cx| {
+            let mut item = session("title-fallback", None);
+            item.file_name = "fallback session.jsonl".into();
+            app.detail = Some(Arc::new(yes_core::SessionDetail {
+                subtree_usage: None,
+                session: item,
+                messages: vec![],
+            }));
+            cx.notify();
+        });
+        let fallback = visual.debug_bounds("session-detail-title").unwrap();
+        visual.update(|window, cx| {
+            assert!(gpui_kit::base::TextSelection::selected_text(window, cx).is_empty());
+        });
+        let start = point(fallback.left() + px(1.), fallback.top() + px(8.));
+        let end = point(fallback.right() - px(1.), fallback.bottom() - px(4.));
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        visual.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+            "fallback session.jsonl"
+        );
     }
 
     #[gpui_kit::test]
