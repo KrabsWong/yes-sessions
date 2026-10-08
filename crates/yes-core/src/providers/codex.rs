@@ -741,6 +741,11 @@ impl CodexProvider {
                         continue;
                     }
                     message.model = current_model.clone();
+                    if let Some(id) = payload.get("response_id").and_then(Value::as_str) {
+                        message
+                            .metadata
+                            .insert("response_id".into(), serde_json::json!(id));
+                    }
                     messages.push(message);
                 }
                 Some("reasoning") => {
@@ -752,6 +757,11 @@ impl CodexProvider {
                     message.content = None;
                     message.reasoning_content = Some(reasoning);
                     message.model = current_model.clone();
+                    if let Some(id) = payload.get("response_id").and_then(Value::as_str) {
+                        message
+                            .metadata
+                            .insert("response_id".into(), serde_json::json!(id));
+                    }
                     messages.push(message);
                 }
                 Some(kind @ ("function_call" | "custom_tool_call")) => {
@@ -783,6 +793,11 @@ impl CodexProvider {
                     }
                     if let Some(id) = call_id {
                         pending_tools.insert(id, name);
+                    }
+                    if let Some(id) = payload.get("response_id").and_then(Value::as_str) {
+                        message
+                            .metadata
+                            .insert("response_id".into(), serde_json::json!(id));
                     }
                     messages.push(message);
                 }
@@ -819,6 +834,11 @@ impl CodexProvider {
                     message.model = current_model.clone();
                     if let Some(status) = payload.get("status").and_then(Value::as_str) {
                         message.metadata.insert("subtype".into(), json!(status));
+                    }
+                    if let Some(id) = payload.get("response_id").and_then(Value::as_str) {
+                        message
+                            .metadata
+                            .insert("response_id".into(), serde_json::json!(id));
                     }
                     messages.push(message);
                 }
