@@ -8,8 +8,10 @@ use gpui_kit::base::{Disableable as _, StyledExt};
 use gpui_kit::component::{
     ActiveTheme as _, Icon, IconName,
     button::{Button, ButtonCustomVariant, ButtonVariants as _},
+    menu::{PopupMenu, PopupMenuItem},
     message_scroller::{MessageScroller, MessageScrollerState},
     text::{TextView, TextViewStyle},
+    tooltip::Tooltip,
 };
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
@@ -345,7 +347,7 @@ fn groupable_tool(message: &SessionMessage, show_thinking: bool) -> bool {
 }
 
 // Keep provider-specific result pairing intact before combining display rows.
-fn display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<ConversationTurn> {
+fn legacy_display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<ConversationTurn> {
     let mergeable = |item: &IndexedMessage| {
         groupable_tool(&item.message, false)
             || (item.message.message_type == MessageType::Assistant
@@ -377,6 +379,72 @@ fn display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<Conversa
                     .is_some_and(mergeable)
             })
         {
+            display.last_mut().unwrap().messages.extend(turn.messages);
+        } else {
+            display.push(turn);
+        }
+    }
+    display
+}
+
+fn response_id(message: &SessionMessage) -> Option<&str> {
+    message
+        .metadata
+        .get("response_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+fn display_turns(messages: &[SessionMessage], provider: AppType) -> Vec<ConversationTurn> {
+    let legacy = legacy_display_turns(messages, provider);
+    let calls = messages
+        .iter()
+        .filter(|message| message.message_type == MessageType::ToolUse)
+        .filter_map(|message| Some((message.call_id.as_deref()?, response_id(message)?)))
+        .collect::<HashMap<_, _>>();
+    let mut response_turns = HashMap::<String, usize>::new();
+    let mut turns = Vec::<ConversationTurn>::new();
+    for turn in legacy {
+        let mut fallback = ConversationTurn::default();
+        for item in turn.messages {
+            let id = if item.message.message_type == MessageType::ToolResult {
+                item.message
+                    .call_id
+                    .as_deref()
+                    .and_then(|call| calls.get(call).copied())
+                    .or_else(|| response_id(&item.message))
+            } else if item.message.message_type == MessageType::User {
+                None
+            } else {
+                response_id(&item.message)
+            };
+            if let Some(id) = id {
+                if !fallback.messages.is_empty() {
+                    turns.push(std::mem::take(&mut fallback));
+                }
+                let index = *response_turns.entry(id.to_owned()).or_insert_with(|| {
+                    turns.push(ConversationTurn::default());
+                    turns.len() - 1
+                });
+                turns[index].messages.push(item);
+            } else {
+                fallback.messages.push(item);
+            }
+        }
+        if !fallback.messages.is_empty() {
+            turns.push(fallback);
+        }
+    }
+    let tools_only = |turn: &ConversationTurn| {
+        turn.messages.iter().all(|item| {
+            groupable_tool(&item.message, true)
+                || (item.message.message_type == MessageType::Assistant
+                    && !has_prose(&item.message))
+        })
+    };
+    let mut display = Vec::<ConversationTurn>::new();
+    for turn in turns {
+        if tools_only(&turn) && display.last().is_some_and(tools_only) {
             display.last_mut().unwrap().messages.extend(turn.messages);
         } else {
             display.push(turn);
@@ -564,6 +632,28 @@ pub(crate) fn display_datetime(timestamp: &str) -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| timestamp.chars().take(16).collect())
+}
+
+fn display_tool_time(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| timestamp.to_owned())
+}
+
+fn display_message_datetime(timestamp: &str) -> String {
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|value| {
+            value
+                .with_timezone(&chrono::Local)
+                .format("%Y/%m/%d %H:%M:%S")
+                .to_string()
+        })
+        .unwrap_or_else(|_| timestamp.to_owned())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -994,28 +1084,47 @@ fn tool_output_text(message: Option<&SessionMessage>) -> Option<String> {
         .filter(|content| !content.is_empty())
 }
 
-fn tool_icon(tool_type: ToolType) -> IconName {
-    match tool_type {
-        ToolType::Mcp => IconName::Network,
-        ToolType::Subagent => IconName::Bot,
-        ToolType::Plan => IconName::GalleryVerticalEnd,
-        ToolType::Filesystem => IconName::FileText,
-        ToolType::Search => IconName::Search,
-        ToolType::Code => IconName::SquareTerminal,
-        ToolType::Generic => IconName::Settings2,
+fn tool_icon(tool_name: &str) -> IconName {
+    let normalized = tool_name.to_lowercase();
+    let operation = normalized.rsplit("__").next().unwrap_or(&normalized);
+    let operation = operation.rsplit(':').next().unwrap_or(operation);
+    match operation {
+        "read" | "read_file" => IconName::BookOpen,
+        "edit" | "edit_file" | "apply_patch" | "multiedit" => IconName::Replace,
+        "write" | "write_file" | "create_file" => IconName::File,
+        "glob" | "ls" | "list_files" | "list_directory" | "mkdir" => IconName::Folder,
+        "grep" | "search" | "search_content" | "search_files" => IconName::Search,
+        "exec" | "bash" | "shell" | "exec_command" | "write_stdin" => IconName::SquareTerminal,
+        "webfetch" | "websearch" | "web_fetch" | "web_search" | "fetch" | "curl" => IconName::Globe,
+        "askuserquestion" | "askquestion" | "ask_user_question" => IconName::Info,
+        _ => match tool_type(tool_name) {
+            ToolType::Mcp => IconName::Network,
+            ToolType::Subagent => IconName::Bot,
+            ToolType::Plan => IconName::GalleryVerticalEnd,
+            ToolType::Filesystem => IconName::FileText,
+            ToolType::Search => IconName::Search,
+            ToolType::Code => IconName::SquareTerminal,
+            ToolType::Generic => IconName::Settings2,
+        },
     }
 }
 
-fn tool_color(tool_type: ToolType) -> Hsla {
-    match tool_type {
-        ToolType::Mcp => hsla(217. / 360., 0.91, 0.60, 1.),
-        ToolType::Filesystem => hsla(142. / 360., 0.71, 0.45, 1.),
-        ToolType::Search => hsla(45. / 360., 0.93, 0.47, 1.),
-        ToolType::Code => hsla(25. / 360., 0.95, 0.53, 1.),
-        ToolType::Subagent => hsla(271. / 360., 0.91, 0.65, 1.),
-        ToolType::Plan => hsla(239. / 360., 0.84, 0.67, 1.),
-        ToolType::Generic => hsla(215. / 360., 0.16, 0.47, 1.),
-    }
+fn tool_color(tool_type: ToolType, cx: &App) -> Hsla {
+    let (light, dark) = match tool_type {
+        ToolType::Mcp => (0x075dcc, 0x9fbfea),
+        ToolType::Filesystem => (0x00783d, 0x95d3ad),
+        ToolType::Search => (0x956000, 0xdec88f),
+        ToolType::Code => (0xb34b00, 0xe7bc99),
+        ToolType::Subagent => (0x8430b5, 0xcbb3e6),
+        ToolType::Plan => (0x5146bd, 0xbfbbea),
+        ToolType::Generic => (0x364254, 0xb6c1d1),
+    };
+    rgb(if cx.theme().mode.is_dark() {
+        dark
+    } else {
+        light
+    })
+    .into()
 }
 
 fn message_content(
@@ -1503,6 +1612,7 @@ fn render_tool(
     tool_use: Option<&IndexedMessage>,
     tool_result: Option<&IndexedMessage>,
     options: ConversationOptions,
+    group_model: &str,
     expanded: &HashSet<usize>,
     owner: WeakEntity<YesSessions>,
     cx: &App,
@@ -1538,6 +1648,11 @@ fn render_tool(
         })
         .unwrap_or_default()
         .to_owned();
+    let model = if model == group_model {
+        String::new()
+    } else {
+        model
+    };
     let timestamp = tool_use
         .map(|item| item.message.timestamp.as_str())
         .filter(|timestamp| !timestamp.is_empty())
@@ -1546,7 +1661,7 @@ fn render_tool(
                 .map(|item| item.message.timestamp.as_str())
                 .filter(|timestamp| !timestamp.is_empty())
         })
-        .map(display_datetime)
+        .map(display_tool_time)
         .unwrap_or_default();
     let summary = tool_summary(
         &tool_name,
@@ -1593,278 +1708,338 @@ fn render_tool(
         },
         missing_input_label,
     );
-    div()
-        .group(format!("tool-actions-{message_index}"))
-        .debug_selector(move || format!("tool-card-{message_index}"))
-        .rounded_lg()
-        .border_1()
-        .border_color(border)
-        .bg(tool_card_background(cx))
-        .overflow_hidden()
-        .child(
-            div()
-                .id(("tool-header", message_index))
-                .h(px(38.))
-                .w_full()
-                .flex()
-                .items_center()
-                .bg(tool_card_background(cx))
-                .hover(|style| {
-                    style.bg(if cx.theme().mode.is_dark() {
-                        rgb(0x2b3546)
-                    } else {
-                        rgb(0xe8edf5)
-                    })
-                })
-                .child(
-                    Button::new(("tool-toggle", message_index))
-                        .custom(
-                            ButtonCustomVariant::new(cx)
-                                .color(cx.theme().transparent)
-                                .foreground(cx.theme().foreground)
-                                .hover(cx.theme().transparent)
-                                .active(cx.theme().transparent),
+    ToolCardOverlay {
+        index: message_index,
+        actions: tool_copy_actions(tool_use, tool_result, options, cx)
+            .visible()
+            .into_any_element(),
+        content: div()
+            .group(format!("tool-actions-{message_index}"))
+            .debug_selector(move || format!("tool-card-{message_index}"))
+            .rounded_lg()
+            .border_1()
+            .border_color(border)
+            .bg(tool_card_background(cx))
+            .overflow_hidden()
+            .child(
+                div()
+                    .id(("tool-header", message_index))
+                    .relative()
+                    .h(px(38.))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .bg(tool_card_background(cx))
+                    .child(
+                        Button::new(("tool-toggle", message_index))
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(cx.theme().transparent)
+                                    .foreground(cx.theme().foreground)
+                                    .hover(cx.theme().transparent)
+                                    .active(cx.theme().transparent),
+                            )
+                            .rounded_none()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(38.))
+                            .px_3()
+                            .accessibility_label(accessibility_label)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_sm()
+                                    .child(
+                                        Icon::new(tool_icon(&tool_name))
+                                            .size(px(16.))
+                                            .text_color(tool_color(kind, cx)),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(("tool-name", message_index))
+                                            .text_color(tool_color(kind, cx))
+                                            .max_w(px(180.))
+                                            .min_w_0()
+                                            .truncate()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .child(title),
+                                    )
+                                    .when(!model.is_empty(), |view| {
+                                        view.child(
+                                            div()
+                                                .id(("tool-model", message_index))
+                                                .max_w(px(180.))
+                                                .min_w_0()
+                                                .truncate()
+                                                .rounded(px(4.))
+                                                .bg(cx.theme().muted)
+                                                .px(px(6.))
+                                                .py(px(2.))
+                                                .text_size(px(12.))
+                                                .text_color(cx.theme().foreground.opacity(0.78))
+                                                .child(model),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .flex_none()
+                                            .whitespace_nowrap()
+                                            .text_size(px(12.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(timestamp),
+                                    )
+                                    .when_some(summary, |view, summary| {
+                                        view.child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_right()
+                                                .text_size(px(12.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(summary),
+                                        )
+                                    })
+                                    .when(tool_use.is_none(), |view| {
+                                        view.child(
+                                            div()
+                                                .flex_none()
+                                                .text_size(px(10.))
+                                                .text_color(cx.theme().warning.opacity(0.7))
+                                                .child("※"),
+                                        )
+                                    }),
+                            )
+                            .on_click(move |_, _, cx| {
+                                let _ = owner.update(cx, |this, cx| {
+                                    this.toggle_message(message_index, turn_index, cx)
+                                });
+                            }),
+                    )
+                    .when_some(file_target, |view, (path, line)| {
+                        let full_path = path.display().to_string();
+                        let home = std::env::var_os("HOME").map(PathBuf::from);
+                        let label = compact_tool_path(&full_path, home.as_deref());
+                        let (directory, filename) = label
+                            .rsplit_once('/')
+                            .map(|(directory, filename)| {
+                                (format!("{directory}/"), filename.to_owned())
+                            })
+                            .unwrap_or_else(|| (String::new(), label));
+                        view.child(
+                            Button::new(("tool-file-preview", message_index))
+                                .custom(
+                                    ButtonCustomVariant::new(cx)
+                                        .color(cx.theme().transparent)
+                                        .foreground(cx.theme().foreground)
+                                        .hover(cx.theme().transparent)
+                                        .active(cx.theme().transparent),
+                                )
+                                .max_w(relative(0.6))
+                                .min_w_0()
+                                .h(px(38.))
+                                .px_2()
+                                .accessibility_label(full_path.clone())
+                                .child(
+                                    div()
+                                        .id(("tool-path", message_index))
+                                        .min_w_0()
+                                        .flex()
+                                        .items_center()
+                                        .text_size(px(12.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(div().min_w_0().truncate().child(directory))
+                                        .child(
+                                            div().flex_none().whitespace_nowrap().child(filename),
+                                        )
+                                        .hoverable_tooltip(move |window, cx| {
+                                            let path = full_path.clone();
+                                            let width = (window.viewport_size().width - px(48.))
+                                                .min(px(560.))
+                                                .max(px(1.));
+                                            let height = window.viewport_size().height * 0.6;
+                                            Tooltip::element(move |_, cx| {
+                                                div()
+                                                    .id("tool-path-tooltip")
+                                                    .w(width)
+                                                    .max_h(height)
+                                                    .overflow_y_scroll()
+                                                    .whitespace_normal()
+                                                    .text_size(px(12.))
+                                                    .text_color(cx.theme().popover_foreground)
+                                                    .child(path.clone())
+                                            })
+                                            .build(window, cx)
+                                        }),
+                                )
+                                .on_click(move |_, window, cx| {
+                                    let _ = preview_owner.update(cx, |this, cx| {
+                                        this.open_workspace_file(path.clone(), line, window, cx);
+                                    });
+                                }),
                         )
-                        .rounded_none()
-                        .flex_1()
-                        .min_w_0()
-                        .h(px(38.))
+                    })
+                    .child(
+                        Button::new(("tool-chevron-toggle", message_index))
+                            .custom(
+                                ButtonCustomVariant::new(cx)
+                                    .color(cx.theme().transparent)
+                                    .foreground(cx.theme().foreground)
+                                    .hover(cx.theme().transparent)
+                                    .active(cx.theme().transparent),
+                            )
+                            .rounded_none()
+                            .flex_none()
+                            .w(px(38.))
+                            .bg(tool_card_background(cx))
+                            .h(px(38.))
+                            .icon(if is_expanded {
+                                IconName::ChevronUp
+                            } else {
+                                IconName::ChevronDown
+                            })
+                            .accessibility_label(tr(
+                                options.language,
+                                if is_expanded {
+                                    "message.collapse"
+                                } else {
+                                    "message.expand"
+                                },
+                            ))
+                            .on_click(move |_, _, cx| {
+                                let _ = chevron_owner.update(cx, |this, cx| {
+                                    this.toggle_message(message_index, turn_index, cx)
+                                });
+                            }),
+                    ),
+            )
+            .when(is_expanded, |view| {
+                view.when_some(
+                    tool_use
+                        .and_then(|item| item.message.usage.as_ref())
+                        .or_else(|| tool_result.and_then(|item| item.message.usage.as_ref())),
+                    |view, usage| {
+                        view.child(
+                            div()
+                                .border_t_1()
+                                .border_dashed()
+                                .border_color(border)
+                                .px_3()
+                                .py_2()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(tr(options.language, "usage.label")),
+                                )
+                                .child(crate::token_usage::render(
+                                    ("tool-usage", message_index),
+                                    usage,
+                                    options.language,
+                                    cx,
+                                )),
+                        )
+                    },
+                )
+            })
+            .when(is_expanded && input.is_some(), |view| {
+                view.child(
+                    div()
+                        .border_t_1()
+                        .border_dashed()
+                        .border_color(border)
                         .px_3()
-                        .accessibility_label(accessibility_label)
+                        .py_2()
+                        .text_size(px(12.))
                         .child(
+                            div()
+                                .mb_1()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(tr(options.language, "message.input")),
+                        )
+                        .when(input_rows.is_empty() && edit_diff.is_none(), |section| {
+                            section.child(
+                                div()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(tr(options.language, "message.noInput")),
+                            )
+                        })
+                        .when_some(edit_diff, |section, diff| {
+                            section.child(render_edit_diff(
+                                message_index,
+                                diff,
+                                options.language,
+                                cx,
+                            ))
+                        })
+                        .children(input_rows.into_iter().map(|(key, value)| {
                             div()
                                 .w_full()
                                 .min_w_0()
                                 .flex()
-                                .items_center()
+                                .items_start()
                                 .gap_2()
-                                .text_sm()
-                                .child(
-                                    Icon::new(tool_icon(kind))
-                                        .size(px(16.))
-                                        .text_color(tool_color(kind)),
-                                )
-                                .child(
-                                    div()
-                                        .max_w(px(180.))
-                                        .min_w_0()
-                                        .truncate()
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(title),
-                                )
-                                .when(!model.is_empty(), |view| {
-                                    view.child(
-                                        div()
-                                            .max_w(px(180.))
-                                            .min_w_0()
-                                            .truncate()
-                                            .rounded(px(4.))
-                                            .bg(cx.theme().muted)
-                                            .px(px(6.))
-                                            .py(px(2.))
-                                            .text_size(px(12.))
-                                            .text_color(cx.theme().foreground.opacity(0.78))
-                                            .child(model),
-                                    )
-                                })
+                                .py(px(2.))
+                                .font_family(cx.theme().mono_font_family.clone())
                                 .child(
                                     div()
                                         .flex_none()
-                                        .whitespace_nowrap()
-                                        .text_size(px(12.))
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(timestamp),
+                                        .child(format!("{key}:")),
                                 )
-                                .when_some(
-                                    tool_use.and_then(|item| item.message.usage.as_ref()),
-                                    |view, usage| {
-                                        view.child(crate::token_usage::render(
-                                            ("tool-usage", message_index),
-                                            usage,
-                                            options.language,
-                                            cx,
-                                        ))
-                                    },
-                                )
-                                .when_some(summary, |view, summary| {
-                                    view.child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .truncate()
-                                            .text_right()
-                                            .text_size(px(12.))
-                                            .text_color(cx.theme().muted_foreground)
-                                            .child(summary),
-                                    )
-                                })
-                                .when(tool_use.is_none(), |view| {
-                                    view.child(
-                                        div()
-                                            .flex_none()
-                                            .text_size(px(10.))
-                                            .text_color(cx.theme().warning.opacity(0.7))
-                                            .child("※"),
-                                    )
-                                }),
-                        )
-                        .on_click(move |_, _, cx| {
-                            let _ = owner.update(cx, |this, cx| {
-                                this.toggle_message(message_index, turn_index, cx)
-                            });
-                        }),
+                                .child(div().flex_1().min_w_0().whitespace_normal().child(value))
+                        })),
                 )
-                .when_some(file_target, |view, (path, line)| {
-                    let full_path = path.display().to_string();
-                    let home = std::env::var_os("HOME").map(PathBuf::from);
-                    let label = compact_tool_path(&full_path, home.as_deref());
-                    let (directory, filename) = label
-                        .rsplit_once('/')
-                        .map(|(directory, filename)| (format!("{directory}/"), filename.to_owned()))
-                        .unwrap_or_else(|| (String::new(), label));
-                    view.child(
-                        Button::new(("tool-file-preview", message_index))
-                            .ghost()
-                            .max_w(relative(0.6))
-                            .min_w_0()
-                            .h(px(38.))
-                            .px_2()
-                            .accessibility_label(full_path.clone())
-                            .tooltip(full_path)
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .text_size(px(12.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(div().min_w_0().truncate().child(directory))
-                                    .child(div().flex_none().whitespace_nowrap().child(filename)),
-                            )
-                            .on_click(move |_, window, cx| {
-                                let _ = preview_owner.update(cx, |this, cx| {
-                                    this.open_workspace_file(path.clone(), line, window, cx);
-                                });
-                            }),
-                    )
-                })
-                .child(tool_copy_actions(tool_use, tool_result, options))
-                .child(
-                    Button::new(("tool-chevron-toggle", message_index))
-                        .custom(
-                            ButtonCustomVariant::new(cx)
-                                .color(cx.theme().transparent)
-                                .foreground(cx.theme().foreground)
-                                .hover(cx.theme().transparent)
-                                .active(cx.theme().transparent),
-                        )
-                        .rounded_none()
-                        .flex_none()
-                        .h(px(38.))
-                        .icon(if is_expanded {
-                            IconName::ChevronUp
-                        } else {
-                            IconName::ChevronDown
-                        })
-                        .accessibility_label(tr(
-                            options.language,
-                            if is_expanded {
-                                "message.collapse"
-                            } else {
-                                "message.expand"
-                            },
-                        ))
-                        .on_click(move |_, _, cx| {
-                            let _ = chevron_owner.update(cx, |this, cx| {
-                                this.toggle_message(message_index, turn_index, cx)
-                            });
-                        }),
-                ),
-        )
-        .when(is_expanded && input.is_some(), |view| {
-            view.child(
-                div()
-                    .border_t_1()
-                    .border_dashed()
-                    .border_color(border)
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .mb_1()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr(options.language, "message.input")),
-                    )
-                    .when(input_rows.is_empty() && edit_diff.is_none(), |section| {
-                        section.child(
+            })
+            .when(is_expanded && output.is_some(), |view| {
+                view.child(
+                    div()
+                        .border_t_1()
+                        .border_color(border)
+                        .px_3()
+                        .py_2()
+                        .text_size(px(12.))
+                        .child(
                             div()
+                                .mb_1()
                                 .text_color(cx.theme().muted_foreground)
-                                .child(tr(options.language, "message.noInput")),
+                                .child(tr(options.language, "message.output")),
                         )
-                    })
-                    .when_some(edit_diff, |section, diff| {
-                        section.child(render_edit_diff(message_index, diff, options.language, cx))
-                    })
-                    .children(input_rows.into_iter().map(|(key, value)| {
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_start()
-                            .gap_2()
-                            .py(px(2.))
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!("{key}:")),
-                            )
-                            .child(div().flex_1().min_w_0().whitespace_normal().child(value))
-                    })),
-            )
-        })
-        .when(is_expanded && output.is_some(), |view| {
-            view.child(
-                div()
-                    .border_t_1()
-                    .border_color(border)
-                    .px_3()
-                    .py_2()
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .mb_1()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(tr(options.language, "message.output")),
-                    )
-                    .child(
-                        div()
-                            .w_full()
-                            .min_w_0()
-                            .rounded(px(4.))
-                            .bg(cx.theme().foreground.opacity(0.035))
-                            .p_2()
-                            .font_family(cx.theme().mono_font_family.clone())
-                            .text_color(cx.theme().foreground.opacity(0.72))
-                            .whitespace_normal()
-                            .child(if tool_name == "ExitPlanMode" {
-                                conversation_markdown(
-                                    ("plan-output", message_index),
-                                    output.unwrap_or_default(),
-                                    cx,
-                                )
-                                .font_family(cx.theme().font_family.clone())
-                                .text_color(cx.theme().foreground)
-                                .into_any_element()
-                            } else {
-                                div().child(output.unwrap_or_default()).into_any_element()
-                            }),
-                    ),
-            )
-        })
-        .into_any_element()
+                        .child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .rounded(px(4.))
+                                .bg(cx.theme().foreground.opacity(0.035))
+                                .p_2()
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_color(cx.theme().foreground.opacity(0.72))
+                                .whitespace_normal()
+                                .child(if tool_name == "ExitPlanMode" {
+                                    conversation_markdown(
+                                        ("plan-output", message_index),
+                                        output.unwrap_or_default(),
+                                        cx,
+                                    )
+                                    .font_family(cx.theme().font_family.clone())
+                                    .text_color(cx.theme().foreground)
+                                    .into_any_element()
+                                } else {
+                                    div().child(output.unwrap_or_default()).into_any_element()
+                                }),
+                        ),
+                )
+            })
+            .into_any_element(),
+    }
+    .into_any_element()
 }
 
 fn subagent_string(
@@ -1902,6 +2077,7 @@ fn render_subagent(
     tool_use: Option<&IndexedMessage>,
     tool_result: Option<&IndexedMessage>,
     options: ConversationOptions,
+    group_model: &str,
     expanded: &HashSet<usize>,
     owner: WeakEntity<YesSessions>,
     cx: &App,
@@ -1937,6 +2113,7 @@ fn render_subagent(
             tool_use,
             tool_result,
             options,
+            group_model,
             expanded,
             owner,
             cx,
@@ -2076,7 +2253,7 @@ fn render_subagent(
                             ))
                         },
                     )
-                    .child(tool_copy_actions(tool_use, tool_result, options))
+                    .child(tool_copy_actions(tool_use, tool_result, options, cx))
                     .child(
                         div()
                             .debug_selector(|| "subagent-open-action".into())
@@ -2145,22 +2322,148 @@ fn hover_actions(group: String) -> Div {
 
 const MESSAGE_ACTION_GAP: f32 = 24.;
 
-// Borrow the existing message gap for actions without adding a layout row.
-fn message_actions(group: String, button: Button) -> Div {
-    div().relative().w_full().h_0().child(
-        hover_actions(group)
-            .absolute()
-            .top_0()
-            .left_0()
-            .h(px(MESSAGE_ACTION_GAP))
-            .child(button.h(px(20.))),
-    )
+fn message_header_actions(group: String, button: Button) -> Div {
+    hover_actions(group).ml_auto().child(button.h(px(20.)))
+}
+
+#[derive(Default)]
+struct ReplyMenuState {
+    menu: Option<(Entity<PopupMenu>, Point<Pixels>)>,
+    subscription: Option<Subscription>,
+}
+
+#[derive(IntoElement)]
+struct ReplyContextMenu {
+    index: usize,
+    content: AnyElement,
+    messages: Vec<IndexedMessage>,
+    options: ConversationOptions,
+}
+
+impl RenderOnce for ReplyContextMenu {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let state = window.use_keyed_state(("reply-context", self.index), cx, |_, _| {
+            ReplyMenuState::default()
+        });
+        let overlay = state.read(cx).menu.clone().map(|(menu, position)| {
+            deferred(
+                anchored()
+                    .position(position)
+                    .snap_to_window_with_margin(px(8.))
+                    .child(menu),
+            )
+            .with_priority(gpui_kit::base::POPUP_PRIORITY)
+        });
+        div()
+            .w_full()
+            .child(self.content)
+            .children(overlay)
+            .on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                cx.stop_propagation();
+                let messages = self.messages.clone();
+                let options = self.options;
+                let previous_focus = window.focused(cx);
+                let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+                    let menu =
+                        menu.when_some(previous_focus, |menu, focus| menu.action_context(focus));
+                    menu.item(
+                        PopupMenuItem::new(tr(options.language, "message.copyReply"))
+                            .icon(IconName::Copy)
+                            .on_click(move |_, window, cx| {
+                                let text = messages_copy_text(&messages, options.show_thinking);
+                                if !text.is_empty() {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    crate::toast::copy_success(
+                                        options.language,
+                                        "copy.message",
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            }),
+                    )
+                });
+                menu.update(cx, |menu, cx| {
+                    menu.focus_handle(cx).focus(window, cx);
+                });
+                state.update(cx, |state, cx| {
+                    state.subscription =
+                        Some(cx.subscribe(&menu, |state, _, _: &DismissEvent, cx| {
+                            state.menu = None;
+                            state.subscription = None;
+                            cx.notify();
+                        }));
+                    state.menu = Some((menu, event.position));
+                    cx.notify();
+                });
+                window.refresh();
+            })
+    }
+}
+
+#[derive(IntoElement)]
+struct ToolCardOverlay {
+    index: usize,
+    content: AnyElement,
+    actions: AnyElement,
+}
+
+impl RenderOnce for ToolCardOverlay {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        let hovered = window.use_keyed_state(("tool-copy-hover", self.index), cx, |_, _| false);
+        let show = *hovered.read(cx);
+        let background = tool_card_background(cx);
+        div()
+            .id(("tool-copy-overlay", self.index))
+            .relative()
+            .w_full()
+            .child(self.content)
+            .on_hover(move |value, window, cx| {
+                hovered.update(cx, |hovered, cx| {
+                    *hovered = *value;
+                    cx.notify();
+                });
+                window.refresh();
+            })
+            .when(show, |view| {
+                view.child(
+                    deferred(
+                        div()
+                            .absolute()
+                            .top(px(1.))
+                            .right(px(39.))
+                            .w(px(56.))
+                            .h(px(38.))
+                            .flex()
+                            .items_center()
+                            .child(div().flex_none().w(px(24.)).h_full().bg(linear_gradient(
+                                90.,
+                                linear_color_stop(background.opacity(0.), 0.),
+                                linear_color_stop(background, 1.),
+                            )))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .w(px(32.))
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .bg(background)
+                                    .child(self.actions),
+                            ),
+                    )
+                    .with_priority(1),
+                )
+            })
+    }
 }
 
 fn tool_copy_actions(
     tool_use: Option<&IndexedMessage>,
     tool_result: Option<&IndexedMessage>,
     options: ConversationOptions,
+    cx: &App,
 ) -> Div {
     let items = tool_use
         .into_iter()
@@ -2172,8 +2475,15 @@ fn tool_copy_actions(
         .map(|item| item.index)
         .min()
         .unwrap_or_default();
-    hover_actions(format!("tool-actions-{index}"))
-        .child(messages_copy_button(&items, options, true))
+    hover_actions(format!("tool-actions-{index}")).child(
+        messages_copy_button(&items, options, true).custom(
+            ButtonCustomVariant::new(cx)
+                .color(cx.theme().transparent)
+                .foreground(cx.theme().foreground)
+                .hover(cx.theme().transparent)
+                .active(cx.theme().transparent),
+        ),
+    )
 }
 
 fn message_copy_button(item: &IndexedMessage, options: ConversationOptions) -> Button {
@@ -2363,6 +2673,7 @@ fn render_user(
         (rgb(0xdce5f2).into(), rgb(0x526986).into())
     };
     let header = div()
+        .w_full()
         .flex()
         .items_center()
         .gap_2()
@@ -2401,12 +2712,12 @@ fn render_user(
             div()
                 .text_size(px(12.))
                 .text_color(cx.theme().muted_foreground)
-                .child(display_time(&item.message.timestamp)),
-        );
-    let footer = message_actions(
-        format!("message-actions-{}", item.index),
-        message_copy_button(item, options),
-    );
+                .child(display_message_datetime(&item.message.timestamp)),
+        )
+        .child(message_header_actions(
+            format!("message-actions-{}", item.index),
+            message_copy_button(item, options),
+        ));
     let bubble = div()
         .debug_selector({
             let index = item.index;
@@ -2472,8 +2783,7 @@ fn render_user(
                     .v_flex()
                     .items_end()
                     .child(header)
-                    .child(bubble)
-                    .child(footer),
+                    .child(bubble),
             )
             .child(user_avatar)
             .into_any_element()
@@ -2487,14 +2797,7 @@ fn render_user(
             .items_start()
             .gap_3()
             .child(user_avatar)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(header)
-                    .child(bubble)
-                    .child(footer),
-            )
+            .child(div().flex_1().min_w_0().child(header).child(bubble))
             .into_any_element()
     }
 }
@@ -2583,12 +2886,12 @@ fn render_assistant_group(
     let start_time = items
         .iter()
         .min_by_key(|item| item.index)
-        .map(|item| display_time(&item.message.timestamp))
+        .map(|item| display_message_datetime(&item.message.timestamp))
         .unwrap_or_default();
     let end_time = items
         .iter()
         .max_by_key(|item| item.index)
-        .map(|item| display_time(&item.message.timestamp))
+        .map(|item| display_message_datetime(&item.message.timestamp))
         .unwrap_or_default();
     let timestamp = if start_time == end_time {
         start_time
@@ -2693,6 +2996,7 @@ fn render_assistant_group(
             pair.tool_use.as_ref(),
             pair.tool_result.as_ref(),
             options,
+            &model,
             expanded,
             owner.clone(),
             cx,
@@ -2704,6 +3008,7 @@ fn render_assistant_group(
                 pair.tool_use.as_ref(),
                 pair.tool_result.as_ref(),
                 options,
+                &model,
                 expanded,
                 owner.clone(),
                 cx,
@@ -2920,15 +3225,13 @@ fn render_assistant_group(
         return div().into_any_element();
     }
     let reply_usage = yes_core::model::TokenUsage::aggregate(
-        items
-            .iter()
-            .filter(|item| item.message.message_type == MessageType::Assistant)
-            .filter_map(|item| item.message.usage.as_ref()),
+        items.iter().filter_map(|item| item.message.usage.as_ref()),
     );
     let copy_items = items
         .into_iter()
         .filter(|item| item.message.message_type != MessageType::System)
         .collect::<Vec<_>>();
+    let context_copy_items = copy_items.clone();
     let body =
         div()
             .v_flex()
@@ -2942,7 +3245,7 @@ fn render_assistant_group(
                     .min_w_0()
                     .child(element)
             }));
-    div()
+    let content = div()
         .group(format!("reply-actions-{turn_index}"))
         .pb(px(MESSAGE_ACTION_GAP))
         .mb(px(-MESSAGE_ACTION_GAP))
@@ -2992,21 +3295,28 @@ fn render_assistant_group(
                                 .child(timestamp),
                         )
                         .when_some(reply_usage.as_ref(), |view, usage| {
-                            view.child(crate::token_usage::render(
+                            view.child(crate::token_usage::render_compact(
                                 ("reply-usage", turn_index),
                                 usage,
                                 options.language,
                                 cx,
                             ))
-                        }),
+                        })
+                        .child(message_header_actions(
+                            format!("reply-actions-{turn_index}"),
+                            messages_copy_button(&copy_items, options, false),
+                        )),
                 )
-                .child(body)
-                .child(message_actions(
-                    format!("reply-actions-{turn_index}"),
-                    messages_copy_button(&copy_items, options, false),
-                )),
+                .child(body),
         )
-        .into_any_element()
+        .into_any_element();
+    ReplyContextMenu {
+        index: turn_index,
+        content,
+        messages: context_copy_items,
+        options,
+    }
+    .into_any_element()
 }
 
 fn render_turn(
@@ -4037,9 +4347,8 @@ mod tests {
             let user_body = visual.debug_bounds("conversation-bubble-0").unwrap();
             visual.simulate_mouse_move(user_body.center(), None, Default::default());
             let user_copy = visual.debug_bounds("copy-message-0").unwrap();
-            assert!(user_copy.top() >= user_body.bottom());
-            assert_eq!(user_copy.left(), user_body.left());
-            assert_eq!(reply_before_hover.top() - user_body.bottom(), px(24.));
+            assert!(user_copy.bottom() <= user_body.top());
+            assert_eq!(user_copy.right(), user_body.right());
             assert!(user_copy.bottom() <= reply_before_hover.top());
             for (index, parent, expected) in [
                 (
@@ -4079,6 +4388,27 @@ mod tests {
             visual.simulate_mouse_move(user_body.center(), None, Default::default());
             assert!(visual.debug_bounds("copy-tool-2").is_none());
             assert!(visual.debug_bounds("copy-message-1").is_none());
+            // Copy from the body, without moving back to the header button.
+            let section = visual.debug_bounds("assistant-section-1").unwrap();
+            visual.simulate_mouse_move(section.center(), None, Default::default());
+            cx.update(|cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("sentinel".into()))
+            });
+            visual.simulate_mouse_down(
+                section.center(),
+                gpui_kit::MouseButton::Right,
+                Default::default(),
+            );
+            visual.run_until_parked();
+            visual.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+            visual.simulate_keystrokes("down enter");
+            visual.run_until_parked();
+            assert_eq!(
+                cx.update(|cx| cx.read_from_clipboard().unwrap().text().unwrap()),
+                expected_reply
+            );
         }
     }
 
@@ -4187,6 +4517,7 @@ mod tests {
                         chat_bubbles: false,
                         collapse_tool_blocks: true,
                     },
+                    "",
                     &Default::default(),
                     self.owner.downgrade(),
                     cx,
@@ -4243,6 +4574,22 @@ mod tests {
     }
 
     #[test]
+    fn header_times_include_seconds_and_keep_tool_times_compact() {
+        let timestamp = "2026-09-03T13:35:42Z";
+        let local = chrono::DateTime::parse_from_rfc3339(timestamp)
+            .unwrap()
+            .with_timezone(&chrono::Local);
+        assert_eq!(
+            super::display_tool_time(timestamp),
+            local.format("%H:%M:%S").to_string()
+        );
+        assert_eq!(
+            super::display_message_datetime(timestamp),
+            local.format("%Y/%m/%d %H:%M:%S").to_string()
+        );
+    }
+
+    #[test]
     fn preserves_orphan_tool_results() {
         let pairs = pair_tool_messages(&[tool_message(
             4,
@@ -4276,6 +4623,128 @@ mod tests {
         for (name, expected) in cases {
             assert_eq!(tool_type(name), expected, "unexpected type for {name}");
         }
+    }
+
+    #[test]
+    fn tool_icons_distinguish_operations_and_namespaced_tools() {
+        use super::tool_icon;
+        use gpui_kit::component::{IconName, IconNamed};
+
+        for (name, expected) in [
+            ("Read", IconName::BookOpen),
+            ("Edit", IconName::Replace),
+            ("Write", IconName::File),
+            ("Glob", IconName::Folder),
+            ("Grep", IconName::Search),
+            ("Exec", IconName::SquareTerminal),
+            ("WebFetch", IconName::Globe),
+            ("Task", IconName::Bot),
+            ("AskUserQuestion", IconName::Info),
+            ("mcp:filesystem:read_file", IconName::BookOpen),
+            ("mcp__filesystem__edit_file", IconName::Replace),
+            ("custom", IconName::Settings2),
+        ] {
+            assert_eq!(
+                tool_icon(name).path(),
+                expected.path(),
+                "unexpected icon for {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn response_ids_group_text_and_tools_without_merging_other_responses() {
+        let mut text =
+            SessionMessage::text(MessageType::Assistant, "", "I'll look at the file first.");
+        text.metadata.insert("response_id".into(), json!("first"));
+        let mut read = SessionMessage::text(MessageType::ToolUse, "", "");
+        read.tool_name = Some("Read".into());
+        read.call_id = Some("read-call".into());
+        read.metadata.insert("response_id".into(), json!("first"));
+        let mut grep = SessionMessage::text(MessageType::ToolUse, "", "");
+        grep.tool_name = Some("Grep".into());
+        grep.metadata.insert("response_id".into(), json!("second"));
+        let mut result = SessionMessage::text(MessageType::ToolResult, "", "file contents");
+        result.tool_name = Some("Read".into());
+        result.call_id = Some("read-call".into());
+        let turns = super::display_turns(&[text, read, grep, result], AppType::CodeBuddy);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[0]
+                .messages
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3]
+        );
+        assert_eq!(turns[1].messages[0].index, 2);
+    }
+
+    #[test]
+    fn consecutive_tool_responses_merge_without_absorbing_text_response() {
+        let mut text = SessionMessage::text(MessageType::Assistant, "", "Checking the file.");
+        text.metadata.insert("response_id".into(), json!("first"));
+        let mut messages = vec![text];
+        for (index, response) in ["first", "second", "third"].into_iter().enumerate() {
+            let mut call = SessionMessage::text(MessageType::ToolUse, "", "");
+            call.tool_name = Some("Read".into());
+            call.call_id = Some(format!("call-{index}"));
+            call.metadata.insert("response_id".into(), json!(response));
+            call.usage = Some(yes_core::model::TokenUsage {
+                input_tokens: Some(100),
+                output_tokens: Some(10),
+                ..Default::default()
+            });
+            messages.push(call);
+        }
+        let turns = super::display_turns(&messages, AppType::CodeBuddy);
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            turns[0]
+                .messages
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            turns[1]
+                .messages
+                .iter()
+                .map(|item| item.index)
+                .collect::<Vec<_>>(),
+            vec![2, 3]
+        );
+        let usage = yes_core::model::TokenUsage::aggregate(
+            turns[1]
+                .messages
+                .iter()
+                .filter_map(|item| item.message.usage.as_ref()),
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, Some(200));
+        assert_eq!(usage.output_tokens, Some(20));
+        assert_eq!(super::activity_keys(&turns[1].messages, false).len(), 2);
+    }
+
+    #[test]
+    fn tools_in_one_response_keep_the_activity_fold() {
+        let messages = (0..4)
+            .map(|index| {
+                let mut message = SessionMessage::text(MessageType::ToolUse, "", "");
+                message.tool_name = Some("Read".into());
+                message.call_id = Some(format!("call-{index}"));
+                message
+                    .metadata
+                    .insert("response_id".into(), json!("response"));
+                message
+            })
+            .collect::<Vec<_>>();
+        let turns = super::display_turns(&messages, AppType::CodeBuddy);
+        assert_eq!(turns.len(), 1);
+        let keys = super::activity_keys(&turns[0].messages, false);
+        assert_eq!(keys.len(), 4);
+        assert!(keys.values().all(|key| *key == keys[&0]));
     }
 
     #[test]

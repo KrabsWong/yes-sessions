@@ -1,4 +1,4 @@
-use gpui_kit::component::{ActiveTheme as _, tooltip::Tooltip};
+use gpui_kit::component::{ActiveTheme as _, text::TextView, tooltip::Tooltip};
 use gpui_kit::*;
 use yes_core::{Language, model::TokenUsage};
 
@@ -68,83 +68,194 @@ pub(crate) fn render(
     let rate = usage
         .cache_hit_rate()
         .map_or_else(|| "—".into(), |rate| format!("{rate:.2}%"));
-    let tooltip = fields(usage, language);
-    div()
-        .id(id)
-        .flex()
-        .items_center()
-        .gap_2()
-        .flex_none()
-        .whitespace_nowrap()
-        .text_size(px(10.))
-        .font_weight(FontWeight::NORMAL)
-        .text_color(cx.theme().muted_foreground)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground.opacity(0.65))
-                        .child("↑"),
-                )
-                .child(count(usage.input_tokens)),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_color(cx.theme().muted_foreground.opacity(0.65))
-                        .child("↓"),
-                )
-                .child(count(usage.output_tokens)),
-        )
-        .child(
-            div()
-                .text_color(cx.theme().muted_foreground.opacity(0.65))
-                .child("·"),
-        )
-        .child(rate)
-        .tooltip(move |window, cx| {
-            let rows = tooltip.clone();
-            Tooltip::element(move |_, cx| {
+    with_tooltip(
+        div()
+            .id(id)
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .whitespace_nowrap()
+            .text_size(px(10.))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(cx.theme().muted_foreground)
+            .child(
                 div()
                     .flex()
-                    .gap_4()
-                    .py_1()
-                    .text_size(px(12.))
-                    .whitespace_nowrap()
+                    .items_center()
+                    .gap_1()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .text_color(cx.theme().muted_foreground)
-                            .children(rows.iter().map(|(label, _)| div().child(*label))),
+                            .text_color(cx.theme().muted_foreground.opacity(0.65))
+                            .child("↑"),
                     )
+                    .child(count(usage.input_tokens)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
                     .child(
                         div()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .text_right()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(cx.theme().popover_foreground)
-                            .children(rows.iter().map(|(_, value)| div().child(value.clone()))),
+                            .text_color(cx.theme().muted_foreground.opacity(0.65))
+                            .child("↓"),
                     )
-            })
-            .build(window, cx)
+                    .child(count(usage.output_tokens)),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().muted_foreground.opacity(0.65))
+                    .child("·"),
+            )
+            .child(rate),
+        usage,
+        language,
+    )
+}
+
+pub(crate) fn render_compact(
+    id: impl Into<ElementId>,
+    usage: &TokenUsage,
+    language: Language,
+    cx: &App,
+) -> impl IntoElement {
+    let count = |value: Option<u64>| {
+        value.map_or_else(|| "—".into(), |value| compact_count(value).replace(' ', ""))
+    };
+    let rate = usage
+        .cache_hit_rate()
+        .map_or_else(|| "—".into(), |rate| format!("{rate:.1}%"));
+    with_tooltip(
+        div()
+            .id(id)
+            .flex_none()
+            .whitespace_nowrap()
+            .text_size(px(10.))
+            .font_weight(FontWeight::NORMAL)
+            .text_color(cx.theme().muted_foreground)
+            .child(format!(
+                "[↑{} ↓{} · {}]",
+                count(usage.input_tokens),
+                count(usage.output_tokens),
+                rate
+            )),
+        usage,
+        language,
+    )
+}
+
+pub(crate) fn with_tooltip(
+    view: Stateful<Div>,
+    usage: &TokenUsage,
+    language: Language,
+) -> Stateful<Div> {
+    let tooltip = fields(usage, language);
+    view.hoverable_tooltip(move |window, cx| {
+        let rows = tooltip.clone();
+        Tooltip::element(move |_, cx| {
+            div()
+                .debug_selector(|| "usage-tooltip".into())
+                .flex()
+                .gap_4()
+                .py_1()
+                .text_size(px(12.))
+                .whitespace_nowrap()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .text_color(cx.theme().muted_foreground)
+                        .children(rows.iter().map(|(label, _)| div().child(*label))),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_2()
+                        .text_right()
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(cx.theme().popover_foreground)
+                        .children(rows.iter().enumerate().map(|(index, (_, value))| {
+                            div()
+                                .debug_selector(move || format!("usage-value-{index}"))
+                                .child(
+                                    TextView::markdown(("usage-value", index), value.clone())
+                                        .selectable(true),
+                                )
+                        })),
+                )
         })
+        .build(window, cx)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::{compact_count, fields, grouped_count};
     use yes_core::{Language, model::TokenUsage};
+
+    struct UsageTestView;
+
+    impl gpui_kit::Render for UsageTestView {
+        fn render(
+            &mut self,
+            _: &mut gpui_kit::Window,
+            cx: &mut gpui_kit::Context<Self>,
+        ) -> impl gpui_kit::IntoElement {
+            use gpui_kit::*;
+            div().p_4().child(super::render(
+                "usage-trigger",
+                &TokenUsage {
+                    input_tokens: Some(176372),
+                    ..Default::default()
+                },
+                Language::En,
+                cx,
+            ))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn usage_tooltip_stays_open_under_pointer(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::*;
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(600.), px(400.)), |window, cx| {
+            let view = cx.new(|_| UsageTestView);
+            gpui_kit::component::Root::new(view, window, cx)
+        });
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.simulate_mouse_move(point(px(30.), px(24.)), None, Default::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        visual.run_until_parked();
+        let popup = visual.debug_bounds("usage-tooltip").expect("tooltip opens");
+        visual.simulate_mouse_move(popup.center(), None, Default::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("usage-tooltip").is_some());
+        visual.simulate_click(popup.center(), Default::default());
+        assert!(visual.debug_bounds("usage-tooltip").is_some());
+        let value = visual.debug_bounds("usage-value-0").unwrap();
+        let start = point(value.left() + px(1.), value.center().y);
+        let end = point(value.right() - px(1.), value.center().y);
+        visual.simulate_mouse_move(start, None, Default::default());
+        visual.simulate_mouse_down(start, MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(end, Some(MouseButton::Left), Default::default());
+        visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+        visual.simulate_keystrokes("cmd-c");
+        assert_eq!(
+            cx.update(|cx| cx.read_from_clipboard().and_then(|item| item.text())),
+            Some("176.37 K (176,372)".into())
+        );
+        visual.simulate_mouse_move(point(px(590.), px(390.)), None, Default::default());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(1));
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("usage-tooltip").is_none());
+    }
 
     #[test]
     fn exact_counts_use_thousands_separators() {

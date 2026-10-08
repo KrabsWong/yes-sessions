@@ -323,7 +323,16 @@ impl ClaudeProvider {
         let mut usage_indices: HashMap<&str, usize> = HashMap::new();
         for record in Self::conversation_chain(records) {
             current_model = Self::message_model(record, current_model);
-            let parsed = Self::parse_new_message(record, current_model.clone());
+            let mut parsed = Self::parse_new_message(record, current_model.clone());
+            if record.pointer("/message/role").and_then(Value::as_str) == Some("assistant") {
+                if let Some(id) = record.pointer("/message/id").and_then(Value::as_str) {
+                    for message in &mut parsed {
+                        message
+                            .metadata
+                            .insert("response_id".into(), serde_json::json!(id));
+                    }
+                }
+            }
             if parsed.last().is_some_and(|message| message.usage.is_some()) {
                 // One response can be saved as several thinking/text/tool envelopes.
                 // Later nonzero usage replaces the earlier snapshot, never adds to it.

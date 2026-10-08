@@ -305,6 +305,8 @@ impl CodeBuddyProvider {
         let mut seen_responses = HashSet::new();
 
         for record in records {
+            let response_id = Self::string(record.pointer("/providerData/messageId"))
+                .or_else(|| Self::string(record.pointer("/message/id")));
             current_model = Self::string(record.pointer("/providerData/model")).or(current_model);
             let timestamp = Self::iso_time(record.get("timestamp"), fallback);
             let kind = record
@@ -397,6 +399,11 @@ impl CodeBuddyProvider {
                     message.metadata.insert("subtype".into(), json!(status));
                 }
                 message.model = current_model.clone();
+                if message.message_type != MessageType::User {
+                    if let Some(id) = &response_id {
+                        message.metadata.insert("response_id".into(), json!(id));
+                    }
+                }
                 messages.push(message);
                 continue;
             }
@@ -431,6 +438,11 @@ impl CodeBuddyProvider {
                         crate::usage::apply_usage_events(&mut message, &pending_usage);
                     }
                     pending_usage.clear();
+                    if message.message_type != MessageType::User {
+                        if let Some(id) = &response_id {
+                            message.metadata.insert("response_id".into(), json!(id));
+                        }
+                    }
                     messages.push(message);
                 }
                 continue;
@@ -456,6 +468,11 @@ impl CodeBuddyProvider {
                 pending_usage.clear();
                 if name.to_ascii_lowercase().contains("agent") {
                     pending_agents.insert(call_id, input);
+                }
+                if message.message_type != MessageType::User {
+                    if let Some(id) = &response_id {
+                        message.metadata.insert("response_id".into(), json!(id));
+                    }
                 }
                 messages.push(message);
                 continue;
@@ -512,6 +529,11 @@ impl CodeBuddyProvider {
                         .insert("childSessionAppType".into(), json!("codebuddy"));
                 }
                 message.model = current_model.clone();
+                if message.message_type != MessageType::User {
+                    if let Some(id) = &response_id {
+                        message.metadata.insert("response_id".into(), json!(id));
+                    }
+                }
                 messages.push(message);
             }
         }
@@ -1004,6 +1026,28 @@ mod tests {
             CodeBuddyProvider::token_usage(&json!({"message": {"usage": {"input_tokens": -1}}}))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn response_identity_survives_text_and_tool_normalization() {
+        let provider = CodeBuddyProvider::default();
+        let messages = provider.normalize(&[
+            json!({"type":"message", "role":"assistant", "content":"I'll look at the file first.", "providerData":{"messageId":"response"}}),
+            json!({"type":"function_call", "name":"Read", "callId":"call", "arguments":{}, "providerData":{"messageId":"response", "usage":{"inputTokens":47154,"outputTokens":163}}}),
+            json!({"type":"function_call_result", "name":"Read", "callId":"call", "output":"contents", "providerData":{"messageId":"response"}}),
+        ], 0);
+        assert_eq!(messages.len(), 3);
+        for message in &messages {
+            assert_eq!(
+                message.metadata.get("response_id").and_then(Value::as_str),
+                Some("response")
+            );
+        }
+        let usage =
+            TokenUsage::aggregate(messages.iter().filter_map(|message| message.usage.as_ref()))
+                .unwrap();
+        assert_eq!(usage.input_tokens, Some(47154));
+        assert_eq!(usage.output_tokens, Some(163));
     }
 
     #[test]

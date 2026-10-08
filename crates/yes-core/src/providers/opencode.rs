@@ -411,12 +411,15 @@ impl OpenCodeProvider {
                 .filter_map(Result::ok)
                 .filter_map(|source| serde_json::from_str(&source).ok())
                 .collect::<Vec<Value>>();
-            messages.extend(Self::parse_message(
-                &data,
-                &parts,
-                timestamp,
-                current_model.clone(),
-            ));
+            let mut parsed = Self::parse_message(&data, &parts, timestamp, current_model.clone());
+            for message in &mut parsed {
+                if message.message_type != MessageType::User {
+                    message
+                        .metadata
+                        .insert("response_id".into(), serde_json::json!(message_id));
+                }
+            }
+            messages.extend(parsed);
         }
 
         Ok(messages)

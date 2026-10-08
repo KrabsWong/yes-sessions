@@ -83,6 +83,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "dashboard.more") => "显示更多",
         (_, "dashboard.more") => "Show more",
 
+        (Language::Zh, "usage.label") => "Token 用量",
+        (_, "usage.label") => "Token usage",
         (Language::Zh, "usage.input") => "输入",
         (_, "usage.input") => "Input",
         (Language::Zh, "usage.output") => "输出",
@@ -179,6 +181,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "copy.tool") => "此次工具调用内容",
         (_, "copy.tool") => "Tool call content",
         (Language::Zh, "message.copy") => "复制此条消息",
+        (Language::Zh, "message.copyReply") => "复制整条回复",
+        (_, "message.copyReply") => "Copy entire reply",
         (_, "message.copy") => "Copy this message",
         (Language::Zh, "copy.message") => "消息内容",
         (_, "copy.message") => "Message content",
