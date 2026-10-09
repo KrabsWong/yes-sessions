@@ -79,6 +79,12 @@ fn from_location(
 
 pub fn structured(block: &Value) -> Option<SessionAttachment> {
     let kind = block.get("type")?.as_str()?;
+    if kind == "input_image"
+        && let Some(image) = block.get("image")
+        && image.get("type").and_then(Value::as_str) == Some("image_blob_ref")
+    {
+        return structured(image);
+    }
     if !matches!(
         kind,
         "input_image"

@@ -1295,6 +1295,35 @@ mod tests {
         );
     }
     #[test]
+    fn nested_input_image_blob_references_are_preserved() {
+        let provider = CodeBuddyProvider::with_root(PathBuf::from("/tmp/absent"));
+        let text = "第一步的结果是 [Image #2]\n\n第二步的结果是 [Image #3]";
+        let messages = provider.normalize(
+            &[json!({"type":"message","role":"user","content":[
+                {"type":"input_text","text":text},
+                {"type":"input_image","image":{"type":"image_blob_ref","blob_path":"/tmp/first.png","mime":"image/png"}},
+                {"type":"input_image","image":{"type":"image_blob_ref","blob_path":"/tmp/second.png","mime":"image/png"}}
+            ]})],
+            0,
+        );
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].content.as_deref(), Some(text));
+        assert_eq!(messages[0].attachments.len(), 2);
+        for (attachment, path) in messages[0]
+            .attachments
+            .iter()
+            .zip(["/tmp/first.png", "/tmp/second.png"])
+        {
+            assert_eq!(
+                attachment.source,
+                crate::AttachmentSource::LocalPath(PathBuf::from(path))
+            );
+            assert_eq!(attachment.mime_type.as_deref(), Some("image/png"));
+            assert!(attachment.is_image());
+        }
+    }
+
+    #[test]
     fn blob_references_are_preserved_without_loading_files() {
         let provider = CodeBuddyProvider::with_root(std::path::PathBuf::from("/tmp/absent"));
         let messages = provider.normalize(&[json!({"type":"message","role":"user","content":[{"type":"image_blob_ref","blob_path":"/tmp/missing-image.png","mime":"image/png"},{"type":"file","path":"/tmp/missing.pdf"}]})], 0);
