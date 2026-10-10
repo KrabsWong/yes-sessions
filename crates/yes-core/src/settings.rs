@@ -53,6 +53,7 @@ pub struct AppSettings {
     pub chat_layout: ChatLayout,
     pub sidebar_collapsed: bool,
     pub preferred_terminal: PreferredTerminal,
+    pub remote_codex: Option<crate::remote::RemoteCodexConfig>,
 }
 
 impl Default for AppSettings {
@@ -69,6 +70,7 @@ impl Default for AppSettings {
             chat_layout: ChatLayout::Left,
             sidebar_collapsed: false,
             preferred_terminal: PreferredTerminal::Auto,
+            remote_codex: None,
         }
     }
 }

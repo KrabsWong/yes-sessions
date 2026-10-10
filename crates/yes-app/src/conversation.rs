@@ -24,6 +24,7 @@ use crate::{app::YesSessions, app_assets::ProviderIcon, i18n::tr, mermaid::Merma
 pub struct ConversationOptions {
     pub language: Language,
     pub provider: AppType,
+    pub remote: bool,
     pub is_subagent: bool,
     pub show_thinking: bool,
     pub chat_bubbles: bool,
@@ -104,6 +105,7 @@ impl ConversationLayout {
 fn conversation_markdown(
     id: impl Into<ElementId>,
     markdown: impl Into<SharedString>,
+    remote: bool,
     cx: &App,
 ) -> TextView {
     let mut style = TextViewStyle::default().inline_code(HighlightStyle {
@@ -115,6 +117,20 @@ fn conversation_markdown(
     }
     style.heading_base_font_size = px(15.);
     TextView::markdown(id, markdown)
+        .when(remote, |view| {
+            view.on_link_click(|url, event, _, cx| {
+                let activate = match event {
+                    ClickEvent::Mouse(click) => {
+                        matches!(click.up.button, MouseButton::Left | MouseButton::Middle)
+                    }
+                    ClickEvent::Keyboard(_) => true,
+                    ClickEvent::Touch(click) => !click.long_press,
+                };
+                if activate && (url.starts_with("https://") || url.starts_with("http://")) {
+                    cx.open_url(url);
+                }
+            })
+        })
         .style(style)
         .text_sm()
         .text_size(px(15.))
@@ -1129,6 +1145,7 @@ fn tool_color(tool_type: ToolType, cx: &App) -> Hsla {
 
 fn message_content(
     item: &IndexedMessage,
+    remote: bool,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
     cx: &App,
 ) -> AnyElement {
@@ -1140,7 +1157,7 @@ fn message_content(
     else {
         return div().into_any_element();
     };
-    message_content_text(&content, item.index, "body", 0, mermaid_views, cx)
+    message_content_text(&content, item.index, "body", 0, mermaid_views, remote, cx)
 }
 
 fn message_content_text(
@@ -1149,10 +1166,11 @@ fn message_content_text(
     part: &str,
     diagram_start: usize,
     mermaid_views: &HashMap<(usize, usize), Entity<MermaidDiagram>>,
+    remote: bool,
     cx: &App,
 ) -> AnyElement {
     let markdown_view = |id: ElementId, markdown: String| -> AnyElement {
-        conversation_markdown(id, markdown, cx).into_any_element()
+        conversation_markdown(id, markdown, remote, cx).into_any_element()
     };
     let mut body = div().v_flex().gap_2().min_w_0().w_full().text_sm();
     let mut diagram_index = diagram_start;
@@ -1205,7 +1223,7 @@ fn assistant_content(
 ) -> AnyElement {
     use yes_core::claude_xml::{ClaudeXmlSegment, parse_claude_xml};
     if options.provider != AppType::Claude {
-        return message_content(item, mermaid_views, cx);
+        return message_content(item, options.remote, mermaid_views, cx);
     }
     let segments = parse_claude_xml(item.message.content.as_deref().unwrap_or_default());
     let card_indices: Vec<_> = segments
@@ -1214,7 +1232,7 @@ fn assistant_content(
         .filter_map(|(i, segment)| (!matches!(segment, ClaudeXmlSegment::Text(_))).then_some(i))
         .collect();
     if card_indices.is_empty() {
-        return message_content(item, mermaid_views, cx);
+        return message_content(item, options.remote, mermaid_views, cx);
     }
     let message_index = item.index;
     let mut body = div().v_flex().w_full().min_w_0().gap_2();
@@ -1262,6 +1280,7 @@ fn assistant_content(
                     &format!("xml-{index}"),
                     diagram_start,
                     mermaid_views,
+                    options.remote,
                     cx,
                 ));
                 continue;
@@ -1392,6 +1411,7 @@ fn assistant_content(
                         index.to_string(),
                     ),
                     xml_file_markdown(content),
+                    options.remote,
                     cx,
                 ));
             }
@@ -1493,7 +1513,7 @@ fn render_system(item: &IndexedMessage, options: ConversationOptions, cx: &App) 
                         language: options.language,
                     })
                 })
-                .child(message_content(item, &HashMap::new(), cx)),
+                .child(message_content(item, options.remote, &HashMap::new(), cx)),
         )
         .child(
             hover_actions(format!("message-actions-{}", item.index))
@@ -1584,6 +1604,7 @@ fn render_reasoning(
                     .child(conversation_markdown(
                         ("reasoning", item.index),
                         content,
+                        options.remote,
                         cx,
                     )),
             )
@@ -1832,6 +1853,7 @@ fn render_tool(
                             .unwrap_or_else(|| (String::new(), label));
                         view.child(
                             Button::new(("tool-file-preview", message_index))
+                                .disabled(options.remote)
                                 .custom(
                                     ButtonCustomVariant::new(cx)
                                         .color(cx.theme().transparent)
@@ -2026,6 +2048,7 @@ fn render_tool(
                                     conversation_markdown(
                                         ("plan-output", message_index),
                                         output.unwrap_or_default(),
+                                        options.remote,
                                         cx,
                                     )
                                     .font_family(cx.theme().font_family.clone())
@@ -2621,7 +2644,12 @@ fn render_user_context(
         .when(expanded, |view| {
             let view = view.child(user_context_payload(
                 index,
-                conversation_markdown(("user-context-text", index), xml_file_markdown(context), cx),
+                conversation_markdown(
+                    ("user-context-text", index),
+                    xml_file_markdown(context),
+                    options.remote,
+                    cx,
+                ),
                 cx,
             ));
             let Some(original) = item
@@ -2751,7 +2779,7 @@ fn render_user(
                 }
                 .into_any_element()
             } else {
-                message_content(item, mermaid_views, cx)
+                message_content(item, options.remote, mermaid_views, cx)
             },
         );
     let bubble = bubble.when(item.message.metadata.contains_key("user_context"), |view| {
@@ -2973,6 +3001,7 @@ fn render_assistant_group(
             body = body.child(conversation_markdown(
                 ("tool-questions", item.index),
                 markdown,
+                options.remote,
                 cx,
             ));
         }
@@ -4087,6 +4116,7 @@ mod tests {
             );
             message.metadata.insert("original_user_content".into(), serde_json::json!("<user_info>\nShell: Zsh\n</user_info>\n<user_query>Please inspect <widget> as user code.</user_query>"));
             let options = ConversationOptions {
+                remote: false,
                 language: self.language,
                 provider: AppType::CodeBuddyCn,
                 is_subagent: false,
@@ -4243,6 +4273,7 @@ mod tests {
         ) -> impl gpui_kit::IntoElement {
             use gpui_kit::{ParentElement as _, Styled as _};
             let options = super::ConversationOptions {
+                remote: false,
                 language: yes_core::Language::En,
                 provider: AppType::Claude,
                 is_subagent: self.is_subagent,
@@ -4449,6 +4480,7 @@ mod tests {
                     conclusion,
                 ],
                 super::ConversationOptions {
+                    remote: false,
                     language: yes_core::Language::En,
                     provider: AppType::Claude,
                     is_subagent: false,
@@ -4510,6 +4542,7 @@ mod tests {
                     Some(&call),
                     None,
                     super::ConversationOptions {
+                        remote: false,
                         language: self.language,
                         provider: AppType::Claude,
                         is_subagent: false,

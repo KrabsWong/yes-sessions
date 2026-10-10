@@ -2,6 +2,49 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "remote.title") => "远程",
+        (_, "remote.title") => "Remote",
+        (Language::Zh, "remote.reading") => "正在读取…",
+        (_, "remote.reading") => "Reading…",
+        (Language::Zh, "remote.readFailed") => "读取失败",
+        (_, "remote.readFailed") => "Read failed",
+        (Language::Zh, "remote.snapshotReady") => "会话已读取",
+        (_, "remote.snapshotReady") => "Sessions loaded",
+        (Language::Zh, "remote.local") => "本机",
+        (_, "remote.local") => "Local",
+        (Language::Zh, "remote.configure") => "连接远程 Codex…",
+        (_, "remote.configure") => "Connect remote Codex…",
+        (Language::Zh, "remote.description") => {
+            "通过 SSH 只读浏览 Linux 服务器上的 Codex 会话，无需安装远程程序。"
+        }
+        (_, "remote.description") => {
+            "Read Codex sessions on a Linux server over SSH. No remote installation required."
+        }
+        (Language::Zh, "remote.target") => "SSH 目标（配置别名或 user@host）",
+        (_, "remote.target") => "SSH target (config alias or user@host)",
+        (Language::Zh, "remote.root") => "远程 Codex 数据目录",
+        (_, "remote.root") => "Remote Codex data directory",
+        (Language::Zh, "remote.authHelp") => {
+            "需要密码时，先在终端登录，完成后点击连接。支持自定义 Codex 目录；远程仅支持摘要搜索和手动刷新。"
+        }
+        (_, "remote.authHelp") => {
+            "For password authentication, log in through Terminal first, then connect. Custom Codex directories are supported. Remote search covers summaries; refresh manually."
+        }
+        (Language::Zh, "remote.login") => "在终端登录",
+        (_, "remote.login") => "Log in with Terminal",
+        (Language::Zh, "remote.connect") => "连接",
+        (_, "remote.connect") => "Connect",
+        (Language::Zh, "remote.loginPending") => {
+            "请在新终端中完成 SSH 登录，然后点击连接。密码不会保存到应用。"
+        }
+        (_, "remote.loginPending") => {
+            "Complete SSH login in the new Terminal, then click Connect. The app does not store your password."
+        }
+        (Language::Zh, "remote.summaryOnly") => "远程搜索仅匹配会话摘要",
+        (_, "remote.summaryOnly") => "Remote search matches session summaries only",
+        (Language::Zh, "remote.readOnly") => "只读 · 手动刷新",
+        (_, "remote.readOnly") => "Read only · Manual refresh",
+
         (Language::Zh, "message.userContext") => "附加上下文",
         (_, "message.userContext") => "Attached context",
         (Language::Zh, "message.copyOriginal") => "复制原始消息",

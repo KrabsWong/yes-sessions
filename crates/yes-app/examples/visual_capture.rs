@@ -47,6 +47,44 @@ fn main() -> Result<()> {
     let window = AnyWindowHandle::from(window);
 
     settle(&mut cx, window)?;
+    if env::args().any(|arg| arg == "--remote") {
+        for (language, label) in [
+            (yes_core::Language::Zh, "zh"),
+            (yes_core::Language::En, "en"),
+        ] {
+            cx.update_window(window, |root, _, cx| {
+                let app = root
+                    .downcast::<Root>()
+                    .unwrap()
+                    .read(cx)
+                    .view()
+                    .clone()
+                    .downcast::<YesSessions>()
+                    .unwrap();
+                app.update(cx, |app, cx| {
+                    app.settings.language = language;
+                    app.open_remote_settings(cx);
+                });
+            })?;
+            settle(&mut cx, window)?;
+            save_capture(
+                &mut cx,
+                window,
+                output_dir.join(format!("remote-settings-{label}.png")),
+            )?;
+        }
+        click(&mut cx, window, 525., 551.)?;
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        settle(&mut cx, window)?;
+        save_capture(&mut cx, window, output_dir.join("remote-bar-light.png"))?;
+        cx.update_window(window, |_, window, cx| {
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+        })?;
+        settle(&mut cx, window)?;
+        save_capture(&mut cx, window, output_dir.join("remote-bar-dark.png"))?;
+        fs::remove_dir_all(&fixture_home)?;
+        return Ok(());
+    }
     save_capture(&mut cx, window, output_dir.join("main-light.png"))?;
 
     // Capture the rendered selection while the button is still held. Do not
@@ -470,7 +508,8 @@ fn prepare_fixture(home: &Path) -> Result<()> {
   "showThinkingContent": true,
   "chatLayout": "left",
   "sidebarCollapsed": false,
-  "preferredTerminal": "auto"
+  "preferredTerminal": "auto",
+  "remoteCodex": { "ssh_alias": "visual-test@127.0.0.1", "root": "~/.codex" }
 }"#,
     )
     .context("write settings fixture")?;
