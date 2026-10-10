@@ -10,7 +10,11 @@ Storage format changes in the original tool may require an update. When reportin
 
 ## Why is content missing or usage zero?
 
-Only information saved by the source tool can be displayed. Some sessions lack reasoning, token usage, or attachment bodies; missing statistics do not imply no actual usage. Moved, deleted, or remote-only attachments may not be available for preview.
+Only information saved by the source tool can be displayed. Some sessions lack reasoning, token usage, or attachment bodies; missing statistics do not imply no actual usage. The usage dashboard only totals recognized data, so missing fields can make totals incomplete. Moved, deleted, or remote-only attachments may not be available for preview.
+
+## Why does cross-session search return no or incomplete results?
+
+Confirm the selected tool and review the keyword, time range, and working-directory filters. Message-role filters search only messages of that role; set the message type to All to search session information. Unreadable sessions are reported, and results are capped at 1,000. Narrow the time or directory scope and try again.
 
 ## Why does resuming fail?
 
@@ -20,9 +24,13 @@ When using Terminal.app, macOS may ask for automation permission. If previously 
 
 ## What if macOS blocks the app?
 
-Confirm the package came from the project’s [Releases](https://github.com/KrabsWong/yes-sessions/releases) and read that version’s signing notes. Where permitted, unnotarized packages can be opened through System Settings → Privacy & Security → Open Anyway. Managed devices may prohibit this.
+On first launch, if macOS says it cannot verify the app is free of malware and offers to move it to the Trash, close the alert and open **System Settings → Privacy & Security**. In the Security section, find the app-blocked message, choose **Open Anyway**, and confirm when prompted. First verify the package came from the project’s [Releases](https://github.com/KrabsWong/yes-sessions/releases) and read that version’s signing notes. Managed devices may prohibit this.
 
 If the installation script fails at `spctl`, the package did not pass system assessment. The script does not bypass this check; see the [script reference](INSTALL_SCRIPT.md).
+
+## What if Homebrew says the Tap is untrusted?
+
+Run `brew trust krabswong/yes-sessions`, then retry `brew install --cask yes-sessions`. See the [Homebrew installation guide](HOMEBREW_CASK_GUIDE.md) for the full steps.
 
 ## Why does the file preview differ from code in a conversation?
 

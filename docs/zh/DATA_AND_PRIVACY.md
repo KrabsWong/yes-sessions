@@ -14,7 +14,7 @@ Yes Sessions 读取当前 macOS 用户目录中的本地数据，不需要导入
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/session_index.jsonl` |
 
-列表采用轻量读取；打开详情时才加载完整消息。跨会话搜索也可能读取正文。OpenCode 同时解析受支持的 v1/v2 数据并对迁移记录去重。
+列表采用轻量读取；打开详情时才加载完整消息。跨会话搜索会读取所选工具范围内的会话信息与消息正文，也可能读取工具内容。用量统计会扫描本地会话记录，并保存可重建的索引缓存。OpenCode 同时解析受支持的 v1/v2 数据并对迁移记录去重。
 
 ### CodeBuddy CN 的范围
 
@@ -28,6 +28,8 @@ IDE 注入的环境与规则默认折叠，原始消息仍可复制。这只是�
 
 - `settings.json`：语言、主题、阅读布局、终端偏好等设置。
 - `window-state.json`：窗口位置与尺寸等状态。
+
+Token 用量缓存保存在用户缓存目录 `~/Library/Caches/yes-sessions/token-usage-v1.json`，与应用设置分开；缓存可从本地会话记录重建。
 
 打开内嵌附件时，应用可能在系统临时目录生成文件供外部程序打开；「另存为」会写入你选择的位置。
 

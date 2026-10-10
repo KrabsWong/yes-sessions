@@ -13,10 +13,15 @@ Use the navigation marks on the right to jump to questions and hover for a summa
 ## Search
 
 - `⌘F`: search the current conversation.
-- `⇧⌘F`: search sessions from the selected tool.
+- `⇧⌘F`: search across the selected tool’s sessions for messages, tool content, and session information.
+- Filter cross-session results by the session’s last-updated time and working directory; directory filters can include subdirectories. Message-role filters can limit matches to your messages or AI replies.
 - Select a result to jump to its message; press `Escape` to close search.
 
-Searching across sessions may read message bodies, so a large history can take longer to search than to list.
+Cross-session search reads message bodies in the matching scope, so a large history can take longer than listing sessions. Results are capped at 1,000, and sessions that cannot be read are reported, so results may be incomplete. Press Enter to search and use the arrow keys to select a result.
+
+## Token usage
+
+Select Token usage in the title bar to review usage recognized in local history. Filter by tool, project, or model, and view usage trends and main-session/subagent breakdowns. Usage is reported by each source tool; missing fields are not reconstructed, so totals may be incomplete.
 
 ## Resume a session
 
@@ -46,7 +51,7 @@ Use `⌘,` to configure Chinese or English, light/dark/system appearance, readin
 | --- | --- |
 | `⌘,` | Open settings |
 | `⌘F` | Search this conversation |
-| `⇧⌘F` | Search the selected tool’s sessions |
+| `⇧⌘F` | Search across the selected tool’s sessions |
 | `⌘W` | Hide the app and keep the reading state |
 | `⌘M` | Minimize the window |
 | `⌘Q` | Quit |

@@ -14,7 +14,7 @@ Yes Sessions reads local data under the current macOS user’s home directory. N
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` and `~/.codex/session_index.jsonl` |
 
-Session lists use lightweight reads. Opening details loads complete messages; cross-session searches may also read message bodies. Supported OpenCode v1/v2 data is parsed with migrated sessions deduplicated.
+Session lists use lightweight reads. Cross-session search reads session metadata and message bodies within the selected tool’s scope, and may read tool content. Usage statistics scan local session records and save a rebuildable index cache. Supported OpenCode v1/v2 data is parsed with migrated sessions deduplicated.
 
 ### CodeBuddy CN coverage
 
@@ -28,6 +28,8 @@ The app’s configuration directory is `~/Library/Application Support/yes-sessio
 
 - `settings.json`: language, theme, reading layout, terminal preferences, and other settings.
 - `window-state.json`: window position, dimensions, and related state.
+
+The token-usage cache is stored separately in `~/Library/Caches/yes-sessions/token-usage-v1.json` and can be rebuilt from local session records.
 
 Opening an embedded attachment may create a file in the system temporary directory for an external app to open. Save as writes to the location you choose.
 

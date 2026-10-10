@@ -14,7 +14,8 @@ Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, Claude Code,
 
 ## What you can do
 
-- **Recover context**: browse sessions by project and date, search a conversation or the selected tool’s history, and jump to matching messages.
+- **Recover context**: browse sessions by project and date; search messages, tool content, and session information across the selected tool’s history, filter by time range and working directory, and jump to matching messages.
+- **Review token usage**: group locally recorded usage by tool, project, and model, and view trends and main-session/subagent breakdowns.
 - **Follow the work**: read Markdown, code, reasoning, tool calls, attachments, and subagent sessions. Expand attached context to inspect environment information and rules added by an IDE.
 - **Inspect code and changes**: browse project files, preview images, and compare staged, unstaged, and untracked Git changes in a side panel.
 - **Continue working**: resume supported CLI sessions in Ghostty, Kitty, or Terminal.app.
@@ -40,8 +41,11 @@ Requires an **Apple Silicon Mac running macOS 13 Ventura or later**. Intel, Wind
 
 ```bash
 brew tap krabswong/yes-sessions
+brew trust krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
+
+If Homebrew says the tap is untrusted, run `brew trust krabswong/yes-sessions` first, then retry the installation.
 
 To update:
 
@@ -54,7 +58,9 @@ brew upgrade --cask yes-sessions
 
 Download `Yes-Sessions-<version>-arm64.dmg` from [GitHub Releases](https://github.com/KrabsWong/yes-sessions/releases/latest), open it, and drag `Yes Sessions.app` into Applications.
 
-Check the release notes for signing and notarization status. If macOS blocks an unnotarized release, verify the download source and use System Settings → Privacy & Security → Open Anyway. Managed devices may restrict this option.
+Check the release notes for signing and notarization status.
+
+On first launch, macOS may say it cannot verify that the app is free of malware and offer to move it to the Trash. Close that alert, then open System Settings → Privacy & Security. In the Security section, find the message that the app was blocked and choose **Open Anyway**. Confirm again when prompted. First make sure the app came from the official GitHub Releases page above. Managed devices may restrict this option.
 
 See the [installation script reference](docs/en/INSTALL_SCRIPT.md) for an alternative method.
 
@@ -62,10 +68,10 @@ See the [installation script reference](docs/en/INSTALL_SCRIPT.md) for an altern
 
 1. Create local session history in one of the supported tools, then open Yes Sessions.
 2. Select a tool, locate a session by project and date, and open its details.
-3. Use `⌘F` to search the current conversation or `⇧⌘F` to search the selected tool’s history.
+3. Use `⌘F` to search the current conversation or `⇧⌘F` to search across the selected tool’s history. Narrow results by time range and working directory.
 4. Use the resume action to continue a supported session, or open the file and changes panel from the right side of the title bar to inspect project code.
 
-Open settings with `⌘,` to change the interface language, theme, reading layout, and preferred terminal. See the [user guide](docs/en/USER_GUIDE.md).
+Open settings with `⌘,` to change the interface language, theme, reading layout, and preferred terminal. Select Token usage in the title bar to open its dashboard. See the [user guide](docs/en/USER_GUIDE.md).
 
 ## Data and privacy
 

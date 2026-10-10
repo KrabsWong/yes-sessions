@@ -6,11 +6,11 @@
 
 | Guide | Contents |
 | --- | --- |
-| [User guide](USER_GUIDE.md) | Browsing, searching, resuming, and file and Git previews |
+| [User guide](USER_GUIDE.md) | Browsing and cross-session search, token usage, resuming, and file and Git previews |
 | [Homebrew installation](HOMEBREW_CASK_GUIDE.md) | Installation, updates, and removal |
 | [Installation script](INSTALL_SCRIPT.md) | Options, verification, and limitations |
 | [Data and privacy](DATA_AND_PRIVACY.md) | Sources, storage locations, and access boundaries |
-| [FAQ](FAQ.md) | Launch restrictions, missing sessions, and resume problems |
+| [FAQ](FAQ.md) | Launch restrictions, missing sessions, search results, and resume problems |
 
 ## Contributing
 

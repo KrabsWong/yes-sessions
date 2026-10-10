@@ -8,12 +8,15 @@ Yes Sessions is distributed through the project's [Homebrew Tap](https://github.
 
 ```bash
 brew tap krabswong/yes-sessions
+brew trust krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
 
+If Homebrew says the tap is untrusted, run `brew trust krabswong/yes-sessions` and retry the installation.
+
 After installation, open **Yes Sessions** from Applications.
 
-If macOS blocks the first launch, check that version's Release notes: some installers use ad-hoc signing without Apple notarization. After verifying that you trust the source, choose **Open Anyway** in **System Settings → Privacy & Security**. Organization-managed devices may restrict this option.
+If macOS says it cannot verify the app is free of malware and offers to move it to the Trash on first launch, close the alert and open **System Settings → Privacy & Security**. In the Security section, find the app-blocked message, choose **Open Anyway**, and confirm when prompted. First verify the installer came from the project's [GitHub Releases](https://github.com/KrabsWong/yes-sessions/releases). Some versions use ad-hoc signing without Apple notarization; organization-managed devices may restrict this option.
 
 ## Update
 
@@ -55,6 +58,7 @@ These operations do not remove session directories owned by Claude Code, Codex, 
 ## Troubleshooting installation
 
 - **Cask not found:** Confirm you have run `brew tap krabswong/yes-sessions`, then run `brew update`.
+- **Tap is untrusted:** Run `brew trust krabswong/yes-sessions`, then retry the installation.
 - **Download failed:** Check whether you can access the [Tap's Release page](https://github.com/KrabsWong/homebrew-yes-sessions/releases/latest). You can also download the DMG from the main repository and install it manually.
 - **Checksum mismatch:** Do not bypass verification. Record the version, command, and error, then [report the issue](https://github.com/KrabsWong/yes-sessions/issues).
 - **Unsupported architecture:** The installer currently supports Apple Silicon only. An Intel version is not available.

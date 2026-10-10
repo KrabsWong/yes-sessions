@@ -41,4 +41,4 @@ Quit the app before updating. Replacement is not atomic: if you agree to remove 
 
 If latest-version lookup fails, check GitHub connectivity or API limits, or specify a version. If download fails, confirm an arm64 asset exists for that Release. Without write access to `/Applications`, prefer manual installation in Finder and follow the system’s permission prompts.
 
-For assessment failures, check the release’s signing notes and the [first-launch guidance](FAQ.md). Passing signature integrity verification does not mean a package is notarized.
+If system assessment fails, the script stops without installing or bypassing Gatekeeper. Check the release’s signing notes. If you choose to continue, install the DMG manually and follow the [first-launch guidance](FAQ.md) to allow the app in System Settings. Passing signature integrity verification does not mean a package is notarized.

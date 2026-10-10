@@ -18,7 +18,7 @@ cargo run -p yes-sessions
 
 | Path | Responsibility |
 | --- | --- |
-| `crates/yes-core/` | Session models, providers, search, settings, terminal and Git services |
+| `crates/yes-core/` | Session models, providers, search, usage statistics, settings, terminal and Git services |
 | `crates/yes-app/` | GPUI interface, conversation reader, file previews, and Mermaid host |
 | `packaging/` | macOS metadata and Homebrew templates |
 | `scripts/` | Build, packaging, and installation scripts |

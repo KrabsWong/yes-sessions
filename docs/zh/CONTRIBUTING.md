@@ -18,7 +18,7 @@ cargo run -p yes-sessions
 
 | 路径 | 职责 |
 | --- | --- |
-| `crates/yes-core/` | 会话模型、数据源解析、搜索、设置、终端和 Git 服务 |
+| `crates/yes-core/` | 会话模型、数据源解析、搜索、用量统计、设置、终端和 Git 服务 |
 | `crates/yes-app/` | GPUI 界面、会话阅读、文件预览和 Mermaid 宿主 |
 | `packaging/` | macOS 应用元数据与 Homebrew 模板 |
 | `scripts/` | 构建、打包与安装脚本 |

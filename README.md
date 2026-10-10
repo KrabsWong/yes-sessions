@@ -14,7 +14,8 @@ Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 和 Codex
 
 ## 你可以用它做什么
 
-- **找回上下文**：按项目和日期浏览会话，搜索当前会话或当前工具的历史，直接跳转到匹配消息。
+- **找回上下文**：按项目和日期浏览会话；跨会话搜索当前工具的消息、工具内容和会话信息，按时间范围与工作目录缩小结果，并直接跳转到匹配消息。
+- **查看 Token 用量**：按工具、项目和模型汇总本地记录的用量，查看时间趋势和主会话／子代理分布。
 - **读懂执行过程**：查看 Markdown、代码、思考内容、工具调用、附件和子会话；展开附加上下文，查看 IDE 注入的环境与规则。
 - **查看代码与变更**：在侧边面板浏览项目文件、预览图片，对比已暂存、未暂存和未跟踪的 Git 变更。
 - **继续之前的工作**：将支持的 CLI 会话交给 Ghostty、Kitty 或系统终端恢复。
@@ -40,8 +41,11 @@ Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 和 Codex
 
 ```bash
 brew tap krabswong/yes-sessions
+brew trust krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
+
+如果 Homebrew 提示 tap 不受信任，请先运行 `brew trust krabswong/yes-sessions`，再重新安装。
 
 更新已安装的应用：
 
@@ -54,7 +58,9 @@ brew upgrade --cask yes-sessions
 
 从 [GitHub Releases](https://github.com/KrabsWong/yes-sessions/releases/latest) 下载 `Yes-Sessions-<版本>-arm64.dmg`，打开后将 `Yes Sessions.app` 拖入「应用程序」。
 
-签名与公证状态以对应版本的发布说明为准。未公证版本若被 macOS 拦截，确认下载来源后，可在「系统设置 → 隐私与安全」中选择「仍要打开」。受管理的电脑可能限制此操作。
+签名与公证状态以对应版本的发布说明为准。
+
+首次打开时，如果 macOS 提示无法验证应用是否包含恶意软件并建议移到废纸篓，请关闭提示窗口，然后打开「系统设置 → 隐私与安全」，在安全性区域找到应用被阻止的信息并选择「仍要打开」。按提示再次确认即可启动。请先确认应用来自上方的官方 GitHub Releases 页面；受管理的电脑可能限制此操作。
 
 其他安装方式见 [安装脚本说明](docs/zh/INSTALL_SCRIPT.md)。
 
@@ -62,10 +68,10 @@ brew upgrade --cask yes-sessions
 
 1. 先在支持的工具中产生本地会话记录，然后打开 Yes Sessions。
 2. 选择工具，在会话列表中按项目与日期找到记录，点击查看详情。
-3. 用 `⌘F` 搜索当前会话，用 `⇧⌘F` 搜索当前工具的会话历史。
+3. 用 `⌘F` 搜索当前会话，用 `⇧⌘F` 跨会话搜索当前工具的历史；可按时间与工作目录筛选。
 4. 需要继续对话时，使用会话恢复入口；需要查看项目代码时，打开标题栏右侧的文件与变更面板。
 
-通过 `⌘,` 打开设置，切换界面语言、主题、阅读布局和首选终端。详见 [使用指南](docs/zh/USER_GUIDE.md)。
+通过 `⌘,` 打开设置，切换界面语言、主题、阅读布局和首选终端。点击标题栏中的 Token 用量入口可打开统计面板。详见 [使用指南](docs/zh/USER_GUIDE.md)。
 
 ## 数据与隐私
 

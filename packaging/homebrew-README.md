@@ -6,8 +6,11 @@
 
 ```bash
 brew tap krabswong/yes-sessions
+brew trust krabswong/yes-sessions
 brew install --cask yes-sessions
 ```
+
+If Homebrew says the tap is untrusted, run `brew trust krabswong/yes-sessions` and retry the installation.
 
 ## Upgrade
 
@@ -21,7 +24,7 @@ brew upgrade --cask yes-sessions
 - macOS 13 Ventura or later
 - Apple Silicon
 
-Releases may use ad-hoc signing without Apple notarization; check the source release notes for signing status. If macOS blocks the first launch, open System Settings → Privacy & Security → Open Anyway. Managed devices may restrict this option.
+Releases may use ad-hoc signing without Apple notarization; check the source release notes for signing status. If macOS says it cannot verify the app is free of malware and offers to move it to the Trash on first launch, close the alert and open System Settings → Privacy & Security. In the Security section, find the app-blocked message, choose **Open Anyway**, and confirm when prompted. First verify the app came from the [official Releases page](https://github.com/KrabsWong/yes-sessions/releases). Managed devices may restrict this option.
 
 ## Uninstall
 
