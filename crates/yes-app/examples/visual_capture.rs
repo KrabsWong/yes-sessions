@@ -16,6 +16,9 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 800.0;
 
 fn main() -> Result<()> {
+    if let Some(code) = yes_core::ssh::run_askpass() {
+        std::process::exit(code);
+    }
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -73,7 +76,11 @@ fn main() -> Result<()> {
                 output_dir.join(format!("remote-settings-{label}.png")),
             )?;
         }
-        click(&mut cx, window, 525., 551.)?;
+        click(&mut cx, window, 844., 437.)?;
+        settle(&mut cx, window)?;
+        save_capture(&mut cx, window, output_dir.join("remote-inline-edit.png"))?;
+        click(&mut cx, window, 803., 437.)?;
+        click(&mut cx, window, 785., 437.)?;
         std::thread::sleep(std::time::Duration::from_secs(2));
         settle(&mut cx, window)?;
         save_capture(&mut cx, window, output_dir.join("remote-bar-light.png"))?;

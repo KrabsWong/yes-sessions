@@ -495,7 +495,7 @@ impl YesSessions {
         let selected_app = settings.default_app.unwrap_or(AppType::CodeBuddy);
         let terminal_info = terminal_info(settings.preferred_terminal);
         Self::configure_theme(settings.theme, window, cx);
-        let remote = RemoteSettings::new(settings.remote_codex.as_ref(), window, cx);
+        let remote = RemoteSettings::new(&settings, window, cx);
         let mut this = Self {
             root_focus: cx.focus_handle(),
             search_landing: None,
@@ -575,6 +575,12 @@ impl YesSessions {
         crate::commands::update_menus(this.settings.language, cx);
         this.load_sessions(cx);
         this.start_live_refresh(cx);
+        this.start_remote_monitor(window, cx);
+        cx.on_app_quit(|this, _| {
+            this.stop_remote_connection();
+            async {}
+        })
+        .detach();
         this
     }
 
@@ -774,7 +780,7 @@ impl YesSessions {
         }
     }
 
-    fn load_sessions(&mut self, cx: &mut Context<Self>) {
+    fn clear_sessions(&mut self, cx: &mut Context<Self>) {
         self.agent_search = AgentSearch::default();
         self.agent_search_landing = None;
         self.session_search = SessionSearch::default();
@@ -782,7 +788,6 @@ impl YesSessions {
         self.unread_message_count = 0;
         self.sessions_generation += 1;
         self.detail_generation += 1;
-        let generation = self.sessions_generation;
         self.loading_sessions = true;
         self.refreshing_sessions = false;
         self.loading_detail = false;
@@ -801,6 +806,11 @@ impl YesSessions {
         self.selected_session_id = None;
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
+    }
+
+    fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        self.clear_sessions(cx);
+        let generation = self.sessions_generation;
         let Some(provider) = self.active_provider() else {
             return;
         };
@@ -819,6 +829,7 @@ impl YesSessions {
                     Ok(sessions) => {
                         if this.remote_provider.is_some() {
                             this.remote.status = None;
+                            this.remote.sessions_ready = true;
                         }
                         this.sessions = Arc::new(sessions);
                         if this.agent_search.input.is_some() {
@@ -851,6 +862,9 @@ impl YesSessions {
     }
 
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        if !self.remote_ready() {
+            return;
+        }
         if self.loading_sessions || self.refreshing_sessions {
             return;
         }
@@ -981,6 +995,9 @@ impl YesSessions {
     }
 
     fn load_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if !self.remote_ready() {
+            return;
+        }
         if let Some(provider) = &self.remote_provider {
             provider.cancel();
         }
@@ -2023,7 +2040,14 @@ impl YesSessions {
                     .justify_center()
                     .text_size(px(14.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tr(language, "sessions.empty"))
+                    .child(tr(
+                        language,
+                        if !self.remote_ready() {
+                            self.remote_connection_label()
+                        } else {
+                            "sessions.empty"
+                        },
+                    ))
                     .into_any_element()
             } else {
                 uniform_list(
@@ -4197,6 +4221,12 @@ impl YesSessions {
 impl Render for YesSessions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(error) = self.error.take() {
+            // Notifications remain masked even if the address was temporarily revealed.
+            let error = if self.remote_provider.is_some() {
+                self.redact_remote_address(&error)
+            } else {
+                error
+            };
             // Root owns the notification layer; update it after this render completes.
             window.defer(cx, move |window, cx| {
                 window.push_notification(Notification::error(error).id::<YesSessions>(), cx);
@@ -4255,6 +4285,13 @@ impl Render for YesSessions {
                 }),
             )
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.remote_auth_open() {
+                    if event.keystroke.key == "escape" {
+                        this.answer_remote_prompt(false, window, cx);
+                    }
+                    cx.stop_propagation();
+                    return;
+                }
                 if event.keystroke.key == "escape" && this.dashboard_open && !this.settings_open {
                     this.dashboard_open = false;
                     cx.notify();
@@ -4402,6 +4439,9 @@ impl Render for YesSessions {
             )
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
+            })
+            .when(self.remote_auth_open(), |view| {
+                view.child(self.render_remote_auth(cx))
             })
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(

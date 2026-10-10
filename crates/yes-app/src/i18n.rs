@@ -12,8 +12,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (_, "remote.snapshotReady") => "Sessions loaded",
         (Language::Zh, "remote.local") => "本机",
         (_, "remote.local") => "Local",
-        (Language::Zh, "remote.configure") => "连接远程 Codex…",
-        (_, "remote.configure") => "Connect remote Codex…",
+        (Language::Zh, "remote.configure") => "管理远程服务器…",
+        (_, "remote.configure") => "Manage remote servers…",
         (Language::Zh, "remote.description") => {
             "通过 SSH 只读浏览 Linux 服务器上的 Codex 会话，无需安装远程程序。"
         }
@@ -25,21 +25,65 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (Language::Zh, "remote.root") => "远程 Codex 数据目录",
         (_, "remote.root") => "Remote Codex data directory",
         (Language::Zh, "remote.authHelp") => {
-            "需要密码时，先在终端登录，完成后点击连接。支持自定义 Codex 目录；远程仅支持摘要搜索和手动刷新。"
+            "点击连接后自动尝试 SSH 密钥认证，需要密码时会在应用内询问。密码不保存；网络中断后自动重连。"
         }
         (_, "remote.authHelp") => {
-            "For password authentication, log in through Terminal first, then connect. Custom Codex directories are supported. Remote search covers summaries; refresh manually."
+            "Connect using your SSH keys, or enter a password when prompted here. Passwords are not saved. Network interruptions reconnect automatically."
         }
-        (Language::Zh, "remote.login") => "在终端登录",
-        (_, "remote.login") => "Log in with Terminal",
+        (Language::Zh, "remote.editServer") => "修改服务器",
+        (_, "remote.editServer") => "Edit server",
+        (Language::Zh, "remote.addServer") => "添加服务器",
+        (_, "remote.addServer") => "Add server",
+        (Language::Zh, "remote.serverName") => "显示别名",
+        (_, "remote.serverName") => "Display name",
+        (Language::Zh, "remote.saveServer") => "保存",
+        (_, "remote.saveServer") => "Save",
+        (Language::Zh, "remote.deleteServer") => "删除服务器",
+        (_, "remote.deleteServer") => "Delete server",
+        (Language::Zh, "remote.nameInvalid") => "请填写不重复的显示别名。",
+        (_, "remote.nameInvalid") => "Enter a unique display name.",
         (Language::Zh, "remote.connect") => "连接",
         (_, "remote.connect") => "Connect",
-        (Language::Zh, "remote.loginPending") => {
-            "请在新终端中完成 SSH 登录，然后点击连接。密码不会保存到应用。"
+        (Language::Zh, "remote.connecting") => "正在连接…",
+        (_, "remote.connecting") => "Connecting…",
+        (Language::Zh, "remote.reconnecting") => "正在重连…",
+        (_, "remote.reconnecting") => "Reconnecting…",
+        (Language::Zh, "remote.authRequired") => "等待认证",
+        (_, "remote.authRequired") => "Authentication required",
+        (Language::Zh, "remote.paused") => "连接已暂停",
+        (_, "remote.paused") => "Connection paused",
+        (Language::Zh, "remote.showAddress") => "显示连接信息",
+        (_, "remote.showAddress") => "Show connection details",
+        (Language::Zh, "remote.hideAddress") => "隐藏连接信息",
+        (_, "remote.hideAddress") => "Hide connection details",
+        (Language::Zh, "remote.enterPassword") => "请输入密码或验证码",
+        (_, "remote.enterPassword") => "Enter your password or verification code",
+        (Language::Zh, "remote.enterPassphrase") => "请输入 SSH 私钥口令",
+        (_, "remote.enterPassphrase") => "Enter your SSH key passphrase",
+        (Language::Zh, "remote.authenticate") => "SSH 认证",
+        (_, "remote.authenticate") => "SSH authentication",
+        (Language::Zh, "remote.verifyHost") => "确认服务器身份",
+        (_, "remote.verifyHost") => "Verify server identity",
+        (Language::Zh, "remote.verifyHelp") => {
+            "请核对以上主机指纹。确认后由系统 SSH 保存服务器身份。"
         }
-        (_, "remote.loginPending") => {
-            "Complete SSH login in the new Terminal, then click Connect. The app does not store your password."
+        (_, "remote.verifyHelp") => {
+            "Verify the host fingerprint above. System SSH will remember the host after confirmation."
         }
+        (Language::Zh, "remote.noPasswordStorage") => "仅用于本次 SSH 认证，不保存密码。",
+        (_, "remote.noPasswordStorage") => {
+            "Used only for this SSH authentication. Your password will not be saved."
+        }
+        (Language::Zh, "remote.trustHost") => "信任并继续",
+        (_, "remote.trustHost") => "Trust and continue",
+        (Language::Zh, "remote.continue") => "继续",
+        (_, "remote.continue") => "Continue",
+        (Language::Zh, "remote.cancel") => "取消",
+        (_, "remote.cancel") => "Cancel",
+        (Language::Zh, "remote.retry") => "重新连接",
+        (_, "remote.retry") => "Reconnect",
+        (Language::Zh, "remote.disconnect") => "断开",
+        (_, "remote.disconnect") => "Disconnect",
         (Language::Zh, "remote.summaryOnly") => "远程搜索仅匹配会话摘要",
         (_, "remote.summaryOnly") => "Remote search matches session summaries only",
         (Language::Zh, "remote.readOnly") => "只读 · 手动刷新",

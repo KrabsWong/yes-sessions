@@ -40,6 +40,12 @@ pub enum PreferredTerminal {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteServer {
+    pub name: String,
+    pub config: crate::remote::RemoteCodexConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub language: Language,
@@ -54,6 +60,7 @@ pub struct AppSettings {
     pub sidebar_collapsed: bool,
     pub preferred_terminal: PreferredTerminal,
     pub remote_codex: Option<crate::remote::RemoteCodexConfig>,
+    pub remote_servers: Vec<RemoteServer>,
 }
 
 impl Default for AppSettings {
@@ -71,6 +78,7 @@ impl Default for AppSettings {
             sidebar_collapsed: false,
             preferred_terminal: PreferredTerminal::Auto,
             remote_codex: None,
+            remote_servers: Vec::new(),
         }
     }
 }
@@ -93,10 +101,19 @@ impl SettingsStore {
     }
 
     pub fn load(&self) -> AppSettings {
-        fs::read_to_string(&self.path)
+        let mut settings: AppSettings = fs::read_to_string(&self.path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        if settings.remote_servers.is_empty() {
+            if let Some(config) = &settings.remote_codex {
+                settings.remote_servers.push(RemoteServer {
+                    name: "Server 1".into(),
+                    config: config.clone(),
+                });
+            }
+        }
+        settings
     }
 
     pub fn save(&self, settings: &AppSettings) -> io::Result<()> {
@@ -112,6 +129,78 @@ impl SettingsStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn settings_test_root(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "yes-settings-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn legacy_remote_config_migrates_without_exposing_destination_in_name() {
+        let root = settings_test_root("migration");
+        fs::create_dir_all(&root).unwrap();
+        let store = SettingsStore::new(root.join("settings.json"));
+        fs::write(
+            &store.path,
+            r#"{"language":"zh","remoteCodex":{"ssh_alias":"ubuntu@192.0.2.10","root":"~/.codex"}}"#,
+        )
+        .unwrap();
+        let settings = store.load();
+        assert_eq!(settings.language, Language::Zh);
+        assert_eq!(settings.remote_servers.len(), 1);
+        assert_eq!(settings.remote_servers[0].name, "Server 1");
+        assert_eq!(
+            Some(&settings.remote_servers[0].config),
+            settings.remote_codex.as_ref()
+        );
+        store.save(&settings).unwrap();
+        assert_eq!(store.load(), settings);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn multiple_named_servers_round_trip_without_duplicating_last_used_server() {
+        let root = settings_test_root("servers");
+        let store = SettingsStore::new(root.join("settings.json"));
+        let servers = vec![
+            RemoteServer {
+                name: "Development".into(),
+                config: crate::remote::RemoteCodexConfig {
+                    ssh_alias: "ubuntu@192.0.2.10".into(),
+                    root: "~/.codex".into(),
+                },
+            },
+            RemoteServer {
+                name: "研究服务器".into(),
+                config: crate::remote::RemoteCodexConfig {
+                    ssh_alias: "research".into(),
+                    root: "/data/codex".into(),
+                },
+            },
+        ];
+        let mut settings = AppSettings {
+            remote_codex: Some(servers[1].config.clone()),
+            remote_servers: servers,
+            ..AppSettings::default()
+        };
+        store.save(&settings).unwrap();
+        assert_eq!(store.load(), settings);
+        settings.remote_servers.remove(0);
+        settings.remote_servers[0].name = "Renamed".into();
+        store.save(&settings).unwrap();
+        assert_eq!(store.load(), settings);
+        settings.remote_servers.clear();
+        settings.remote_codex = None;
+        store.save(&settings).unwrap();
+        assert_eq!(store.load(), settings);
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn missing_fields_use_current_defaults() {

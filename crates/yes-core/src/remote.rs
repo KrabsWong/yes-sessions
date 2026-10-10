@@ -63,16 +63,6 @@ impl RemoteCodexConfig {
         );
         validate_remote_path(&self.root)
     }
-
-    /// The terminal handles passwords and host-key confirmation; no credentials enter the app.
-    pub fn login_command(&self) -> Result<String> {
-        self.validate()?;
-        Ok(format!(
-            "/usr/bin/ssh -M -S {} -o ControlPersist=600 -o StrictHostKeyChecking=ask -o ClearAllForwardings=yes -o ForwardAgent=no -o ForwardX11=no -o PermitLocalCommand=no -o RemoteCommand=none -fNT -- {}",
-            shell_quote(&control_path(&self.ssh_alias)?.to_string_lossy()),
-            shell_quote(&self.ssh_alias)
-        ))
-    }
 }
 fn validate_remote_path(value: &str) -> Result<()> {
     ensure!(
@@ -159,14 +149,20 @@ struct RemoteFile {
 #[derive(Debug, Clone)]
 pub struct RemoteCodexProvider {
     config: RemoteCodexConfig,
+    connection: PathBuf,
     cache: Arc<Mutex<Cache>>,
     cancellation: Arc<AtomicU64>,
 }
 impl RemoteCodexProvider {
     pub fn new(config: RemoteCodexConfig) -> Result<Self> {
+        let path = control_path(&config.ssh_alias)?;
+        Self::with_connection(config, path)
+    }
+    pub fn with_connection(config: RemoteCodexConfig, connection: PathBuf) -> Result<Self> {
         config.validate()?;
         Ok(Self {
             config,
+            connection,
             cache: Arc::new(Mutex::new(Cache::new()?)),
             cancellation: Arc::new(AtomicU64::new(0)),
         })
@@ -192,13 +188,15 @@ impl RemoteCodexProvider {
             remote_command.push(' ');
             remote_command.push_str(&quoted);
         }
-        let socket = control_path(&self.config.ssh_alias)?;
+        let socket = &self.connection;
         let mut command = Command::new("/usr/bin/ssh");
         command
             .args([
                 "-T",
                 "-o",
                 "BatchMode=yes",
+                "-o",
+                "ProxyCommand=/usr/bin/false",
                 "-o",
                 "StrictHostKeyChecking=yes",
                 "-o",
