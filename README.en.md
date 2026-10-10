@@ -62,6 +62,8 @@ Check the release notes for signing and notarization status.
 
 On first launch, macOS may say it cannot verify that the app is free of malware and offer to move it to the Trash. Close that alert, then open System Settings → Privacy & Security. In the Security section, find the message that the app was blocked and choose **Open Anyway**. Confirm again when prompted. First make sure the app came from the official GitHub Releases page above. Managed devices may restrict this option.
 
+On first launch, macOS may say it cannot verify that the app is free of malware and offer to move it to the Trash. Close that alert, then open System Settings → Privacy & Security. In the Security section, find the message that the app was blocked and choose **Open Anyway**. Confirm again when prompted. First make sure the app came from the official GitHub Releases page above. Managed devices may restrict this option.
+
 See the [installation script reference](docs/en/INSTALL_SCRIPT.md) for an alternative method.
 
 ## Getting started
