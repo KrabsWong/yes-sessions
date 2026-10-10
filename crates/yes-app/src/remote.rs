@@ -799,6 +799,63 @@ impl YesSessions {
         self.remote_provider.is_none() || self.remote.state == ConnectionState::Connected
     }
 
+    pub(super) fn remote_connecting(&self) -> bool {
+        self.remote_provider.is_some()
+            && matches!(
+                self.remote.state,
+                ConnectionState::Connecting | ConnectionState::Reconnecting
+            )
+    }
+
+    pub(super) fn render_remote_connecting(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.settings.language;
+        div()
+            .id("remote-connecting-overlay")
+            .debug_selector(|| "remote-connecting-overlay".into())
+            .absolute()
+            .inset_0()
+            .occlude()
+            .bg(gpui_kit::black().opacity(0.5))
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .child(
+                div()
+                    .v_flex()
+                    .items_center()
+                    .gap_4()
+                    .p_6()
+                    .w(px(320.))
+                    .bg(cx.theme().popover)
+                    .text_color(cx.theme().foreground)
+                    .rounded_lg()
+                    .shadow_lg()
+                    .child(gpui_kit::component::spinner::Spinner::new().color(cx.theme().primary))
+                    .child(
+                        div()
+                            .text_lg()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(tr(language, self.remote_connection_label())),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.remote.active_name.clone()),
+                    )
+                    .child(
+                        Button::new("remote-connect-cancel")
+                            .outline()
+                            .label(tr(language, "remote.cancel"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.select_local(cx);
+                                this.root_focus.focus(window, cx);
+                            })),
+                    ),
+            )
+    }
+
     pub(super) fn stop_remote_connection(&mut self) {
         if let Some(connection) = self.remote.connection.take() {
             connection.disconnect();
