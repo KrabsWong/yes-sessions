@@ -5,6 +5,9 @@ use gpui_kit::*;
 use yes_sessions::{app::YesSessions, app_assets::AppAssets};
 
 fn main() {
+    if let Some(code) = yes_core::ssh::run_askpass() {
+        std::process::exit(code);
+    }
     let application = gpui_kit::application().with_assets(AppAssets);
     application.on_reopen(|cx| {
         if !yes_sessions::commands::restore_existing_window(cx) {
