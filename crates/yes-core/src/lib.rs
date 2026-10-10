@@ -7,6 +7,7 @@ pub mod providers;
 pub mod remote;
 pub mod search;
 pub mod settings;
+pub mod ssh;
 pub mod terminal;
 pub mod usage;
 pub mod workspace;
@@ -17,5 +18,6 @@ pub use model::{
 };
 pub use providers::{ProviderRegistry, SessionProvider};
 pub use settings::{
-    AppSettings, ChatLayout, Language, PreferredTerminal, SettingsStore, ThemePreference,
+    AppSettings, ChatLayout, Language, PreferredTerminal, RemoteServer, SettingsStore,
+    ThemePreference,
 };
