@@ -8,7 +8,7 @@ Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, Claude Code,
 
 |Dark|Light
 |:--|:--
-<img width="500" alt="image" src="https://github.com/user-attachments/assets/1cffc250-0b2f-4614-a86f-f8d8a1edd13c" /> | <img width="500" alt="image" src="https://github.com/user-attachments/assets/fdb31790-ebe5-4d10-90a1-22e413660d7e" />
+<img width="500" alt="image" src="https://github.com/user-attachments/assets/acebcf76-6bd0-4eb7-99bf-47e1a024c494" /> | <img width="500" alt="image" src="https://github.com/user-attachments/assets/650bce89-c6e4-4502-9769-56a83191e07a" />
 
 [Download](https://github.com/KrabsWong/yes-sessions/releases/latest) · [User guide](docs/en/USER_GUIDE.md) · [FAQ](docs/en/FAQ.md) · [Report an issue](https://github.com/KrabsWong/yes-sessions/issues)
 
