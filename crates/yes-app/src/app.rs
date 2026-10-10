@@ -4245,6 +4245,7 @@ impl Render for YesSessions {
                     && !self.dashboard_open
                     && !self.settings_open
                     && !self.preview_open
+                    && !self.remote_connecting()
                     && self.session_search.input.is_none()
                     && self.agent_search.input.is_none(),
                 |view| view.key_context("SessionNavigation"),
@@ -4284,6 +4285,11 @@ impl Render for YesSessions {
                     }
                 }),
             )
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+                if this.remote_connecting() {
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 if this.remote_auth_open() {
                     if event.keystroke.key == "escape" {
@@ -4440,6 +4446,9 @@ impl Render for YesSessions {
             )
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
+            })
+            .when(self.remote_connecting(), |view| {
+                view.child(self.render_remote_connecting(cx))
             })
             .when(self.remote_auth_open(), |view| {
                 view.child(self.render_remote_auth(cx))
