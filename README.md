@@ -7,8 +7,8 @@
 Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 和 Codex CLI 的本地历史集中到一个原生界面。找回之前的提问、查看工具执行记录，或回到终端继续工作，无需逐个翻找日志文件。
 
 |Dark|Light
-|:--|:--
-<img width="500" alt="image" src="https://github.com/user-attachments/assets/acebcf76-6bd0-4eb7-99bf-47e1a024c494" /> | <img width="500" alt="image" src="https://github.com/user-attachments/assets/650bce89-c6e4-4502-9769-56a83191e07a" />
+|:--|:--|
+<img width="500" alt="image" src="https://github.com/user-attachments/assets/c8c7c849-1d6e-463d-ad21-f956179da364" /> | <img width="500" alt="image" src="https://github.com/user-attachments/assets/8572e9d0-3c24-46e4-bf36-81a25fe912f4" />
 
 [下载安装](https://github.com/KrabsWong/yes-sessions/releases/latest) · [使用指南](docs/zh/USER_GUIDE.md) · [常见问题](docs/zh/FAQ.md) · [反馈问题](https://github.com/KrabsWong/yes-sessions/issues)
 
