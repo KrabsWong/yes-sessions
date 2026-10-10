@@ -25,6 +25,7 @@ use super::SessionProvider;
 #[derive(Debug, Clone)]
 pub struct CodexProvider {
     root: PathBuf,
+    remote_read: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -38,14 +39,26 @@ impl Default for CodexProvider {
     fn default() -> Self {
         Self {
             root: dirs::home_dir().unwrap_or_default().join(".codex"),
+            remote_read: false,
         }
     }
 }
 
 impl CodexProvider {
     pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            remote_read: false,
+        }
     }
+    /// Remote reads never dereference paths supplied by transcript content.
+    pub(crate) fn for_remote(root: PathBuf) -> Self {
+        Self {
+            root,
+            remote_read: true,
+        }
+    }
+
     fn sessions_path(&self) -> PathBuf {
         self.root.join("sessions")
     }
@@ -62,7 +75,11 @@ impl CodexProvider {
     }
 
     fn load_index(&self) -> HashMap<String, IndexEntry> {
-        let Ok(source) = fs::read_to_string(self.root.join("session_index.jsonl")) else {
+        let index_path = self.root.join("session_index.jsonl");
+        if self.remote_read && crate::remote::checked_path(&self.root, &index_path).is_err() {
+            return HashMap::new();
+        }
+        let Ok(source) = fs::read_to_string(index_path) else {
             return HashMap::new();
         };
         source
@@ -73,12 +90,20 @@ impl CodexProvider {
     }
 
     fn session_files(&self) -> Vec<PathBuf> {
+        if self.remote_read
+            && crate::remote::checked_path(&self.root, &self.sessions_path()).is_err()
+        {
+            return Vec::new();
+        }
         WalkDir::new(self.sessions_path())
             .into_iter()
             .filter_map(Result::ok)
             .filter(|entry| {
                 entry.file_type().is_file()
                     && entry.path().extension().is_some_and(|ext| ext == "jsonl")
+            })
+            .filter(|entry| {
+                !self.remote_read || crate::remote::checked_path(&self.root, entry.path()).is_ok()
             })
             .map(|entry| entry.into_path())
             .collect()
@@ -458,6 +483,9 @@ impl CodexProvider {
     }
 
     fn image_data_url(&self, path: &Path, cwd: Option<&Path>) -> Option<String> {
+        if self.remote_read {
+            return None;
+        }
         const MAX_IMAGE_BYTES: u64 = 10 * 1024 * 1024;
         let extension = path.extension()?.to_str()?.to_ascii_lowercase();
         let mime = match extension.as_str() {

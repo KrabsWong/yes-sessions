@@ -4,6 +4,7 @@ pub mod git;
 pub mod mermaid;
 pub mod model;
 pub mod providers;
+pub mod remote;
 pub mod search;
 pub mod settings;
 pub mod terminal;

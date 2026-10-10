@@ -242,9 +242,13 @@ impl YesSessions {
         }
         self.invalidate_agent_search(cx);
         self.sync_agent_search_directories();
+        let metadata_only = self.remote_provider.is_some();
         let search = &mut self.agent_search;
         let Some(input) = &search.input else { return };
         let query = input.read(cx).value().trim().to_owned();
+        if metadata_only {
+            search.scope = SearchScope::All;
+        }
         search.submitted = true;
         let filter = search.time_range.as_ref().unwrap().read(cx).bounds(cx).map(
             |(updated_from, updated_until)| SearchFilter {
@@ -288,7 +292,7 @@ impl YesSessions {
                     .background_executor()
                     .spawn(async move {
                         let metadata = search_session_metadata(&session, &query);
-                        let result = if query.is_empty() {
+                        let result = if query.is_empty() || metadata_only {
                             Ok(Vec::new())
                         } else {
                             search_session(provider.as_ref(), &session, &query, scope)
@@ -700,6 +704,7 @@ impl YesSessions {
                     }))
                     .trigger(
                         Button::new("agent-search-source")
+                            .disabled(self.remote_provider.is_some())
                             .small()
                             .icon(IconName::User)
                             .debug_selector(|| "agent-search-source".into())
@@ -843,6 +848,11 @@ impl YesSessions {
                     tr(lang, "search.matches")
                 )
             }
+        };
+        let status = if self.remote_provider.is_some() {
+            format!("{status} · {}", tr(lang, "remote.summaryOnly"))
+        } else {
+            status
         };
         let visible = self.agent_search.visible_hits();
         let results = uniform_list(
