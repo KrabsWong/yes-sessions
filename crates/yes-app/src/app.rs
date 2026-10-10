@@ -4288,8 +4288,9 @@ impl Render for YesSessions {
                 if this.remote_auth_open() {
                     if event.keystroke.key == "escape" {
                         this.answer_remote_prompt(false, window, cx);
+                        cx.stop_propagation();
                     }
-                    cx.stop_propagation();
+                    // Ordinary keys must reach the platform text input handler.
                     return;
                 }
                 if event.keystroke.key == "escape" && this.dashboard_open && !this.settings_open {

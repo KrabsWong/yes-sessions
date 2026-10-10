@@ -355,6 +355,40 @@ mod tests {
     }
 
     #[gpui_kit::test]
+    fn authentication_accepts_keyboard_input_and_escape_clears_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let window = cx.open_window(size(px(760.), px(650.)), YesSessions::new);
+        let input = window
+            .update(cx, |app, window, cx| {
+                app.handle_connection_event(
+                    ConnectionEvent::Prompt {
+                        id: 99,
+                        text: "Password:".into(),
+                        confirm: false,
+                    },
+                    window,
+                    cx,
+                );
+                app.remote.prompt.as_ref().unwrap().input.clone()
+            })
+            .unwrap();
+        let mut visual = VisualTestContext::from_window(*window, cx);
+        visual.run_until_parked();
+        visual.simulate_input("keyboard-test");
+        assert_eq!(
+            input.read_with(&visual, |input, _| input.value().to_string()),
+            "keyboard-test"
+        );
+        visual.simulate_keystrokes("backspace");
+        assert_eq!(
+            input.read_with(&visual, |input, _| input.value().to_string()),
+            "keyboard-tes"
+        );
+        visual.simulate_keystrokes("escape");
+        assert!(input.read_with(&visual, |input, _| input.value().is_empty()));
+    }
+
+    #[gpui_kit::test]
     fn authentication_dialog_fits_both_languages_and_host_confirmation(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
         let window = cx.open_window(size(px(760.), px(650.)), YesSessions::new);
