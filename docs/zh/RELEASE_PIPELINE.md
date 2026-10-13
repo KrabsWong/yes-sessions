@@ -29,6 +29,16 @@
 
 当前分发目标为 macOS 13 及以上的 Apple Silicon Mac，没有 Intel 安装包。只有发布工作流成功、Release 附件可下载且 Tap 更新完成，才算完成整个发布流程。
 
+## CI 构建缓存
+
+[Rust CI](../../.github/workflows/rust-ci.yml) 在涉及 Rust 构建的 PR 和 `main` 更新时执行格式检查、编译检查、测试与 Release 编译。只有 `main` 保存依赖缓存；发布流程只读取缓存，因为不同 Git tag 之间不能共享各自保存的缓存。Rust CI 不签名或发布安装包。
+
+两个工作流使用相同的 Rust 版本、macOS runner 和 `shared-key`；升级工具链时应一起更新。Release 缓存预热的 target、`MACOSX_DEPLOYMENT_TARGET` 和 `RUSTFLAGS` 必须与打包脚本保持一致。本地构建配置不受影响。
+
+缓存主要复用 registry 和 Git 依赖。默认缓存清理会排除仓库内的 path 依赖，包括 `vendor` 下的 GPUI 补丁，应用及这些依赖仍可能重新编译；缓存命中不代表整个构建无需编译。
+
+首次启用后，等待 `main` 上的 Rust CI 成功，或选择 `main` 手动运行它来建立缓存。若版本 tag 与主干构建同时启动，发布可能仍使用上一次主干缓存，首次发布也可能未命中。缓存未命中不会跳过验证或阻止正常构建。检查缓存步骤的恢复日志与各编译步骤耗时；Rust CI 会保留 7 天的 Release 编译 timing 报告，供比较优化效果。
+
 ## 仓库配置
 
 在 GitHub Actions Secrets 中配置下列凭据，不要将凭据写入仓库。

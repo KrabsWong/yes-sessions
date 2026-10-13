@@ -29,6 +29,16 @@ Do not rely on the workflow defaulting to `patch` when no label is present. PR l
 
 Distribution currently targets Apple Silicon Macs running macOS 13 or later. There is no Intel installer. A release is complete only when the release workflow succeeds, the Release asset is downloadable, and the Tap update has finished.
 
+## CI build cache
+
+[Rust CI](../../.github/workflows/rust-ci.yml) runs formatting checks, compilation checks, tests, and a release build for PRs and `main` updates affecting Rust builds. Only `main` saves dependency caches; releases only restore them because different Git tags cannot share their own saved caches. Rust CI does not sign or publish installers.
+
+Both workflows use the same Rust version, macOS runner, and `shared-key`; update them together when upgrading the toolchain. Release cache warming must match the packaging script's target, `MACOSX_DEPLOYMENT_TARGET`, and `RUSTFLAGS`. Local build configuration is unchanged.
+
+The cache primarily reuses registry and Git dependencies. Default cache cleanup excludes in-repository path dependencies, including the GPUI patches under `vendor`, so the application and these dependencies may still rebuild. A cache hit does not mean the entire build can skip compilation.
+
+After enabling this workflow, wait for Rust CI on `main` to succeed, or manually run it with `main` selected to populate the cache. If a version tag and the main build start together, the release may still use the previous main cache, and the first release may miss the cache entirely. A cache miss neither skips validation nor prevents a normal build. Compare cache restore logs and individual compilation step durations; Rust CI retains release build timing reports for seven days to help measure the improvement.
+
 ## Repository configuration
 
 Configure these GitHub Actions Secrets. Never commit credentials to the repository.

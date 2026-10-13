@@ -1,0 +1,77 @@
+name: Rust CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'vendor/**'
+      - '.cargo/**'
+      - '.github/workflows/rust-ci.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/package-macos.sh'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'crates/**'
+      - 'vendor/**'
+      - '.cargo/**'
+      - '.github/workflows/rust-ci.yml'
+      - '.github/workflows/release.yml'
+      - 'scripts/package-macos.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+
+      # Keep the toolchain, runner and cache key aligned with release.yml.
+      - uses: dtolnay/rust-toolchain@1.99.0
+        with:
+          targets: aarch64-apple-darwin
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: macos-arm64
+          # Only main can produce a cache available to future release tags.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check compilation
+        run: cargo check --workspace --locked
+
+      - name: Test
+        run: cargo test --workspace --locked
+
+      - name: Warm release dependencies
+        # Match package-macos.sh exactly, including its leading RUSTFLAGS space.
+        # Debug/test artifacts cannot substitute for optimized release artifacts.
+        env:
+          MACOSX_DEPLOYMENT_TARGET: '13.0'
+          RUSTFLAGS: ' -C link-arg=-mmacosx-version-min=13.0'
+        run: cargo build --locked --release --package yes-sessions --target aarch64-apple-darwin --timings
+
+      - name: Upload build timings
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-build-timings
+          path: target/cargo-timings/
+          if-no-files-found: ignore
+          retention-days: 7

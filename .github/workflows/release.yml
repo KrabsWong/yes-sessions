@@ -33,11 +33,17 @@ jobs:
         with:
           ref: ${{ steps.tag.outputs.value }}
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.0
         with:
           targets: aarch64-apple-darwin
+          components: rustfmt
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # Restore dependencies produced on main by Rust CI. Tag caches cannot
+          # be reused by later tags, so releases only read the shared cache.
+          shared-key: macos-arm64
+          save-if: 'false'
 
       - name: Select distribution signing
         id: signing
@@ -96,11 +102,14 @@ jobs:
           test "$TAG_VERSION" = "$CARGO_VERSION"
           echo "value=$CARGO_VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Check compilation
+        run: cargo check --workspace --locked
+
       - name: Test
-        run: |
-          cargo fmt --all --check
-          cargo check --workspace --locked
-          cargo test --workspace --locked
+        run: cargo test --workspace --locked
 
       - name: Build app and DMG
         run: ./scripts/package-macos.sh
