@@ -45,7 +45,7 @@ Configure these GitHub Actions Secrets. Never commit credentials to the reposito
 
 | Secret | Purpose |
 | --- | --- |
-| `WORKFLOW_PAT` | Push version commits and Git tags to the main repository; repository rules must permit this |
+| `WORKFLOW_PAT` | Create PRs (requires pull request read/write access) and push version commits and Git tags to the main repository; repository rules must permit this |
 | `HOMEBREW_TAP_TOKEN` | Upload Release assets and push the Cask to `KrabsWong/homebrew-yes-sessions` |
 | `MACOS_CERTIFICATE` | Base64-encoded Developer ID Application `.p12` certificate |
 | `MACOS_CERTIFICATE_PASSWORD` | Export password for the certificate |
@@ -56,7 +56,7 @@ Configure these GitHub Actions Secrets. Never commit credentials to the reposito
 
 The first two are required by the current automated pipeline. Configure all six Apple signing credentials or leave all six unset; partial configuration stops the release. Leaving them unset produces an ad-hoc signed installer without Apple notarization. Release notes state the signing status.
 
-`WORKFLOW_PAT` ensures that pushing a Git tag can trigger the downstream release workflow; do not simply replace it with the default `GITHUB_TOKEN`. The Tap repository and assets must be accessible to installation users. Public distribution should not require users to authenticate to download the installer.
+`WORKFLOW_PAT` lets automatically created PRs trigger workflows without the approval required for PRs created with `GITHUB_TOKEN`, and ensures that pushing a Git tag can trigger the downstream release workflow; do not simply replace it with the default `GITHUB_TOKEN`. The Tap repository and assets must be accessible to installation users. Public distribution should not require users to authenticate to download the installer.
 
 ## Verification before merging
 

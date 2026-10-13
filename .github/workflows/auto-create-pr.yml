@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@v6
         with:
@@ -20,10 +19,14 @@ jobs:
       - name: Check if PR already exists
         id: check-pr
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          BRANCH="${{ github.ref_name }}"
-          EXISTING=$(gh pr list --head "$BRANCH" --base main --json number --jq '.[0].number' 2>/dev/null || echo "")
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::WORKFLOW_PAT is required to create PRs with automatic workflow execution."
+            exit 1
+          fi
+          EXISTING=$(gh pr list --head "$BRANCH" --base main --json number --jq '.[0].number')
 
           if [ -n "$EXISTING" ]; then
             echo "exists=true" >> $GITHUB_OUTPUT
@@ -34,33 +37,23 @@ jobs:
             echo "📝 未找到已有 PR，准备创建"
           fi
 
-      - name: Get latest commit message
-        if: steps.check-pr.outputs.exists == 'false'
-        id: commit-info
-        run: |
-          COMMIT_MSG=$(git log -1 --pretty=format:"%s")
-          COMMIT_BODY=$(git log -1 --pretty=format:"%b")
-          echo "title=$COMMIT_MSG" >> $GITHUB_OUTPUT
-          # 多行内容需要用 EOF 方式写入
-          {
-            echo "body<<EOF"
-            echo "$COMMIT_BODY"
-            echo "EOF"
-          } >> $GITHUB_OUTPUT
-
       - name: Create PR
         if: steps.check-pr.outputs.exists == 'false'
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.WORKFLOW_PAT }}
+          BRANCH: ${{ github.ref_name }}
         run: |
-          BRANCH="${{ github.ref_name }}"
-          TITLE="${{ steps.commit-info.outputs.title }}"
-          BODY="${{ steps.commit-info.outputs.body }}"
+          TITLE=$(git log -1 --pretty=format:"%s")
+          BODY=$(git log -1 --pretty=format:"%b")
+          BODY_FILE=$(mktemp)
+          trap 'rm -f "$BODY_FILE"' EXIT
+
+          printf '%s\n\n---\n_此 PR 由 GitHub Actions 自动创建。_\n\n**合并前请添加版本标签（必选其一）：**\n- `major` — 重大版本升级\n- `minor` — 新功能\n- `patch` — 问题修复\n- `skip-release` — 无需发版（文档、配置等无关紧要的改动）_' "$BODY" > "$BODY_FILE"
 
           PR_URL=$(gh pr create \
             --base main \
             --head "$BRANCH" \
             --title "$TITLE" \
-            --body "$(printf '%s\n\n---\n_此 PR 由 GitHub Actions 自动创建。_\n\n**合并前请添加版本标签（必选其一）：**\n- `major` — 重大版本升级\n- `minor` — 新功能\n- `patch` — 问题修复\n- `skip-release` — 无需发版（文档、配置等无关紧要的改动）_' "$BODY")")
+            --body-file "$BODY_FILE")
 
           echo "✅ PR 已创建: $PR_URL"
