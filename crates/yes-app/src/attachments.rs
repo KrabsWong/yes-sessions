@@ -281,28 +281,52 @@ fn open_attachment(item: SessionAttachment, language: Language, window: &mut Win
     }
 }
 
-fn actions(item: &SessionAttachment, language: Language) -> impl IntoElement {
+fn actions(item: &SessionAttachment, language: Language, show_open: bool) -> impl IntoElement {
     let open = item.clone();
     let save = item.clone();
     div()
+        .debug_selector(|| "attachment-actions".into())
         .flex()
-        .flex_wrap()
-        .gap_2()
-        .child(
-            Button::new("open")
-                .outline()
-                .label(tr(language, "attachment.open"))
-                .text_size(px(12.))
-                .on_click(move |_, window, cx| open_attachment(open.clone(), language, window, cx)),
+        .flex_shrink_0()
+        .when_else(
+            show_open,
+            |this| this.flex_wrap().gap_2(),
+            |this| this.gap_1(),
         )
+        .when(show_open, |this| {
+            this.child(
+                Button::new("open")
+                    .outline()
+                    .label(tr(language, "attachment.open"))
+                    .text_size(px(12.))
+                    .on_click(move |_, window, cx| {
+                        open_attachment(open.clone(), language, window, cx)
+                    }),
+            )
+        })
         .when(
             !matches!(item.source, AttachmentSource::RemoteUrl(_)),
             |this| {
                 this.child(
                     Button::new("save")
-                        .outline()
-                        .label(tr(language, "attachment.saveAs"))
-                        .text_size(px(12.))
+                        .when_else(
+                            show_open,
+                            |button| {
+                                button
+                                    .outline()
+                                    .label(tr(language, "attachment.saveAs"))
+                                    .text_size(px(12.))
+                            },
+                            |button| {
+                                button
+                                    .ghost()
+                                    .icon(Icon::empty().path("icons/download.svg").size(px(16.)))
+                                    .w(px(28.))
+                                    .h(px(28.))
+                                    .tooltip(tr(language, "attachment.saveAs"))
+                                    .accessibility_label(tr(language, "attachment.saveAs"))
+                            },
+                        )
                         .on_click(move |_, window, cx| save_as(save.clone(), language, window, cx)),
                 )
             },
@@ -315,9 +339,26 @@ fn actions(item: &SessionAttachment, language: Language) -> impl IntoElement {
             |this, path| {
                 this.child(
                     Button::new("reveal")
-                        .outline()
-                        .label(tr(language, "attachment.reveal"))
-                        .text_size(px(12.))
+                        .when_else(
+                            show_open,
+                            |button| {
+                                button
+                                    .outline()
+                                    .label(tr(language, "attachment.reveal"))
+                                    .text_size(px(12.))
+                            },
+                            |button| {
+                                button
+                                    .ghost()
+                                    .icon(
+                                        Icon::empty().path("icons/folder-search.svg").size(px(16.)),
+                                    )
+                                    .w(px(28.))
+                                    .h(px(28.))
+                                    .tooltip(tr(language, "attachment.reveal"))
+                                    .accessibility_label(tr(language, "attachment.reveal"))
+                            },
+                        )
                         .on_click(move |_, _, cx| cx.reveal_path(&path)),
                 )
             },
@@ -400,12 +441,12 @@ impl RenderOnce for Attachments {
                 .text_color(cx.theme().foreground)
                 .overflow_hidden();
             if let Some(image) = data.and_then(|data| data.image.clone()) {
-                let preview_item = item.clone();
-                let preview_image = image.clone();
+                let open = item.clone();
                 card = card.child(
                     div()
                         .id("thumbnail")
                         .debug_selector(|| "attachment-thumbnail".into())
+                        .flex()
                         .h(px(180.))
                         .flex_shrink_0()
                         .w_full()
@@ -416,6 +457,7 @@ impl RenderOnce for Attachments {
                             img(image)
                                 .debug_selector(|| "attachment-image".into())
                                 .w_full()
+                                .max_w_full()
                                 .h(px(180.))
                                 .max_h(px(180.))
                                 .object_fit(ObjectFit::Contain)
@@ -427,17 +469,12 @@ impl RenderOnce for Attachments {
                                 }),
                         )
                         .on_click(move |_, window, cx| {
-                            open_preview(
-                                preview_item.clone(),
-                                preview_image.clone(),
-                                language,
-                                window,
-                                cx,
-                            )
+                            open_attachment(open.clone(), language, window, cx)
                         }),
                 );
             }
             let open = item.clone();
+            let has_thumbnail = data.is_some_and(|data| data.image.is_some());
             card = card.child(
                 div()
                     .debug_selector(|| "attachment-info".into())
@@ -454,38 +491,52 @@ impl RenderOnce for Attachments {
                     .min_w_0()
                     .child(
                         div()
-                            .id("filename")
                             .flex()
                             .items_center()
-                            .gap_2()
+                            .gap(px(12.))
                             .min_w_0()
-                            .tooltip(move |window, cx| {
-                                Tooltip::new(full_path.clone()).build(window, cx)
-                            })
-                            .when(available, |this| {
-                                this.cursor_pointer().on_click(move |_, window, cx| {
-                                    open_attachment(open.clone(), language, window, cx)
-                                })
-                            })
-                            .child(Icon::new(IconName::FileText).size(px(16.)).flex_shrink_0())
                             .child(
                                 div()
-                                    .debug_selector(|| "attachment-name".into())
+                                    .id("filename")
+                                    .debug_selector(|| "attachment-file-info".into())
                                     .flex_1()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
                                     .min_w_0()
-                                    .truncate()
-                                    .text_size(px(13.))
-                                    .child(item.name.clone()),
+                                    .tooltip(move |window, cx| {
+                                        Tooltip::new(full_path.clone()).build(window, cx)
+                                    })
+                                    .when(available, |this| {
+                                        this.cursor_pointer().on_click(move |_, window, cx| {
+                                            open_attachment(open.clone(), language, window, cx)
+                                        })
+                                    })
+                                    .child(
+                                        Icon::new(IconName::FileText).size(px(16.)).flex_shrink_0(),
+                                    )
+                                    .child(
+                                        div()
+                                            .debug_selector(|| "attachment-name".into())
+                                            .flex_1()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_size(px(13.))
+                                            .child(item.name.clone()),
+                                    )
+                                    .when_some(data.and_then(|data| data.size), |view, bytes| {
+                                        view.child(
+                                            div()
+                                                .debug_selector(|| "attachment-size".into())
+                                                .flex_shrink_0()
+                                                .text_size(px(12.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(format!("({})", size_label(bytes))),
+                                        )
+                                    }),
                             )
-                            .when_some(data.and_then(|data| data.size), |view, bytes| {
-                                view.child(
-                                    div()
-                                        .debug_selector(|| "attachment-size".into())
-                                        .flex_shrink_0()
-                                        .text_size(px(12.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(format!("({})", size_label(bytes))),
-                                )
+                            .when(available && has_thumbnail, |row| {
+                                row.child(actions(&item, language, false))
                             }),
                     )
                     .when(data.and_then(|data| data.size).is_none(), |view| {
@@ -496,140 +547,13 @@ impl RenderOnce for Attachments {
                                 .child(subtitle),
                         )
                     })
-                    .when(available, |this| this.child(actions(&item, language))),
+                    .when(available && !has_thumbnail, |this| {
+                        this.child(actions(&item, language, true))
+                    }),
             );
             list = list.child(card);
         }
         list
-    }
-}
-
-struct ImagePreview {
-    item: SessionAttachment,
-    image: Arc<Image>,
-    language: Language,
-    zoom: f32,
-}
-fn open_preview(
-    item: SessionAttachment,
-    image: Arc<Image>,
-    language: Language,
-    window: &mut Window,
-    cx: &mut App,
-) {
-    let title = item.name.clone();
-    let preview = cx.new(|_| ImagePreview {
-        item,
-        image,
-        language,
-        zoom: 1.,
-    });
-    window.open_dialog(cx, move |dialog, window, _| {
-        dialog
-            .title(div().min_w_0().pr_8().truncate().child(title.clone()))
-            .width(preview_width(window))
-            .margin_top(
-                ((window.viewport_size().height - preview_height(window) - px(80.)) / 2.)
-                    .max(px(24.)),
-            )
-            .overlay(true)
-            .overlay_closable(true)
-            .keyboard(true)
-            .close_button(true)
-            .child(preview.clone())
-    });
-}
-
-fn preview_width(window: &Window) -> Pixels {
-    (window.viewport_size().width * 0.8)
-        .max(px(200.))
-        .min(px(860.))
-}
-
-fn preview_height(window: &Window) -> Pixels {
-    (window.viewport_size().height * 0.6)
-        .max(px(120.))
-        .min(px(480.))
-}
-
-impl Render for ImagePreview {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.language;
-        let preview_height = preview_height(window);
-        div()
-            .debug_selector(|| "attachment-preview-modal".into())
-            .flex()
-            .flex_col()
-            .w_full()
-            .h(preview_height)
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .flex()
-                    .flex_wrap()
-                    .items_center()
-                    .justify_between()
-                    .gap_1()
-                    .p_2()
-                    .border_b_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(
-                                Button::new("zoom-out")
-                                    .ghost()
-                                    .label("−")
-                                    .tooltip(tr(language, "attachment.zoomOut"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.zoom = (this.zoom / 1.25).max(0.25);
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("fit")
-                                    .ghost()
-                                    .label(tr(language, "attachment.fit"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.zoom = 1.;
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                Button::new("zoom-in")
-                                    .ghost()
-                                    .label("+")
-                                    .tooltip(tr(language, "attachment.zoomIn"))
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.zoom = (this.zoom * 1.25).min(8.);
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(actions(&self.item, language)),
-            )
-            .child(
-                div()
-                    .id("image-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_scroll()
-                    .child(
-                        img(self.image.clone())
-                            .w((preview_width(window) - px(34.)) * self.zoom)
-                            .h((preview_height - px(88.)).max(px(32.)) * self.zoom)
-                            .object_fit(ObjectFit::Contain)
-                            .with_fallback(move || {
-                                div()
-                                    .p_3()
-                                    .child(tr(language, "attachment.imageError"))
-                                    .into_any_element()
-                            }),
-                    ),
-            )
     }
 }
 
@@ -745,72 +669,57 @@ mod tests {
         }
     }
 
-    struct TallImageView;
-    impl Render for TallImageView {
-        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    struct TestImageView(u32, u32);
+    impl Render for TestImageView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             use base64::Engine as _;
             let image = base64::engine::general_purpose::STANDARD.encode(
-                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"320\" height=\"1200\"><rect width=\"320\" height=\"1200\" fill=\"red\"/></svg>",
+                format!("<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{}\" height=\"{}\"><rect width=\"100%\" height=\"100%\" fill=\"red\"/></svg>", self.0, self.1),
             );
-            div()
-                .w_full()
-                .p_3()
-                .child(Attachments {
-                    id: 0,
-                    language: Language::En,
-                    items: vec![SessionAttachment {
-                        name: "a-long-portrait-screenshot-with-a-descriptive-filename.svg".into(),
-                        mime_type: Some("image/svg+xml".into()),
-                        embedded_fallback: None,
-                        source: AttachmentSource::DataUrl(format!(
-                            "data:image/svg+xml;base64,{image}"
-                        )),
-                    }],
-                })
-                .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
+            div().w_full().p_3().child(Attachments {
+                id: 0,
+                language: Language::En,
+                items: vec![SessionAttachment {
+                    name: "a-long-portrait-screenshot-with-a-descriptive-filename.svg".into(),
+                    mime_type: Some("image/svg+xml".into()),
+                    embedded_fallback: None,
+                    source: AttachmentSource::DataUrl(format!("data:image/svg+xml;base64,{image}")),
+                }],
+            })
         }
     }
 
     #[gpui_kit::test]
-    fn image_preview_is_a_dismissible_modal_in_the_same_window(cx: &mut TestAppContext) {
-        use gpui_kit::AppContext as _;
+    fn thumbnail_fits_portrait_landscape_and_square_images(cx: &mut TestAppContext) {
         cx.update(gpui_kit::init);
-        let window = cx.open_window(size(px(900.), px(700.)), |window, cx| {
-            let view = cx.new(|_| TallImageView);
-            gpui_kit::component::Root::new(view, window, cx)
-        });
-        let mut visual = VisualTestContext::from_window(*window, cx);
-        visual.run_until_parked();
-        let window_count = visual.update(|_, cx| cx.windows().len());
-        let thumbnail = visual.debug_bounds("attachment-thumbnail").unwrap();
-        visual.simulate_click(thumbnail.center(), Default::default());
-        visual.run_until_parked();
-        assert_eq!(visual.update(|_, cx| cx.windows().len()), window_count);
-        assert!(visual.debug_bounds("dialog-layer").is_some());
-        let preview = visual.debug_bounds("attachment-preview-modal").unwrap();
-        assert!(preview.size.width > px(600.) && preview.bottom() < px(700.));
-        visual.simulate_keystrokes("escape");
-        visual.run_until_parked();
-        assert!(visual.debug_bounds("attachment-preview-modal").is_none());
-        visual.simulate_click(thumbnail.center(), Default::default());
-        visual.run_until_parked();
-        visual.simulate_click(gpui_kit::point(px(8.), px(350.)), Default::default());
-        visual.run_until_parked();
-        assert!(visual.debug_bounds("attachment-preview-modal").is_none());
-    }
-
-    #[gpui_kit::test]
-    fn portrait_image_stays_above_file_information(cx: &mut TestAppContext) {
-        cx.update(gpui_kit::init);
-        for width in [280., 800.] {
-            let window = cx.open_window(size(px(width), px(700.)), |_, _| TallImageView);
+        for (width, image_width, image_height) in [
+            (280., 320, 1200),
+            (800., 320, 1200),
+            (280., 1200, 320),
+            (800., 1200, 320),
+            (280., 600, 600),
+            (800., 600, 600),
+        ] {
+            let window = cx.open_window(size(px(width), px(700.)), |_, _| {
+                TestImageView(image_width, image_height)
+            });
             let mut visual = VisualTestContext::from_window(*window, cx);
             visual.run_until_parked();
             let thumbnail = visual.debug_bounds("attachment-thumbnail").unwrap();
             let image = visual.debug_bounds("attachment-image").unwrap();
             let info = visual.debug_bounds("attachment-info").unwrap();
             let card = visual.debug_bounds("attachment-card").unwrap();
+            let filename = visual.debug_bounds("attachment-file-info").unwrap();
+            let actions = visual.debug_bounds("attachment-actions").unwrap();
+            assert!(actions.left() - filename.right() >= px(12.));
+            assert_eq!(actions.size.height, px(28.));
+            assert!((actions.center().y - filename.center().y).abs() < px(1.));
+            assert!(actions.right() <= info.right() - px(8.));
             assert_eq!(thumbnail.size.height, px(180.));
+            assert_eq!(
+                image, thumbnail,
+                "image box must fill the thumbnail viewport"
+            );
             assert!(
                 image.bottom() <= thumbnail.bottom(),
                 "image must fit its reserved area: {image:?} {thumbnail:?}"

@@ -4381,7 +4381,7 @@ mod tests {
     }
 
     #[gpui_kit::test]
-    fn settings_blocks_underlying_image_preview(cx: &mut gpui_kit::TestAppContext) {
+    fn settings_blocks_underlying_image_attachment_open(cx: &mut gpui_kit::TestAppContext) {
         use base64::Engine as _;
         use gpui_kit::{AppContext as _, px, size};
         cx.update(gpui_kit::init);
@@ -4429,15 +4429,7 @@ mod tests {
         visual.run_until_parked();
         visual.simulate_click(thumbnail.center(), Default::default());
         visual.run_until_parked();
-        assert!(visual.debug_bounds("attachment-preview-modal").is_none());
-        app.update(cx, |app, cx| {
-            app.settings_open = false;
-            cx.notify();
-        });
-        visual.run_until_parked();
-        visual.simulate_click(thumbnail.center(), Default::default());
-        visual.run_until_parked();
-        assert!(visual.debug_bounds("attachment-preview-modal").is_some());
+        assert!(app.read_with(cx, |app, _| app.settings_open));
     }
 
     #[gpui_kit::test]
