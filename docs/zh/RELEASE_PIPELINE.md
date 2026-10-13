@@ -45,7 +45,7 @@
 
 | Secret | 用途 |
 | --- | --- |
-| `WORKFLOW_PAT` | 向主仓库推送版本提交和 Git tag；仓库规则须允许此操作 |
+| `WORKFLOW_PAT` | 创建 PR（需要 Pull requests 读写权限），并向主仓库推送版本提交和 Git tag；仓库规则须允许此操作 |
 | `HOMEBREW_TAP_TOKEN` | 向 `KrabsWong/homebrew-yes-sessions` 上传 Release 附件并推送 Cask |
 | `MACOS_CERTIFICATE` | Base64 编码的 Developer ID Application `.p12` 证书 |
 | `MACOS_CERTIFICATE_PASSWORD` | 上述证书的导出密码 |
@@ -56,7 +56,7 @@
 
 前两项是当前自动发布链路的必需项。六项 Apple 签名凭据须全部配置或全部留空；部分配置会中止发布。全部留空时生成 ad-hoc 签名、未经 Apple 公证的安装包，Release 说明会注明签名状态。
 
-`WORKFLOW_PAT` 用于确保推送 Git tag 后能触发后续发布工作流，不应直接替换成默认 `GITHUB_TOKEN`。Tap 仓库和附件需要允许安装用户访问；面向公众分发时，下载链接不应要求用户认证。
+`WORKFLOW_PAT` 用于让自动创建的 PR 直接触发工作流，避免 `GITHUB_TOKEN` 创建 PR 时要求的运行审批，同时确保推送 Git tag 后能触发后续发布工作流，不应直接替换成默认 `GITHUB_TOKEN`。Tap 仓库和附件需要允许安装用户访问；面向公众分发时，下载链接不应要求用户认证。
 
 ## 合并前验证
 
