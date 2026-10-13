@@ -453,6 +453,9 @@ impl RenderOnce for Attachments {
                         .overflow_hidden()
                         .bg(cx.theme().muted)
                         .cursor_pointer()
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(tr(language, "attachment.openImage")).build(window, cx)
+                        })
                         .child(
                             img(image)
                                 .debug_selector(|| "attachment-image".into())

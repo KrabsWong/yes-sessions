@@ -154,6 +154,8 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (_, "attachment.imageError") => "Preview unavailable. Open with the system app.",
         (Language::Zh, "attachment.open") => "打开",
         (_, "attachment.open") => "Open",
+        (Language::Zh, "attachment.openImage") => "使用系统默认应用打开",
+        (_, "attachment.openImage") => "Open with the default app",
         (Language::Zh, "attachment.saveAs") => "另存为",
         (_, "attachment.saveAs") => "Save as",
         (Language::Zh, "attachment.reveal") => "在 Finder 中显示",
