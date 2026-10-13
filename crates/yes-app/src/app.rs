@@ -1,6 +1,9 @@
 #[path = "agent_search.rs"]
 mod agent_search;
 use agent_search::{AgentSearch, AgentSearchLanding};
+#[path = "remote.rs"]
+mod remote;
+use remote::RemoteSettings;
 #[path = "session_search.rs"]
 mod session_search;
 use session_search::SessionSearch;
@@ -39,6 +42,7 @@ enum SettingsTab {
     Experience,
     Terminal,
     About,
+    Remote,
 }
 
 #[derive(Clone)]
@@ -431,6 +435,8 @@ pub struct YesSessions {
     agent_search_landing: Option<AgentSearchLanding>,
     copied_metadata: Option<(&'static str, Instant)>,
     registry: Arc<ProviderRegistry>,
+    remote: RemoteSettings,
+    remote_provider: Option<Arc<yes_core::remote::RemoteCodexProvider>>,
     dashboard: Option<Entity<crate::dashboard::Dashboard>>,
     dashboard_open: bool,
     dashboard_subscription: Option<Subscription>,
@@ -489,6 +495,7 @@ impl YesSessions {
         let selected_app = settings.default_app.unwrap_or(AppType::CodeBuddy);
         let terminal_info = terminal_info(settings.preferred_terminal);
         Self::configure_theme(settings.theme, window, cx);
+        let remote = RemoteSettings::new(&settings, window, cx);
         let mut this = Self {
             root_focus: cx.focus_handle(),
             search_landing: None,
@@ -498,6 +505,8 @@ impl YesSessions {
             agent_search_landing: None,
             copied_metadata: None,
             registry: Arc::new(ProviderRegistry::default()),
+            remote,
+            remote_provider: None,
             dashboard: None,
             dashboard_open: false,
             dashboard_subscription: None,
@@ -566,6 +575,12 @@ impl YesSessions {
         crate::commands::update_menus(this.settings.language, cx);
         this.load_sessions(cx);
         this.start_live_refresh(cx);
+        this.start_remote_monitor(window, cx);
+        cx.on_app_quit(|this, _| {
+            this.stop_remote_connection();
+            async {}
+        })
+        .detach();
         this
     }
 
@@ -765,7 +780,7 @@ impl YesSessions {
         }
     }
 
-    fn load_sessions(&mut self, cx: &mut Context<Self>) {
+    fn clear_sessions(&mut self, cx: &mut Context<Self>) {
         self.agent_search = AgentSearch::default();
         self.agent_search_landing = None;
         self.session_search = SessionSearch::default();
@@ -773,7 +788,6 @@ impl YesSessions {
         self.unread_message_count = 0;
         self.sessions_generation += 1;
         self.detail_generation += 1;
-        let generation = self.sessions_generation;
         self.loading_sessions = true;
         self.refreshing_sessions = false;
         self.loading_detail = false;
@@ -792,7 +806,12 @@ impl YesSessions {
         self.selected_session_id = None;
         self.conversation_state
             .update(cx, |state, cx| state.reset(0, cx));
-        let Some(provider) = self.registry.get(self.selected_app) else {
+    }
+
+    fn load_sessions(&mut self, cx: &mut Context<Self>) {
+        self.clear_sessions(cx);
+        let generation = self.sessions_generation;
+        let Some(provider) = self.active_provider() else {
             return;
         };
         let task = cx
@@ -808,6 +827,10 @@ impl YesSessions {
                 this.loading_sessions = false;
                 match result {
                     Ok(sessions) => {
+                        if this.remote_provider.is_some() {
+                            this.remote.status = None;
+                            this.remote.sessions_ready = true;
+                        }
                         this.sessions = Arc::new(sessions);
                         if this.agent_search.input.is_some() {
                             this.sync_agent_search_directories();
@@ -825,7 +848,12 @@ impl YesSessions {
                             this.select_session(first.id, cx);
                         }
                     }
-                    Err(error) => this.error = Some(error),
+                    Err(error) => {
+                        if this.remote_provider.is_some() {
+                            this.remote.status = Some(error.clone());
+                        }
+                        this.error = Some(error);
+                    }
                 }
                 cx.notify();
             });
@@ -834,10 +862,13 @@ impl YesSessions {
     }
 
     fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        if !self.remote_ready() {
+            return;
+        }
         if self.loading_sessions || self.refreshing_sessions {
             return;
         }
-        let Some(provider) = self.registry.get(self.selected_app) else {
+        let Some(provider) = self.active_provider() else {
             return;
         };
         self.refreshing_sessions = true;
@@ -853,7 +884,22 @@ impl YesSessions {
                     return;
                 }
                 this.refreshing_sessions = false;
-                let Ok(sessions) = result else { return };
+                let sessions = match result {
+                    Ok(sessions) => {
+                        if this.remote_provider.is_some() {
+                            this.remote.status = None;
+                        }
+                        sessions
+                    }
+                    Err(error) => {
+                        if this.remote_provider.is_some() {
+                            this.remote.status = Some(error.to_string());
+                            this.error = Some(error.to_string());
+                            cx.notify();
+                        }
+                        return;
+                    }
+                };
                 let selection = selection_after_refresh(
                     &this.sessions,
                     &sessions,
@@ -871,6 +917,11 @@ impl YesSessions {
                         this.reset_detail(cx);
                     }
                     cx.notify();
+                } else if this.remote_provider.is_some() {
+                    if let Some(id) = this.selected_session_id.clone() {
+                        this.load_session(id, cx);
+                    }
+                    cx.notify();
                 } else if changed {
                     cx.notify();
                 }
@@ -880,6 +931,9 @@ impl YesSessions {
     }
 
     fn select_app(&mut self, app_type: AppType, cx: &mut Context<Self>) {
+        if self.remote_provider.is_some() && app_type != AppType::Codex {
+            return;
+        }
         if self.selected_app == app_type {
             return;
         }
@@ -941,6 +995,12 @@ impl YesSessions {
     }
 
     fn load_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        if !self.remote_ready() {
+            return;
+        }
+        if let Some(provider) = &self.remote_provider {
+            provider.cancel();
+        }
         let ancestors = ancestor_session_ids(&self.sessions, &session_id);
         for parent_id in &ancestors {
             self.expanded_parents.insert(parent_id.clone());
@@ -960,7 +1020,7 @@ impl YesSessions {
         self.selected_session_id = Some(session_id.clone());
         self.loading_detail = true;
         let generation = self.detail_generation;
-        let Some(provider) = self.registry.get(self.selected_app) else {
+        let Some(provider) = self.active_provider() else {
             return;
         };
         let source_signature = self
@@ -969,7 +1029,13 @@ impl YesSessions {
             .find(|session| {
                 session.id == session_id || session.uuid.as_deref() == Some(&session_id)
             })
-            .and_then(|session| subtree_source_signature(session, &self.sessions));
+            .and_then(|session| {
+                if self.remote_provider.is_some() {
+                    None
+                } else {
+                    subtree_source_signature(session, &self.sessions)
+                }
+            });
         let sessions = self.sessions.clone();
         let task = cx.background_executor().spawn(async move {
             (
@@ -987,6 +1053,13 @@ impl YesSessions {
                     return;
                 }
                 this.loading_detail = false;
+                if this.remote_provider.is_some() {
+                    this.remote.status = match &result {
+                        Ok(Some(_)) => None,
+                        Ok(None) => Some("Session was not found".into()),
+                        Err(error) => Some(error.clone()),
+                    };
+                }
                 match result {
                     Ok(Some(detail)) => {
                         this.detail_source_signature = source_signature;
@@ -1012,6 +1085,9 @@ impl YesSessions {
     }
 
     fn refresh_selected_detail(&mut self, cx: &mut Context<Self>) {
+        if self.remote_provider.is_some() {
+            return;
+        }
         if self.loading_detail || self.refreshing_detail {
             return;
         }
@@ -1054,7 +1130,7 @@ impl YesSessions {
         {
             return;
         }
-        let Some(provider) = self.registry.get(self.selected_app) else {
+        let Some(provider) = self.active_provider() else {
             return;
         };
         self.refreshing_detail = true;
@@ -1117,8 +1193,10 @@ impl YesSessions {
                 cx.background_executor().timer(Duration::from_secs(5)).await;
                 if this
                     .update(cx, |this, cx| {
-                        this.refresh_sessions(cx);
-                        this.refresh_selected_detail(cx);
+                        if this.remote_provider.is_none() {
+                            this.refresh_sessions(cx);
+                            this.refresh_selected_detail(cx);
+                        }
                         if this.preview_open {
                             if let Some(preview) = &this.workspace_preview {
                                 preview.update(cx, |preview, cx| preview.check_for_changes(cx));
@@ -1317,6 +1395,9 @@ impl YesSessions {
     }
 
     fn open_dashboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote_provider.is_some() {
+            return;
+        }
         self.settings_open = false;
         self.agent_search = AgentSearch::default();
         self.session_search = SessionSearch::default();
@@ -1432,6 +1513,7 @@ impl YesSessions {
                             .font_weight(FontWeight::SEMIBOLD)
                             .child(tr(language, "app.title")),
                     )
+                    .child(self.render_source_selector(cx))
                     .when(self.settings.sidebar_collapsed, |view| {
                         view.child(
                             div()
@@ -1455,6 +1537,7 @@ impl YesSessions {
                     .gap_2()
                     .child(
                         Button::new("open-dashboard")
+                            .disabled(self.remote_provider.is_some())
                             .ghost()
                             .compact()
                             .size(px(32.))
@@ -1509,6 +1592,7 @@ impl YesSessions {
         let owner = cx.weak_entity();
         let selected_app = self.selected_app;
         Button::new("provider-selector")
+            .disabled(self.remote_provider.is_some())
             .outline()
             .w_full()
             .h(px(36.))
@@ -1740,8 +1824,7 @@ impl YesSessions {
             ),
         };
         let available = self
-            .registry
-            .get(self.selected_app)
+            .active_provider()
             .is_some_and(|provider| provider.is_available());
         let rows = Arc::new(self.session_rows());
         let view_mode = self.session_view_mode;
@@ -1781,6 +1864,9 @@ impl YesSessions {
                     .bg(cx.theme().background)
                     .child(self.render_provider_selector(cx)),
             )
+            .when(self.remote_provider.is_some(), |view| {
+                view.child(self.render_remote_status(cx))
+            })
             .child(
                 div()
                     .px_3()
@@ -1954,7 +2040,14 @@ impl YesSessions {
                     .justify_center()
                     .text_size(px(14.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(tr(language, "sessions.empty"))
+                    .child(tr(
+                        language,
+                        if !self.remote_ready() {
+                            self.remote_connection_label()
+                        } else {
+                            "sessions.empty"
+                        },
+                    ))
                     .into_any_element()
             } else {
                 uniform_list(
@@ -2754,6 +2847,9 @@ impl YesSessions {
     }
 
     fn ensure_workspace_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.remote_provider.is_some() {
+            return;
+        }
         if self.workspace_preview.is_some() {
             return;
         }
@@ -2771,6 +2867,9 @@ impl YesSessions {
     }
 
     pub fn has_workspace(&self) -> bool {
+        if self.remote_provider.is_some() {
+            return false;
+        }
         self.detail
             .as_ref()
             .is_some_and(|detail| detail.session.directory.is_some())
@@ -2987,6 +3086,7 @@ impl YesSessions {
             layout.clone(),
             self.conversation_state.clone(),
             ConversationOptions {
+                remote: self.remote_provider.is_some(),
                 language,
                 provider: self.selected_app,
                 is_subagent: detail.session.kind == yes_core::model::SessionKind::Subagent,
@@ -3170,7 +3270,8 @@ impl YesSessions {
                                 })
                                 .child(div().flex_1())
                                 .when(
-                                    session.kind != yes_core::model::SessionKind::Subagent
+                                    self.remote_provider.is_none()
+                                        && session.kind != yes_core::model::SessionKind::Subagent
                                         && session.app_type != AppType::CodeBuddyCn,
                                     |view| {
                                         view.child(
@@ -3476,7 +3577,7 @@ impl YesSessions {
                             .px_6()
                             .flex()
                             .items_center()
-                            .gap_6()
+                            .gap_3()
                             .border_b_1()
                             .border_color(cx.theme().border)
                             .child(self.tab_button(
@@ -3504,6 +3605,14 @@ impl YesSessions {
                                 cx,
                             ))
                             .child(self.tab_button(
+                                "tab-remote",
+                                IconName::SquareTerminal,
+                                tr(language, "remote.title"),
+                                tab == SettingsTab::Remote,
+                                SettingsTab::Remote,
+                                cx,
+                            ))
+                            .child(self.tab_button(
                                 "tab-about",
                                 IconName::Info,
                                 tr(language, "settings.about"),
@@ -3519,6 +3628,9 @@ impl YesSessions {
                             .pb_8()
                             .v_flex()
                             .gap_6()
+                            .when(tab == SettingsTab::Remote, |view| {
+                                view.child(self.render_remote_settings(cx))
+                            })
                             .when(tab == SettingsTab::About, |view| {
                                 view.child(
                                     div()
@@ -4109,6 +4221,12 @@ impl YesSessions {
 impl Render for YesSessions {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if let Some(error) = self.error.take() {
+            // Notifications remain masked even if the address was temporarily revealed.
+            let error = if self.remote_provider.is_some() {
+                self.redact_remote_address(&error)
+            } else {
+                error
+            };
             // Root owns the notification layer; update it after this render completes.
             window.defer(cx, move |window, cx| {
                 window.push_notification(Notification::error(error).id::<YesSessions>(), cx);
@@ -4127,6 +4245,7 @@ impl Render for YesSessions {
                     && !self.dashboard_open
                     && !self.settings_open
                     && !self.preview_open
+                    && !self.remote_connecting()
                     && self.session_search.input.is_none()
                     && self.agent_search.input.is_none(),
                 |view| view.key_context("SessionNavigation"),
@@ -4166,7 +4285,20 @@ impl Render for YesSessions {
                     }
                 }),
             )
+            .capture_key_down(cx.listener(|this, _: &KeyDownEvent, _, cx| {
+                if this.remote_connecting() {
+                    cx.stop_propagation();
+                }
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                if this.remote_auth_open() {
+                    if event.keystroke.key == "escape" {
+                        this.answer_remote_prompt(false, window, cx);
+                        cx.stop_propagation();
+                    }
+                    // Ordinary keys must reach the platform text input handler.
+                    return;
+                }
                 if event.keystroke.key == "escape" && this.dashboard_open && !this.settings_open {
                     this.dashboard_open = false;
                     cx.notify();
@@ -4301,6 +4433,9 @@ impl Render for YesSessions {
                     }
                 }
             }))
+            .when(self.remote_provider.is_some(), |view| {
+                view.child(self.render_remote_bar())
+            })
             .when(
                 self.session_search.input.is_some() && self.detail.is_some(),
                 |view| view.child(self.render_session_search(cx)),
@@ -4311,6 +4446,12 @@ impl Render for YesSessions {
             )
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
+            })
+            .when(self.remote_connecting(), |view| {
+                view.child(self.render_remote_connecting(cx))
+            })
+            .when(self.remote_auth_open(), |view| {
+                view.child(self.render_remote_auth(cx))
             })
             .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
             .children(gpui_kit::component::Root::render_notification_layer(

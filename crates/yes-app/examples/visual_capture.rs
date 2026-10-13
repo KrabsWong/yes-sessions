@@ -16,6 +16,9 @@ const WINDOW_WIDTH: f32 = 1200.0;
 const WINDOW_HEIGHT: f32 = 800.0;
 
 fn main() -> Result<()> {
+    if let Some(code) = yes_core::ssh::run_askpass() {
+        std::process::exit(code);
+    }
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .canonicalize()
@@ -47,6 +50,48 @@ fn main() -> Result<()> {
     let window = AnyWindowHandle::from(window);
 
     settle(&mut cx, window)?;
+    if env::args().any(|arg| arg == "--remote") {
+        for (language, label) in [
+            (yes_core::Language::Zh, "zh"),
+            (yes_core::Language::En, "en"),
+        ] {
+            cx.update_window(window, |root, _, cx| {
+                let app = root
+                    .downcast::<Root>()
+                    .unwrap()
+                    .read(cx)
+                    .view()
+                    .clone()
+                    .downcast::<YesSessions>()
+                    .unwrap();
+                app.update(cx, |app, cx| {
+                    app.settings.language = language;
+                    app.open_remote_settings(cx);
+                });
+            })?;
+            settle(&mut cx, window)?;
+            save_capture(
+                &mut cx,
+                window,
+                output_dir.join(format!("remote-settings-{label}.png")),
+            )?;
+        }
+        click(&mut cx, window, 844., 437.)?;
+        settle(&mut cx, window)?;
+        save_capture(&mut cx, window, output_dir.join("remote-inline-edit.png"))?;
+        click(&mut cx, window, 803., 437.)?;
+        click(&mut cx, window, 785., 437.)?;
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        settle(&mut cx, window)?;
+        save_capture(&mut cx, window, output_dir.join("remote-bar-light.png"))?;
+        cx.update_window(window, |_, window, cx| {
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+        })?;
+        settle(&mut cx, window)?;
+        save_capture(&mut cx, window, output_dir.join("remote-bar-dark.png"))?;
+        fs::remove_dir_all(&fixture_home)?;
+        return Ok(());
+    }
     save_capture(&mut cx, window, output_dir.join("main-light.png"))?;
 
     // Capture the rendered selection while the button is still held. Do not
@@ -470,7 +515,8 @@ fn prepare_fixture(home: &Path) -> Result<()> {
   "showThinkingContent": true,
   "chatLayout": "left",
   "sidebarCollapsed": false,
-  "preferredTerminal": "auto"
+  "preferredTerminal": "auto",
+  "remoteCodex": { "ssh_alias": "visual-test@127.0.0.1", "root": "~/.codex" }
 }"#,
     )
     .context("write settings fixture")?;

@@ -2,6 +2,93 @@ use yes_core::Language;
 
 pub fn tr(language: Language, key: &str) -> &'static str {
     match (language, key) {
+        (Language::Zh, "remote.title") => "远程",
+        (_, "remote.title") => "Remote",
+        (Language::Zh, "remote.reading") => "正在读取…",
+        (_, "remote.reading") => "Reading…",
+        (Language::Zh, "remote.readFailed") => "读取失败",
+        (_, "remote.readFailed") => "Read failed",
+        (Language::Zh, "remote.snapshotReady") => "会话已读取",
+        (_, "remote.snapshotReady") => "Sessions loaded",
+        (Language::Zh, "remote.local") => "本机",
+        (_, "remote.local") => "Local",
+        (Language::Zh, "remote.configure") => "管理远程服务器…",
+        (_, "remote.configure") => "Manage remote servers…",
+        (Language::Zh, "remote.description") => {
+            "通过 SSH 只读浏览 Linux 服务器上的 Codex 会话，无需安装远程程序。"
+        }
+        (_, "remote.description") => {
+            "Read Codex sessions on a Linux server over SSH. No remote installation required."
+        }
+        (Language::Zh, "remote.target") => "SSH 目标（配置别名或 user@host）",
+        (_, "remote.target") => "SSH target (config alias or user@host)",
+        (Language::Zh, "remote.root") => "远程 Codex 数据目录",
+        (_, "remote.root") => "Remote Codex data directory",
+        (Language::Zh, "remote.authHelp") => {
+            "点击连接后自动尝试 SSH 密钥认证，需要密码时会在应用内询问。密码不保存；网络中断后自动重连。"
+        }
+        (_, "remote.authHelp") => {
+            "Connect using your SSH keys, or enter a password when prompted here. Passwords are not saved. Network interruptions reconnect automatically."
+        }
+        (Language::Zh, "remote.editServer") => "修改服务器",
+        (_, "remote.editServer") => "Edit server",
+        (Language::Zh, "remote.addServer") => "添加服务器",
+        (_, "remote.addServer") => "Add server",
+        (Language::Zh, "remote.serverName") => "显示别名",
+        (_, "remote.serverName") => "Display name",
+        (Language::Zh, "remote.saveServer") => "保存",
+        (_, "remote.saveServer") => "Save",
+        (Language::Zh, "remote.deleteServer") => "删除服务器",
+        (_, "remote.deleteServer") => "Delete server",
+        (Language::Zh, "remote.nameInvalid") => "请填写不重复的显示别名。",
+        (_, "remote.nameInvalid") => "Enter a unique display name.",
+        (Language::Zh, "remote.connect") => "连接",
+        (_, "remote.connect") => "Connect",
+        (Language::Zh, "remote.connecting") => "正在连接…",
+        (_, "remote.connecting") => "Connecting…",
+        (Language::Zh, "remote.reconnecting") => "正在重连…",
+        (_, "remote.reconnecting") => "Reconnecting…",
+        (Language::Zh, "remote.authRequired") => "等待认证",
+        (_, "remote.authRequired") => "Authentication required",
+        (Language::Zh, "remote.paused") => "连接已暂停",
+        (_, "remote.paused") => "Connection paused",
+        (Language::Zh, "remote.showAddress") => "显示连接信息",
+        (_, "remote.showAddress") => "Show connection details",
+        (Language::Zh, "remote.hideAddress") => "隐藏连接信息",
+        (_, "remote.hideAddress") => "Hide connection details",
+        (Language::Zh, "remote.enterPassword") => "请输入密码或验证码",
+        (_, "remote.enterPassword") => "Enter your password or verification code",
+        (Language::Zh, "remote.enterPassphrase") => "请输入 SSH 私钥口令",
+        (_, "remote.enterPassphrase") => "Enter your SSH key passphrase",
+        (Language::Zh, "remote.authenticate") => "SSH 认证",
+        (_, "remote.authenticate") => "SSH authentication",
+        (Language::Zh, "remote.verifyHost") => "确认服务器身份",
+        (_, "remote.verifyHost") => "Verify server identity",
+        (Language::Zh, "remote.verifyHelp") => {
+            "请核对以上主机指纹。确认后由系统 SSH 保存服务器身份。"
+        }
+        (_, "remote.verifyHelp") => {
+            "Verify the host fingerprint above. System SSH will remember the host after confirmation."
+        }
+        (Language::Zh, "remote.noPasswordStorage") => "仅用于本次 SSH 认证，不保存密码。",
+        (_, "remote.noPasswordStorage") => {
+            "Used only for this SSH authentication. Your password will not be saved."
+        }
+        (Language::Zh, "remote.trustHost") => "信任并继续",
+        (_, "remote.trustHost") => "Trust and continue",
+        (Language::Zh, "remote.continue") => "继续",
+        (_, "remote.continue") => "Continue",
+        (Language::Zh, "remote.cancel") => "取消",
+        (_, "remote.cancel") => "Cancel",
+        (Language::Zh, "remote.retry") => "重新连接",
+        (_, "remote.retry") => "Reconnect",
+        (Language::Zh, "remote.disconnect") => "断开",
+        (_, "remote.disconnect") => "Disconnect",
+        (Language::Zh, "remote.summaryOnly") => "远程搜索仅匹配会话摘要",
+        (_, "remote.summaryOnly") => "Remote search matches session summaries only",
+        (Language::Zh, "remote.readOnly") => "只读 · 手动刷新",
+        (_, "remote.readOnly") => "Read only · Manual refresh",
+
         (Language::Zh, "message.userContext") => "附加上下文",
         (_, "message.userContext") => "Attached context",
         (Language::Zh, "message.copyOriginal") => "复制原始消息",
