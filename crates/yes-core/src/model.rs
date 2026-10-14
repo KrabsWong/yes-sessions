@@ -8,15 +8,17 @@ use serde_json::{Map, Value};
 pub enum AppType {
     CodeBuddy,
     CodeBuddyCn,
+    WorkBuddy,
     Claude,
     OpenCode,
     Codex,
 }
 
 impl AppType {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::CodeBuddy,
         Self::CodeBuddyCn,
+        Self::WorkBuddy,
         Self::Claude,
         Self::OpenCode,
         Self::Codex,
@@ -26,6 +28,7 @@ impl AppType {
         match self {
             Self::CodeBuddy => "codebuddy",
             Self::CodeBuddyCn => "codebuddycn",
+            Self::WorkBuddy => "workbuddy",
             Self::Claude => "claude",
             Self::OpenCode => "opencode",
             Self::Codex => "codex",
@@ -36,6 +39,7 @@ impl AppType {
         match self {
             Self::CodeBuddy => "Codebuddy",
             Self::CodeBuddyCn => "CodeBuddy CN",
+            Self::WorkBuddy => "WorkBuddy",
             Self::Claude => "Claude Code",
             Self::OpenCode => "OpenCode",
             Self::Codex => "Codex CLI",
@@ -56,6 +60,7 @@ impl FromStr for AppType {
         match value {
             "codebuddy" => Ok(Self::CodeBuddy),
             "codebuddycn" => Ok(Self::CodeBuddyCn),
+            "workbuddy" => Ok(Self::WorkBuddy),
             "claude" => Ok(Self::Claude),
             "opencode" => Ok(Self::OpenCode),
             "codex" => Ok(Self::Codex),
@@ -308,6 +313,12 @@ mod tests {
     #[test]
     fn provider_labels_match_the_desktop_ui() {
         assert_eq!(AppType::CodeBuddy.display_name(), "Codebuddy");
+        assert_eq!(AppType::WorkBuddy.display_name(), "WorkBuddy");
+        assert_eq!("workbuddy".parse::<AppType>().unwrap(), AppType::WorkBuddy);
+        assert_eq!(
+            serde_json::to_string(&AppType::WorkBuddy).unwrap(),
+            "\"workbuddy\""
+        );
         assert_eq!(AppType::Claude.display_name(), "Claude Code");
         assert_eq!(AppType::OpenCode.display_name(), "OpenCode");
         assert_eq!(AppType::Codex.display_name(), "Codex CLI");

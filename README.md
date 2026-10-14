@@ -4,7 +4,7 @@
 
 中文 · [English](README.en.md)
 
-Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 和 Codex CLI 的本地历史集中到一个原生界面。找回之前的提问、查看工具执行记录，或回到终端继续工作，无需逐个翻找日志文件。
+Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、WorkBuddy、Claude Code、OpenCode 和 Codex CLI 的本地历史集中到一个原生界面。找回之前的提问、查看工具执行记录，或回到终端继续工作，无需逐个翻找日志文件。
 
 |Dark|Light
 |:--|:--|
@@ -27,6 +27,7 @@ Yes Sessions 将 CodeBuddy CLI、CodeBuddy CN、Claude Code、OpenCode 和 Codex
 | --- | --- | --- |
 | CodeBuddy CLI | 支持 | 支持 |
 | CodeBuddy CN（IDE） | 支持 | 不支持 |
+| WorkBuddy | 支持（本地会话） | 不支持 |
 | Claude Code | 支持 | 支持 |
 | OpenCode | 支持，兼容 OpenCode 1 与 OpenCode 2 beta 数据 | 支持，需安装对应 CLI |
 | Codex CLI | 支持 | 支持 |

@@ -1725,14 +1725,17 @@ impl YesSessions {
             .iter()
             .map(|session| session.message_count)
             .sum::<usize>();
-        let stats_summary = match language {
-            Language::Zh => format!(
+        let stats_summary = match (self.selected_app, language) {
+            (AppType::WorkBuddy, _) => tr(language, "sessions.statsWithoutMessages")
+                .replace("{sessions}", &format_count(main_count))
+                .replace("{subagents}", &format_count(sub_agent_count)),
+            (_, Language::Zh) => format!(
                 "会话: {}  ·  子代理: {}  ·  消息: {}",
                 format_count(main_count),
                 format_count(sub_agent_count),
                 format_count(message_count)
             ),
-            Language::En => format!(
+            (_, Language::En) => format!(
                 "Sessions: {}  ·  Sub-agents: {}  ·  Messages: {}",
                 format_count(main_count),
                 format_count(sub_agent_count),
@@ -3171,7 +3174,10 @@ impl YesSessions {
                                 .child(div().flex_1())
                                 .when(
                                     session.kind != yes_core::model::SessionKind::Subagent
-                                        && session.app_type != AppType::CodeBuddyCn,
+                                        && !matches!(
+                                            session.app_type,
+                                            AppType::CodeBuddyCn | AppType::WorkBuddy
+                                        ),
                                     |view| {
                                         view.child(
                                             Button::new("resume-session")

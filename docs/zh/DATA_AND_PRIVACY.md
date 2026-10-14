@@ -10,6 +10,7 @@ Yes Sessions 读取当前 macOS 用户目录中的本地数据，不需要导入
 | --- | --- |
 | CodeBuddy CLI | `~/.codebuddy/projects/<project>/*.jsonl` |
 | CodeBuddy CN | `~/Library/Application Support/CodeBuddyExtension/Data/<account>/CodeBuddyIDE/<user>/history/<workspace>/<session>/` |
+| WorkBuddy | `~/.workbuddy/workbuddy.db` 与 `~/.workbuddy/projects/<project>/*.jsonl` |
 | Claude Code | `~/.claude/projects/<project>/*.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` 与 `~/.codex/session_index.jsonl` |
@@ -21,6 +22,10 @@ Yes Sessions 读取当前 macOS 用户目录中的本地数据，不需要导入
 列表读取 IDE 保存的索引，详情按索引读取消息，展示已保存的思考、工具调用与结果、图片和请求级用量。工作区路径通过 CodeBuddy CN 的 `User/workspaceStorage` 信息还原。没有可展示内容的空会话不出现在列表中。
 
 IDE 注入的环境与规则默认折叠，原始消息仍可复制。这只是阅读方式的调整，不会重写源记录。未在本地保存的消息、已清理的历史或缺失附件无法恢复。
+
+### WorkBuddy 的范围
+
+只读查询 SQLite 会话索引，显示未标记删除且有本地 JSONL 正文的本地会话及其子代理记录。打开详情或搜索时复用 CodeBuddy 格式解析，支持消息、思考、工具调用与结果、附件和已记录的用量。暂不读取云端会话，也不提供终端恢复。索引没有消息总数，因此侧栏只显示会话与子代理数量。
 
 ## 应用保存什么
 
