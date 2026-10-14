@@ -296,7 +296,7 @@ impl CodeBuddyProvider {
         })
     }
 
-    fn normalize(&self, records: &[Value], fallback: i64) -> Vec<SessionMessage> {
+    pub(super) fn normalize(&self, records: &[Value], fallback: i64) -> Vec<SessionMessage> {
         let mut messages = Vec::new();
         let mut pending_agents: HashMap<String, Map<String, Value>> = HashMap::new();
         let mut current_model = None;

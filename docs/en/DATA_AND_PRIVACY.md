@@ -10,6 +10,7 @@ Yes Sessions reads local data under the current macOS user’s home directory. N
 | --- | --- |
 | CodeBuddy CLI | `~/.codebuddy/projects/<project>/*.jsonl` |
 | CodeBuddy CN | `~/Library/Application Support/CodeBuddyExtension/Data/<account>/CodeBuddyIDE/<user>/history/<workspace>/<session>/` |
+| WorkBuddy | `~/.workbuddy/workbuddy.db` and `~/.workbuddy/projects/<project>/*.jsonl` |
 | Claude Code | `~/.claude/projects/<project>/*.jsonl` |
 | OpenCode | `~/.local/share/opencode/opencode.db` |
 | Codex CLI | `~/.codex/sessions/**/*.jsonl` and `~/.codex/session_index.jsonl` |
@@ -21,6 +22,10 @@ Session lists use lightweight reads. Cross-session search reads session metadata
 The list reads the IDE’s saved indexes. Details load indexed messages, including saved reasoning, tool calls and results, images, and request-level usage. Workspace paths are recovered from CodeBuddy CN’s `User/workspaceStorage` data. Empty sessions without displayable content are omitted.
 
 IDE-supplied environment information and rules are collapsed by default; the original message remains available to copy. This changes presentation without rewriting source records. Messages never saved locally, deleted history, and missing attachments cannot be recovered.
+
+### WorkBuddy coverage
+
+The SQLite index is opened read-only. The list includes local sessions that are not marked deleted and have local JSONL transcripts, plus their subagent records. Details and search reuse the CodeBuddy format parser for messages, reasoning, tool calls and results, attachments, and recorded usage. Cloud sessions and terminal resume are not supported. The index has no message counts, so the sidebar shows session and subagent counts only.
 
 ## What the app stores
 

@@ -96,10 +96,13 @@ fn shell_quote(value: &str) -> String {
 
 fn resume_command(app_type: AppType, session_id: &str) -> io::Result<(&'static str, Vec<String>)> {
     Ok(match app_type {
-        AppType::CodeBuddyCn => {
+        AppType::CodeBuddyCn | AppType::WorkBuddy => {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                "CodeBuddy CN sessions cannot be resumed in a CLI",
+                format!(
+                    "{} sessions cannot be resumed in a CLI",
+                    app_type.display_name()
+                ),
             ));
         }
         AppType::Claude => ("claude", vec![format!("--resume={session_id}")]),
@@ -219,6 +222,12 @@ mod tests {
 
     #[test]
     fn builds_provider_resume_commands() {
+        assert_eq!(
+            resume_command(AppType::WorkBuddy, "abc")
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Unsupported
+        );
         assert_eq!(
             resume_command(AppType::CodeBuddyCn, "abc")
                 .unwrap_err()

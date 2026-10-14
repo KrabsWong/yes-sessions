@@ -4,7 +4,7 @@
 
 [中文](README.md) · English
 
-Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, Claude Code, OpenCode, and Codex CLI into a native interface. Find an earlier question, inspect tool activity, or return to the terminal to continue working without digging through log files.
+Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, WorkBuddy, Claude Code, OpenCode, and Codex CLI into a native interface. Find an earlier question, inspect tool activity, or return to the terminal to continue working without digging through log files.
 
 |Dark|Light
 |:--|:--
@@ -27,6 +27,7 @@ Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, Claude Code,
 | --- | --- | --- |
 | CodeBuddy CLI | Yes | Yes |
 | CodeBuddy CN (IDE) | Yes | No |
+| WorkBuddy | Yes (local sessions) | No |
 | Claude Code | Yes | Yes |
 | OpenCode | Yes, including OpenCode 1 and OpenCode 2 beta data | Yes, with the corresponding CLI installed |
 | Codex CLI | Yes | Yes |

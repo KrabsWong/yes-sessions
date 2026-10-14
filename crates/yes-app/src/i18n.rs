@@ -325,6 +325,10 @@ pub fn tr(language: Language, key: &str) -> &'static str {
         (_, "menu.minimize") => "Minimize",
         (Language::Zh, "sessions.newMessages") => "新增 {count} 条消息",
         (_, "sessions.newMessages") => "{count} new messages",
+        (Language::Zh, "sessions.statsWithoutMessages") => {
+            "会话: {sessions}  ·  子代理: {subagents}"
+        }
+        (_, "sessions.statsWithoutMessages") => "Sessions: {sessions}  ·  Sub-agents: {subagents}",
         (Language::Zh, "mermaid.renderError") => "图表渲染失败，以下为原始内容。",
         (_, "mermaid.renderError") => {
             "The diagram could not be rendered. The original source is shown below."
