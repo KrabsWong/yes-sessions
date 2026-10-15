@@ -69,7 +69,7 @@ impl CodeBuddyProvider {
             .unwrap_or_default()
     }
 
-    fn summary_values(path: &Path) -> Vec<Value> {
+    pub(super) fn summary_values(path: &Path) -> Vec<Value> {
         let mut bytes = Vec::with_capacity(SUMMARY_PREFIX_BYTES as usize);
         if fs::File::open(path)
             .and_then(|file| {
@@ -131,7 +131,7 @@ impl CodeBuddyProvider {
         }
     }
 
-    fn message_text(record: &Value) -> String {
+    pub(super) fn message_text(record: &Value) -> String {
         let role = record.get("role").and_then(Value::as_str);
         let accepted: &[&str] = if role == Some("assistant") {
             &["output_text", "text"]

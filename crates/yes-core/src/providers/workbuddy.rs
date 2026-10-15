@@ -71,7 +71,7 @@ impl SessionProvider for WorkBuddyProvider {
         }
         let db = super::search_path(&self.root, &self.root.join("workbuddy.db"))?;
         let connection = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        // Enumerate names only: neither main nor subagent bodies are read for the list.
+        // Main titles come from SQLite; subagents read only a bounded transcript prefix.
         let projects = self.root.join("projects");
         let mut files = HashMap::new();
         for entry in WalkDir::new(&projects)
@@ -144,8 +144,24 @@ impl SessionProvider for WorkBuddyProvider {
                     child.id = child_id.to_owned();
                     child.uuid = Some(child.id.clone());
                     child.file_name = child.id.clone();
-                    child.first_message.clear();
                     child.last_message.clear();
+                    child.first_message = CodeBuddyProvider::summary_values(&child_path)
+                        .iter()
+                        .filter(|record| {
+                            record.get("type").and_then(Value::as_str) == Some("message")
+                                && record.get("role").and_then(Value::as_str) == Some("user")
+                        })
+                        .find_map(|record| {
+                            CodeBuddyProvider::message_text(record)
+                                .lines()
+                                .map(str::trim)
+                                .find(|line| !line.is_empty())
+                                .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+                        })
+                        .unwrap_or_default()
+                        .chars()
+                        .take(100)
+                        .collect();
                     child.kind = SessionKind::Subagent;
                     child.parent_session_id = Some(id.clone());
                     let metadata = entry.metadata()?;
@@ -208,7 +224,7 @@ mod tests {
              INSERT INTO sessions VALUES ('../../outside','/tmp','Escape',NULL,1000,2000,NULL,'local');",
         ).unwrap();
         for id in ["main", "deleted", "cloud", "unindexed"] {
-            // Invalid UTF-8 proves listing never parses even the first line of a body.
+            // Main bodies are not needed for listing; invalid child prefixes are tolerated.
             fs::write(project.join(format!("{id}.jsonl")), [0xff]).unwrap();
         }
         let child_path = project.join("main/subagents/agent-child.jsonl");
@@ -229,6 +245,72 @@ mod tests {
         let child = sessions.iter().find(|s| s.id == "agent-child").unwrap();
         assert_eq!(child.parent_session_id.as_deref(), Some("main"));
         assert_eq!(child.kind, SessionKind::Subagent);
+        assert!(child.first_message.is_empty());
+        assert_eq!(child.file_name, "agent-child");
+        // Skip non-user and empty records, normalize whitespace, and preserve Unicode.
+        let prompt = format!("\n  目标：检查\t业务埋点 {}\n详细要求", "中".repeat(120));
+        let prefix = [
+            json!({"type":"message","role":"assistant","content":"Not the task"}),
+            json!({"type":"message","role":"user","content":"  \n"}),
+            json!({"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}),
+        ]
+        .iter()
+        .map(|record| format!("{record}\n"))
+        .collect::<String>();
+        // A large invalid tail must not prevent extracting a title from the prefix.
+        fs::write(&child_path, prefix + &"x".repeat(512 * 1024)).unwrap();
+        let titled = provider
+            .sessions()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "agent-child")
+            .unwrap();
+        assert!(titled.first_message.starts_with("目标：检查 业务埋点 中"));
+        assert_eq!(titled.first_message.chars().count(), 100);
+        assert!(!titled.first_message.contains('\n'));
+        assert_eq!(titled.id, child.id);
+        assert_eq!(
+            provider
+                .session_detail_from_summary(&titled)
+                .unwrap()
+                .unwrap()
+                .session
+                .first_message,
+            titled.first_message
+        );
+        // Content beyond the prefix budget is not parsed for the list.
+        fs::write(
+            &child_path,
+            " ".repeat(256 * 1024)
+                + "\n"
+                + &json!({"type":"message","role":"user","content":"Too late"}).to_string(),
+        )
+        .unwrap();
+        assert!(
+            provider
+                .sessions()
+                .unwrap()
+                .iter()
+                .find(|session| session.id == "agent-child")
+                .unwrap()
+                .first_message
+                .is_empty()
+        );
+        fs::write(
+            &child_path,
+            json!({"type":"message","role":"user","content":"Review worker retries"}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            provider
+                .sessions()
+                .unwrap()
+                .iter()
+                .find(|session| session.id == "agent-child")
+                .unwrap()
+                .first_message,
+            "Review worker retries"
+        );
         assert!(provider.load(main).is_err());
         let records = [
             json!({"type":"message","role":"user","timestamp":1000,"content":[{"type":"input_text","text":"Find the needle"}]}),
