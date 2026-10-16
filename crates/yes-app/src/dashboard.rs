@@ -9,7 +9,8 @@ use gpui_kit::component::{
     chart::LineChart,
     menu::{DropdownMenu as _, PopupMenuItem},
     plot::{
-        AXIS_GAP, IntoPlot, Plot,
+        IntoPlot, Plot, axis_gutter,
+        label::TEXT_SIZE,
         tooltip::{CrossLine, Dot, Tooltip, TooltipState},
     },
 };
@@ -106,7 +107,8 @@ impl Plot for UsageTrend {
             Tooltip::new(cursor, bounds.size)
                 .gap(px(8.))
                 .cross_line(
-                    CrossLine::new(state.cross_line).height(bounds.size.height.as_f32() - AXIS_GAP),
+                    CrossLine::new(state.cross_line)
+                        .height(bounds.size.height.as_f32() - axis_gutter(px(TEXT_SIZE))),
                 )
                 .dots(
                     state

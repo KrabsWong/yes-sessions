@@ -751,7 +751,6 @@ impl YesSessions {
         theme.title_bar_border = border;
         theme.status_bar = background;
         theme.status_bar_border = border;
-        theme.tiles = surface;
         theme.window_border = border;
         // Native components also read tokens directly; sync_base alone does not
         // rebuild these legacy tokens from the updated colors.
@@ -4318,10 +4317,6 @@ impl Render for YesSessions {
             .when(self.settings_open, |view| {
                 view.child(self.render_settings(cx))
             })
-            .children(gpui_kit::component::Root::render_dialog_layer(window, cx))
-            .children(gpui_kit::component::Root::render_notification_layer(
-                window, cx,
-            ))
     }
 }
 
@@ -4849,6 +4844,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn action_errors_use_a_single_dismissible_toast(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::WindowExt as _;
         use gpui_kit::{AppContext as _, px, size};
         cx.update(gpui_kit::init);
         let window = cx.open_window(size(px(800.), px(600.)), |window, cx| {
@@ -4862,7 +4858,6 @@ mod tests {
                 .downcast::<super::YesSessions>()
                 .unwrap()
         });
-        let notifications = root.read_with(cx, |root, _| root.notification.clone());
         let mut visual = gpui_kit::VisualTestContext::from_window(*window, cx);
         for message in ["First failure", "Next failure"] {
             app.update(cx, |app, cx| {
@@ -4877,7 +4872,7 @@ mod tests {
             cx.run_until_parked();
             assert!(app.read_with(cx, |app, _| app.error.is_none()));
             assert_eq!(
-                notifications.read_with(cx, |list, _| list.notifications().len()),
+                visual.update(|window, cx| window.notifications(cx).len()),
                 1
             );
         }
@@ -4885,7 +4880,7 @@ mod tests {
         visual.debug_bounds("yes-sessions-root").unwrap();
         cx.run_until_parked();
         assert_eq!(
-            notifications.read_with(cx, |list, _| list.notifications().len()),
+            visual.update(|window, cx| window.notifications(cx).len()),
             1
         );
         cx.background_executor
@@ -4894,7 +4889,7 @@ mod tests {
         cx.background_executor
             .advance_clock(std::time::Duration::from_secs(1));
         cx.run_until_parked();
-        assert!(notifications.read_with(cx, |list, _| list.notifications().is_empty()));
+        assert!(visual.update(|window, cx| window.notifications(cx).is_empty()));
     }
 
     #[gpui_kit::test]
@@ -5550,6 +5545,7 @@ mod tests {
 
     #[gpui_kit::test]
     fn detail_title_wraps_as_available_width_shrinks(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::component::WindowExt as _;
         use gpui_kit::{AppContext as _, px, size};
         cx.update(gpui_kit::init);
         let window = cx.open_window(size(px(1200.), px(700.)), |window, cx| {
@@ -5557,7 +5553,6 @@ mod tests {
             gpui_kit::component::Root::new(app, window, cx)
         });
         let root = window.root(cx).unwrap();
-        let notifications = root.read_with(cx, |root, _| root.notification.clone());
         let app = root.read_with(cx, |root, _| {
             root.view()
                 .clone()
@@ -5607,7 +5602,7 @@ mod tests {
             "unchanged"
         );
         assert!(app.read_with(cx, |app, _| app.copied_metadata.is_none()));
-        assert!(notifications.read_with(cx, |list, _| list.notifications().is_empty()));
+        assert!(visual.update(|window, cx| window.notifications(cx).is_empty()));
         for (id, expected) in [
             ("copy-session-id", "title-wrap".to_owned()),
             (
@@ -5635,7 +5630,7 @@ mod tests {
             );
             assert_eq!(visual.debug_bounds(id).unwrap().size, button.size);
             assert_eq!(
-                notifications.read_with(cx, |list, _| list.notifications().len()),
+                visual.update(|window, cx| window.notifications(cx).len()),
                 1
             );
         }
