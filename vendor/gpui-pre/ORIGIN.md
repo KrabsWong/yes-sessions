@@ -1,7 +1,7 @@
 # Origin and local patch
 
-Source: crates.io `gpui-pre` 0.3.3, corresponding to Zed revision
-`5b055fa789a8b8d38ac951a6e0cde272f66b4495`. The original Apache-2.0 license is
+Source: crates.io `gpui-pre` 0.3.9, corresponding to Zed revision
+`93d745668805029476e6d7fbb19652116fed51de`. The original Apache-2.0 license is
 preserved in `LICENSE-APACHE`. Examples and their large assets are omitted;
 example targets are removed from the normalized package manifest.
 

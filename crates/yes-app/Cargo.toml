@@ -27,7 +27,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [dev-dependencies]
 gpui-kit = { workspace = true, features = ["test-support"] }
-gpui-platform = { package = "gpui-pre-platform", version = "=0.3.3", features = ["test-support"] }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.9", features = ["test-support"] }
 
 [[bin]]
 name = "yes-sessions"
