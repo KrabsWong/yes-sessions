@@ -29,7 +29,7 @@ use gpui_kit::*;
 use yes_core::mermaid::{ContentSegment, split_mermaid_blocks};
 use yes_core::{
     AppSettings, AppType, ChatLayout, Language, PreferredTerminal, ProviderRegistry, Session,
-    SessionDetail, SettingsStore, ThemePreference,
+    SessionDetail, SessionProvider, SettingsStore, ThemePreference,
     terminal::{TerminalInfo, resume_session, terminal_info},
 };
 
@@ -407,6 +407,7 @@ use crate::{
     i18n::tr,
     mermaid::{MermaidDiagram, create_mermaid_diagram},
     preview::WorkspacePreview,
+    session_export,
 };
 
 // Keep the virtual list itself, including the offset within a message, while visiting children.
@@ -2902,6 +2903,60 @@ impl YesSessions {
             }))
     }
 
+    fn export_session(
+        &mut self,
+        detail: Arc<SessionDetail>,
+        sessions: Arc<Vec<Session>>,
+        provider: Arc<dyn SessionProvider>,
+        options: session_export::ExportOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let language = options.language;
+        let initial = detail
+            .session
+            .directory
+            .clone()
+            .filter(|directory| directory.is_dir())
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let receiver = cx.prompt_for_new_path(
+            &initial,
+            Some(&session_export::suggested_file_name(&detail)),
+        );
+        window
+            .spawn(cx, async move |cx| {
+                let path = match receiver.await {
+                    Ok(Ok(Some(path))) => session_export::normalize_destination(&path),
+                    Ok(Ok(None)) => return,
+                    _ => {
+                        let _ = cx.update(|window, cx| {
+                            window.push_notification(
+                                Notification::error(tr(language, "export.saveError")),
+                                cx,
+                            );
+                        });
+                        return;
+                    }
+                };
+                let result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        let bundle = session_export::collect_bundle(detail, sessions, provider)?;
+                        session_export::write_bundle(&path, &bundle, options)
+                    })
+                    .await;
+                let _ = cx.update(|window, cx| {
+                    let notification = if result.is_ok() {
+                        Notification::success(tr(language, "export.saved"))
+                    } else {
+                        Notification::error(tr(language, "export.saveError"))
+                    };
+                    window.push_notification(notification, cx);
+                });
+            })
+            .detach();
+    }
+
     fn render_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let language = self.settings.language;
         if self.loading_detail {
@@ -2945,6 +3000,15 @@ impl YesSessions {
         let resume_app = session.app_type;
         let resume_dir = session.directory.clone();
         let terminal = self.settings.preferred_terminal;
+        let export_detail = detail.clone();
+        let export_sessions = self.sessions.clone();
+        let export_provider = self.registry.get(session.app_type);
+        let export_options = session_export::ExportOptions {
+            language,
+            chat_bubbles: self.settings.chat_layout == ChatLayout::Bubble,
+            show_thinking: self.settings.show_thinking_content,
+            collapse_tools: self.settings.collapse_bash_blocks,
+        };
         let parent_id = session.parent_session_id.clone();
         let agent_type = session.agent_type.clone();
         let title = if session.first_message.is_empty() {
@@ -3171,6 +3235,30 @@ impl YesSessions {
                                     ))
                                 })
                                 .child(div().flex_1())
+                                .when(export_provider.is_some(), |view| {
+                                    view.child(
+                                        Button::new("export-session")
+                                            .ghost()
+                                            .compact()
+                                            .flex_none()
+                                            .size(px(24.))
+                                            .icon(Icon::new(IconName::ExternalLink).size(px(15.)))
+                                            .tooltip(tr(language, "export.button"))
+                                            .accessibility_label(tr(language, "export.button"))
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                if let Some(provider) = export_provider.clone() {
+                                                    this.export_session(
+                                                        export_detail.clone(),
+                                                        export_sessions.clone(),
+                                                        provider,
+                                                        export_options,
+                                                        window,
+                                                        cx,
+                                                    );
+                                                }
+                                            })),
+                                    )
+                                })
                                 .when(
                                     session.kind != yes_core::model::SessionKind::Subagent
                                         && !matches!(

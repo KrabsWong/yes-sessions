@@ -14,6 +14,7 @@ pub mod mermaid;
 pub mod preview;
 mod preview_selection;
 mod preview_syntax;
+mod session_export;
 mod toast;
 mod token_usage;
 pub mod window_state;

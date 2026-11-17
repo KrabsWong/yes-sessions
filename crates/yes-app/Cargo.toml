@@ -11,6 +11,7 @@ base64.workspace = true
 chrono.workspace = true
 gpui-kit.workspace = true
 gpui-wry.workspace = true
+markdown.workspace = true
 raw-window-handle.workspace = true
 rust-embed.workspace = true
 serde_json.workspace = true
