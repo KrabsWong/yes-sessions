@@ -101,6 +101,53 @@ impl ConversationLayout {
     }
 }
 
+pub(crate) fn export_turn_indices(
+    messages: &[SessionMessage],
+    provider: AppType,
+) -> Vec<Vec<usize>> {
+    display_turns(messages, provider)
+        .into_iter()
+        .map(|turn| turn.messages.into_iter().map(|item| item.index).collect())
+        .collect()
+}
+
+pub(crate) fn export_tool_pairs(
+    messages: &[SessionMessage],
+    indices: &[usize],
+) -> Vec<(Option<usize>, Option<usize>)> {
+    let items = indices
+        .iter()
+        .map(|&index| IndexedMessage {
+            index,
+            message: messages[index].clone().into(),
+        })
+        .collect::<Vec<_>>();
+    pair_tool_messages(&items)
+        .into_iter()
+        .map(|pair| {
+            (
+                pair.tool_use.map(|item| item.index),
+                pair.tool_result.map(|item| item.index),
+            )
+        })
+        .collect()
+}
+
+pub(crate) fn export_tool_title(tool_name: &str) -> String {
+    tool_display_name(tool_name)
+}
+
+pub(crate) fn export_tool_summary(
+    tool_name: &str,
+    input: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    tool_summary(tool_name, input)
+}
+
+pub(crate) fn export_tool_output_text(message: &SessionMessage) -> Option<String> {
+    tool_output_text(Some(message))
+}
+
 fn conversation_markdown(
     id: impl Into<ElementId>,
     markdown: impl Into<SharedString>,
