@@ -6,7 +6,7 @@
 
 | 文档 | 内容 |
 | --- | --- |
-| [使用指南](USER_GUIDE.md) | 浏览与跨会话搜索、Token 用量、恢复会话，以及文件和 Git 预览 |
+| [使用指南](USER_GUIDE.md) | 浏览与跨会话搜索、Token 用量、会话导出、恢复会话，以及文件和 Git 预览 |
 | [Homebrew 安装](HOMEBREW_CASK_GUIDE.md) | 安装、更新与卸载 |
 | [安装脚本](INSTALL_SCRIPT.md) | 脚本参数、验证步骤与使用限制 |
 | [数据与隐私](DATA_AND_PRIVACY.md) | 数据来源、存储位置和读取边界 |
