@@ -18,6 +18,7 @@ Yes Sessions brings local history from CodeBuddy CLI, CodeBuddy CN, WorkBuddy, C
 - **Review token usage**: group locally recorded usage by tool, project, and model, and view trends and main-session/subagent breakdowns.
 - **Follow the work**: read Markdown, code, reasoning, tool calls, attachments, and subagent sessions. Expand attached context to inspect environment information and rules added by an IDE.
 - **Inspect code and changes**: browse project files, preview images, and compare staged, unstaged, and untracked Git changes in a side panel.
+- **Export a shareable session**: save the main session and loadable subagent sessions as local static HTML, preserving user requests, AI replies, tool activity, and in-page role filters. Exports follow the current reading settings and omit remote images.
 - **Continue working**: resume supported CLI sessions in Ghostty, Kitty, or Terminal.app.
 - **Read long conversations comfortably**: navigate between questions, keep your reading position as messages arrive, and choose your language, theme, and reading layout.
 

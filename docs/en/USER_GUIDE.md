@@ -23,6 +23,10 @@ Cross-session search reads message bodies in the matching scope, so a large hist
 
 Select Token usage in the title bar to review usage recognized in local history. Filter by tool, project, or model, and view usage trends and main-session/subagent breakdowns. Usage is reported by each source tool; missing fields are not reconstructed, so totals may be incomplete.
 
+## Export a session
+
+Select the export icon in the session detail title bar and choose a destination. Yes Sessions writes a main HTML file plus linked subagent pages in a matching `<name>_subagents` directory. The export follows the current language, reading layout, reasoning visibility, and tool-folding settings. Sub-sessions that cannot be loaded are listed in the report, and remote images are omitted. The files are a static snapshot and do not update with the source session.
+
 ## Resume a session
 
 Use the resume action on a supported CLI session to open your preferred terminal and invoke the original tool. Install the corresponding CLI and complete its login or configuration first. OpenCode 2 sessions use `opencode2`; other OpenCode sessions use `opencode`.
