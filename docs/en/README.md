@@ -10,6 +10,7 @@
 | [Homebrew installation](HOMEBREW_CASK_GUIDE.md) | Installation, updates, and removal |
 | [Installation script](INSTALL_SCRIPT.md) | Options, verification, and limitations |
 | [Data and privacy](DATA_AND_PRIVACY.md) | Sources, storage locations, and access boundaries |
+| [Releases](RELEASES.md) | Main user-facing changes in each version |
 | [FAQ](FAQ.md) | Launch restrictions, missing sessions, search results, and resume problems |
 
 ## Contributing

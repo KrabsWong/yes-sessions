@@ -10,6 +10,7 @@
 | [Homebrew 安装](HOMEBREW_CASK_GUIDE.md) | 安装、更新与卸载 |
 | [安装脚本](INSTALL_SCRIPT.md) | 脚本参数、验证步骤与使用限制 |
 | [数据与隐私](DATA_AND_PRIVACY.md) | 数据来源、存储位置和读取边界 |
+| [版本记录](RELEASES.md) | 各版本的主要用户可见变化 |
 | [常见问题](FAQ.md) | 安装拦截、会话缺失、搜索结果和恢复失败的排查方法 |
 
 ## 参与项目
